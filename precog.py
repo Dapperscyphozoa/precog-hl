@@ -159,7 +159,6 @@ def process_coin(coin, state, equity):
         place_market(coin, sig=='BUY', size)
         state['clusters'][coin] = {'side':new_side,'legs':1,'opened_at':int(time.time())}
 
-def log(f"--- tick complete, scanned {len(COINS)} coins ---")
             funding_check(state):
     for coin in list(state['clusters'].keys()):
         cluster = state['clusters'][coin]
