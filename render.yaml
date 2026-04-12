@@ -1,0 +1,19 @@
+# Add this as a NEW background worker service in your existing Render dashboard
+# Repo: cyber-psycho, Branch: precog-hl
+services:
+  - type: worker
+    name: precog-engine
+    runtime: python
+    plan: standard
+    branch: precog-hl
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 precog.py
+    disk:
+      name: precog-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: HYPERLIQUID_ACCOUNT
+        sync: false
+      - key: HL_PRIVATE_KEY
+        sync: false
