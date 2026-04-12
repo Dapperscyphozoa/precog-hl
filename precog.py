@@ -159,7 +159,8 @@ def process_coin(coin, state, equity):
         place_market(coin, sig=='BUY', size)
         state['clusters'][coin] = {'side':new_side,'legs':1,'opened_at':int(time.time())}
 
-def funding_check(state):
+def log(f"--- tick complete, scanned {len(COINS)} coins ---")
+            funding_check(state):
     for coin in list(state['clusters'].keys()):
         cluster = state['clusters'][coin]
         if not cluster['side']: continue
@@ -184,6 +185,7 @@ def main():
                 try: process_coin(coin, state, equity)
                 except Exception as e: log(f"err {coin}: {e}\n{traceback.format_exc()}")
                 time.sleep(0.5)
+            log(f"--- tick complete, scanned {len(COINS)} coins ---")
             funding_check(state)
             save_state(state)
         except Exception as e: log(f"tick err: {e}\n{traceback.format_exc()}")
