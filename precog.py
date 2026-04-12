@@ -40,9 +40,16 @@ exchange = Exchange(account, constants.MAINNET_API_URL, account_address=WALLET)
 def log(m): print(f"[{datetime.utcnow().isoformat()}] {m}", flush=True)
 
 def load_state():
+    s = {'positions':{}, 'cooldowns':{}}
     try:
-        with open(STATE_PATH) as f: return json.load(f)
-    except: return {'positions':{}, 'cooldowns':{}}
+        with open(STATE_PATH) as f: loaded = json.load(f)
+        if 'positions' in loaded: s['positions'] = loaded['positions']
+        if 'cooldowns' in loaded: s['cooldowns'] = loaded['cooldowns']
+    except: pass
+    return s
+    if 'positions' not in s: s['positions']={}
+    if 'cooldowns' not in s: s['cooldowns']={}
+    return s
 def save_state(s):
     os.makedirs('/var/data', exist_ok=True)
     with open(STATE_PATH,'w') as f: json.dump(s,f)
