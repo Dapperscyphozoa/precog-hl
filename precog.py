@@ -11,16 +11,7 @@ WALLET     = os.environ['HYPERLIQUID_ACCOUNT']
 PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 
-COINS = ['FARTCOIN','kBONK','TRB','POLYX','HYPE','LINK','ARB','OP','ADA','SOL',
-         'AAVE','ETH','INJ','BLUR','DOGE','XRP','BTC','AVAX','BNB']
-
-# Locked Pine slider settings
-SELL = {'sens':5, 'rsi':7, 'wick':1, 'ext':7, 'struct':5, 'vol':1, 'cd':6}
-BUY  = {'sens':1, 'rsi':3, 'wick':4, 'ext':4, 'struct':5, 'vol':1, 'cd':9}
-
-def derive(s):
-    return {
-        'lb':       round(20 + s['ext']*12),
+COINS = ['BTC', 'ETH', 'ATOM', 'DYDX', 'SOL', 'AVAX', 'BNB', 'APE', 'OP', 'LTC', 'ARB', 'DOGE', 'INJ', 'SUI', 'kPEPE', 'CRV', 'LDO', 'LINK', 'STX', 'CFX', 'GMX', 'SNX', 'XRP', 'BCH', 'APT', 'AAVE', 'COMP', 'WLD', 'YGG', 'TRX', 'kSHIB', 'UNI', 'SEI', 'RUNE', 'ZRO', 'DOT', 'BANANA', 'TRB', 'FTT', 'ARK', 'BIGTIME', 'KAS', 'BLUR', 'TIA', 'BSV', 'ADA', 'TON', 'MINA', 'POLYX', 'GAS', 'PENDLE', 'FET', 'NEAR', 'MEME', 'ORDI', 'NEO', 'ZEN', 'FIL', 'PYTH', 'SUSHI', 'IMX', 'kBONK', 'GMT', 'SUPER', 'USTC', 'JUP', 'kLUNC', 'RSR', 'GALA', 'JTO', 'ACE', 'MAV', 'WIF', 'CAKE', 'PEOPLE', 'ENS', 'ETC', 'XAI', 'MANTA', 'UMA', 'ONDO', 'ALT', 'ZETA', 'DYM', 'MAVIA', 'W', 'STRK', 'TAO', 'AR', 'kFLOKI', 'BOME', 'ETHFI', 'ENA', 'MNT', 'TNSR', 'SAGA', 'MERL', 'HBAR', 'POPCAT', 'EIGEN', 'REZ', 'NOT', 'TURBO', 'BRETT', 'IO', 'ZK', 'BLAST', 'MEW', 'RENDER', 'POL', 'CELO', 'HMSTR', 'SCR', 'kNEIRO', 'GOAT', 'MOODENG', 'GRASS', 'PURR', 'PNUT', 'XLM', 'CHILLGUY', 'SAND', 'IOTA', 'ALGO', 'HYPE', 'ME', 'MOVE', 'VIRTUAL', 'PENGU', 'USUAL', 'FARTCOIN', 'AIXBT', 'ZEREBRO', 'BIO', 'GRIFFAIN', 'SPX', 'S', 'MORPHO', 'TRUMP', 'MELANIA', 'ANIME', 'VINE', 'VVV', 'BERA', 'TST', 'LAYER', 'IP', 'KAITO', 'NIL', 'PAXG', 'PROMPT', 'BABY', 'WCT', 'HYPER', 'ZORA', 'INIT', 'DOOD', 'NXPC', 'SOPH', 'RESOLV', 'SYRUP', 'PUMP', 'PROVE', 'YZY', 'XPL', 'WLFI', 'LINEA', 'SKY', 'ASTER', 'AVNT', 'STBL', '0G', 'HEMI', 'APEX', '2Z', 'ZEC']
         'rsi_hi':   60 + s['rsi']*1.5,
         'rsi_lo':   40 - s['rsi']*1.5,
         'wick':     0.05 + s['wick']*0.04,
@@ -31,7 +22,8 @@ def derive(s):
     }
 SP = derive(SELL); BP = derive(BUY)
 
-LEV = 10; RISK_PCT = 0.30; LOOP_SEC = 900
+LEV = 5; RISK_PCT = 0.20; LOOP_SEC = 900
+MAX_POSITIONS = 25; MAX_SAME_SIDE = 18; BTC_VOL_THRESHOLD = 0.03
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -126,8 +118,8 @@ def get_position(coin):
     except: pass
     return None
 
-def calc_size(equity, px):
-    raw = equity * RISK_PCT * LEV / px
+def calc_size(equity, px, risk_mult=1.0):
+    raw = equity * RISK_PCT * risk_mult * LEV / px
     if raw>=100: return round(raw,0)
     if raw>=10:  return round(raw,1)
     if raw>=1:   return round(raw,2)
@@ -154,38 +146,57 @@ def close(coin):
         log(f"CLOSE {coin} {size}@{slip}: {r}")
     except Exception as e: log(f"close err {coin}: {e}")
 
-def process(coin, state, equity):
+def process(coin, state, equity, risk_mult=1.0):
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell',-1000)
     last_b=state['cooldowns'].get(coin+'_buy',-1000)
     sig,bar=signal(candles,last_s,last_b)
     if not sig: return
-    log(f"{coin} SIGNAL: {sig}")
     cur=state['positions'].get(coin)
+    # Position concentration caps
+    open_pos = {k:v for k,v in state['positions'].items() if v}
+    if not cur and len(open_pos) >= MAX_POSITIONS:
+        log(f"{coin} {sig} SKIP (max {MAX_POSITIONS} positions)"); return
+    same_side_count = sum(1 for v in open_pos.values() if v == ('L' if sig=='BUY' else 'S'))
+    if not cur and same_side_count >= MAX_SAME_SIDE:
+        log(f"{coin} {sig} SKIP (side cap {MAX_SAME_SIDE})"); return
+    log(f"{coin} SIGNAL: {sig} (risk_mult={risk_mult})")
     if sig=='SELL':
         state['cooldowns'][coin+'_sell']=bar
         if cur=='L': close(coin)
         if cur!='S':
             px=get_mid(coin); 
-            if px: place(coin, False, calc_size(equity, px)); state['positions'][coin]='S'
+            if px: place(coin, False, calc_size(equity, px, risk_mult)); state['positions'][coin]='S'
     else:
         state['cooldowns'][coin+'_buy']=bar
         if cur=='S': close(coin)
         if cur!='L':
             px=get_mid(coin)
-            if px: place(coin, True, calc_size(equity, px)); state['positions'][coin]='L'
+            if px: place(coin, True, calc_size(equity, px, risk_mult)); state['positions'][coin]='L'
 
 def main():
-    log(f"PreCog Confluence | wallet={WALLET} | coins={len(COINS)} | {LEV}x/{int(RISK_PCT*100)}%")
+    log(f"PreCog v3 | wallet={WALLET} | coins={len(COINS)} | {LEV}x/{int(RISK_PCT*100)}% | max_pos={MAX_POSITIONS} | side_cap={MAX_SAME_SIDE}")
     log(f"SELL params: {SP}")
     log(f"BUY params:  {BP}")
     while True:
         try:
             state=load_state()
             equity=get_balance()
-            log(f"--- tick eq=${equity:.2f} positions={sum(1 for v in state['positions'].values() if v)} ---")
+            # BTC vol throttle check
+            risk_mult = 1.0
+            try:
+                btc_c = fetch('BTC')
+                if len(btc_c) >= 4:
+                    recent_4 = btc_c[-4:]  # last 4 x 15m bars = 1h
+                    hi = max(c[2] for c in recent_4); lo = min(c[3] for c in recent_4)
+                    btc_range = (hi-lo)/lo
+                    if btc_range > BTC_VOL_THRESHOLD:
+                        risk_mult = 0.5
+                        log(f"BTC vol {btc_range*100:.1f}% > threshold — risk halved")
+            except Exception as e: log(f"vol check err: {e}")
+            log(f"--- tick eq=${equity:.2f} positions={sum(1 for v in state['positions'].values() if v)} risk_mult={risk_mult} ---")
             for c in COINS:
-                try: process(c, state, equity)
+                try: process(c, state, equity, risk_mult)
                 except Exception as e: log(f"err {c}: {e}")
                 time.sleep(0.5)
             save_state(state)
