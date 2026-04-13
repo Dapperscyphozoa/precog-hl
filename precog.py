@@ -21,7 +21,7 @@ WALLET     = os.environ['HYPERLIQUID_ACCOUNT']
 PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 
-COINS = ['BTC', 'ETH', 'ATOM', 'DYDX', 'SOL', 'AVAX', 'BNB', 'APE', 'OP', 'LTC', 'ARB', 'DOGE', 'INJ', 'SUI', 'kPEPE', 'CRV', 'LDO', 'LINK', 'STX', 'CFX', 'GMX', 'SNX', 'XRP', 'BCH', 'APT', 'AAVE', 'COMP', 'WLD', 'YGG', 'TRX', 'kSHIB', 'UNI', 'SEI', 'RUNE', 'ZRO', 'DOT', 'BANANA', 'TRB', 'FTT', 'ARK', 'BIGTIME', 'KAS', 'BLUR', 'TIA', 'BSV', 'ADA', 'TON', 'MINA', 'POLYX', 'GAS', 'PENDLE', 'FET', 'NEAR', 'MEME', 'ORDI', 'NEO', 'ZEN', 'FIL', 'PYTH', 'SUSHI', 'IMX', 'kBONK', 'GMT', 'SUPER', 'USTC', 'JUP', 'kLUNC', 'RSR', 'GALA', 'JTO', 'ACE', 'MAV', 'WIF', 'CAKE', 'PEOPLE', 'ENS', 'ETC', 'XAI', 'MANTA', 'UMA', 'ONDO', 'ALT', 'ZETA', 'DYM', 'MAVIA', 'W', 'STRK', 'TAO', 'AR', 'kFLOKI', 'BOME', 'ETHFI', 'ENA', 'MNT', 'TNSR', 'SAGA', 'MERL', 'HBAR', 'POPCAT', 'EIGEN', 'REZ', 'NOT', 'TURBO', 'BRETT', 'IO', 'ZK', 'BLAST', 'MEW', 'RENDER', 'POL', 'CELO', 'HMSTR', 'SCR', 'kNEIRO', 'GOAT', 'MOODENG', 'GRASS', 'PURR', 'PNUT', 'XLM', 'CHILLGUY', 'SAND', 'IOTA', 'ALGO', 'HYPE', 'ME', 'MOVE', 'VIRTUAL', 'PENGU', 'USUAL', 'FARTCOIN', 'AIXBT', 'ZEREBRO', 'BIO', 'GRIFFAIN', 'SPX', 'S', 'MORPHO', 'TRUMP', 'MELANIA', 'ANIME', 'VINE', 'VVV', 'BERA', 'TST', 'LAYER', 'IP', 'KAITO', 'NIL', 'PAXG', 'PROMPT', 'BABY', 'WCT', 'HYPER', 'ZORA', 'INIT', 'DOOD', 'NXPC', 'SOPH', 'RESOLV', 'SYRUP', 'PUMP', 'PROVE', 'YZY', 'XPL', 'WLFI', 'LINEA', 'SKY', 'ASTER', 'AVNT', 'STBL', '0G', 'HEMI', 'APEX', '2Z', 'ZEC']
+COINS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT','LTC','TRX','SUI','ARB','OP','APT','SEI','INJ','TIA','NEAR','ATOM','FIL','ICP','HBAR','IMX','JUP','WLD','ENS','PENDLE','AAVE','UNI','FET','ETC','RUNE','RENDER','ONDO','POL','CRV','LDO','PYTH','BCH','STX','BLUR','MKR','MANTA','ALT','ZETA','WIF','kPEPE','kSHIB','kBONK','ENA','W','STRK','TAO','AR','ETHFI','MNT','POPCAT','EIGEN','MEW','HYPE','XLM','ALGO','ORDI','SAND','TON','JTO','IO','MOVE','VIRTUAL','PENGU','FARTCOIN','TRUMP','BERA','ME','GRASS','LAYER','USUAL','MORPHO']
 
 # === WINNING GRID CONFIG — symmetric BUY/SELL, 5m timeframe ===
 GRID = {'sens':1, 'rsi':3, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
@@ -275,7 +275,7 @@ def main():
                     process(c, state, equity, risk_mult)
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(0.3)  # rate limit
+                time.sleep(0.6)  # rate limit (was hitting 429)
             
             save_state(state)
             log(f"--- tick complete ---")
