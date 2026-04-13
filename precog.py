@@ -41,17 +41,17 @@ SP = derive(GRID)   # SELL params
 BP = derive(GRID)   # BUY params (symmetric)
 
 # === RISK CONFIG with auto-scaledown at $50k ===
-INITIAL_RISK_PCT = 0.30      # 30% until $50k
-SCALED_RISK_PCT  = 0.05      # drop to 5% when equity >= SCALE_DOWN_AT
+INITIAL_RISK_PCT = 0.01      # 1% per position (v5: distributed across 20 concurrent)
+SCALED_RISK_PCT  = 0.001     # 0.1% post-50k (maintain diversification)
 SCALE_DOWN_AT    = 50000     # $50k trigger
 
 LEV = 10                     # 10x leverage (up from 5x — matches backtest model)
 LOOP_SEC = 300               # 5 min loop (5m bar close cadence)
 
 # === POSITION CAPS (safety) ===
-MAX_POSITIONS = 25           # total concurrent
-MAX_SAME_SIDE = 18           # max one side
-MAX_TOTAL_RISK = 0.90        # total locked equity cap (90% of account)
+MAX_POSITIONS = 20           # v5: 20 concurrent = 20% total at 1%/trade
+MAX_SAME_SIDE = 15           # max one side (keeps some directional balance)
+MAX_TOTAL_RISK = 0.25        # 25% cap (1% x 20 = 20%, buffer for rounding)
 BTC_VOL_THRESHOLD = 0.03     # 3% 1h range = halve risk
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
