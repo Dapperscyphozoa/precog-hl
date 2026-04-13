@@ -252,6 +252,26 @@ def main():
         try:
             state = load_state()
             equity = get_balance()
+            # RECONCILE state with actual HL positions — kills phantom entries
+            try:
+                actual = {}
+                for p in info.user_state(WALLET).get('assetPositions', []):
+                    pos = p['position']
+                    sz = float(pos.get('szi', 0))
+                    if sz != 0:
+                        actual[pos['coin']] = 'L' if sz > 0 else 'S'
+                # Drop any state positions not actually open on HL
+                phantom = [k for k in list(state['positions'].keys()) if state['positions'][k] and k not in actual]
+                for k in phantom:
+                    log(f"RECONCILE: clearing phantom {k}")
+                    state['positions'][k] = None
+                # Add any actual positions missing from state
+                for k, v in actual.items():
+                    if state['positions'].get(k) != v:
+                        state['positions'][k] = v
+                        log(f"RECONCILE: tracking existing {k} {v}")
+            except Exception as e:
+                log(f"reconcile err: {e}")
             
             # BTC vol throttle
             risk_mult = 1.0
