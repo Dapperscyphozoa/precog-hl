@@ -12,6 +12,14 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 
 COINS = ['BTC', 'ETH', 'ATOM', 'DYDX', 'SOL', 'AVAX', 'BNB', 'APE', 'OP', 'LTC', 'ARB', 'DOGE', 'INJ', 'SUI', 'kPEPE', 'CRV', 'LDO', 'LINK', 'STX', 'CFX', 'GMX', 'SNX', 'XRP', 'BCH', 'APT', 'AAVE', 'COMP', 'WLD', 'YGG', 'TRX', 'kSHIB', 'UNI', 'SEI', 'RUNE', 'ZRO', 'DOT', 'BANANA', 'TRB', 'FTT', 'ARK', 'BIGTIME', 'KAS', 'BLUR', 'TIA', 'BSV', 'ADA', 'TON', 'MINA', 'POLYX', 'GAS', 'PENDLE', 'FET', 'NEAR', 'MEME', 'ORDI', 'NEO', 'ZEN', 'FIL', 'PYTH', 'SUSHI', 'IMX', 'kBONK', 'GMT', 'SUPER', 'USTC', 'JUP', 'kLUNC', 'RSR', 'GALA', 'JTO', 'ACE', 'MAV', 'WIF', 'CAKE', 'PEOPLE', 'ENS', 'ETC', 'XAI', 'MANTA', 'UMA', 'ONDO', 'ALT', 'ZETA', 'DYM', 'MAVIA', 'W', 'STRK', 'TAO', 'AR', 'kFLOKI', 'BOME', 'ETHFI', 'ENA', 'MNT', 'TNSR', 'SAGA', 'MERL', 'HBAR', 'POPCAT', 'EIGEN', 'REZ', 'NOT', 'TURBO', 'BRETT', 'IO', 'ZK', 'BLAST', 'MEW', 'RENDER', 'POL', 'CELO', 'HMSTR', 'SCR', 'kNEIRO', 'GOAT', 'MOODENG', 'GRASS', 'PURR', 'PNUT', 'XLM', 'CHILLGUY', 'SAND', 'IOTA', 'ALGO', 'HYPE', 'ME', 'MOVE', 'VIRTUAL', 'PENGU', 'USUAL', 'FARTCOIN', 'AIXBT', 'ZEREBRO', 'BIO', 'GRIFFAIN', 'SPX', 'S', 'MORPHO', 'TRUMP', 'MELANIA', 'ANIME', 'VINE', 'VVV', 'BERA', 'TST', 'LAYER', 'IP', 'KAITO', 'NIL', 'PAXG', 'PROMPT', 'BABY', 'WCT', 'HYPER', 'ZORA', 'INIT', 'DOOD', 'NXPC', 'SOPH', 'RESOLV', 'SYRUP', 'PUMP', 'PROVE', 'YZY', 'XPL', 'WLFI', 'LINEA', 'SKY', 'ASTER', 'AVNT', 'STBL', '0G', 'HEMI', 'APEX', '2Z', 'ZEC']
+
+# Pine slider settings (SELL strict, BUY loose)
+SELL = {'sens':5, 'rsi':7, 'wick':1, 'ext':7, 'struct':5, 'vol':1, 'cd':6}
+BUY  = {'sens':1, 'rsi':3, 'wick':4, 'ext':4, 'struct':5, 'vol':1, 'cd':9}
+
+def derive(s):
+    return {
+        'lb':       round(20 + s['ext']*12),
         'rsi_hi':   60 + s['rsi']*1.5,
         'rsi_lo':   40 - s['rsi']*1.5,
         'wick':     0.05 + s['wick']*0.04,
