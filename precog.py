@@ -41,8 +41,8 @@ SP = derive(GRID)   # SELL params
 BP = derive(GRID)   # BUY params (symmetric)
 
 # === RISK CONFIG with auto-scaledown at $50k ===
-INITIAL_RISK_PCT = 0.01      # 1% per position (v5: distributed across 20 concurrent)
-SCALED_RISK_PCT  = 0.001     # 0.1% post-50k (maintain diversification)
+INITIAL_RISK_PCT = 0.03      # 3% per position (20 concurrent = 60% deployed)
+SCALED_RISK_PCT  = 0.005     # 0.5% post-50k (maintain diversification)
 SCALE_DOWN_AT    = 50000     # $50k trigger
 
 LEV = 10                     # 10x leverage (up from 5x — matches backtest model)
@@ -207,12 +207,13 @@ def process(coin, state, equity, risk_mult=1.0):
     
     cur = state['positions'].get(coin)
     open_pos = {k:v for k,v in state['positions'].items() if v}
+    want_side = 'L' if sig=='BUY' else 'S'
     
     # Position cap
     if not cur and len(open_pos) >= MAX_POSITIONS:
         log(f"{coin} {sig} SKIP (max {MAX_POSITIONS} positions)"); return
     # Same-side cap
-    same_side = sum(1 for v in open_pos.values() if v == ('L' if sig=='BUY' else 'S'))
+    same_side = sum(1 for v in open_pos.values() if v == want_side)
     if not cur and same_side >= MAX_SAME_SIDE:
         log(f"{coin} {sig} SKIP (side cap {MAX_SAME_SIDE})"); return
     # Total margin cap
@@ -222,7 +223,7 @@ def process(coin, state, equity, risk_mult=1.0):
     if not cur and (total_locked + proposed) / equity > MAX_TOTAL_RISK:
         log(f"{coin} {sig} SKIP (margin cap: locked={total_locked:.0f} +{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)"); return
     
-    log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
+    log(f"{coin} SIGNAL: {sig} (risk={risk_pct*100:.1f}% mult={risk_mult})")
     
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar
@@ -242,8 +243,8 @@ def process(coin, state, equity, risk_mult=1.0):
                 state['positions'][coin] = 'L'
 
 def main():
-    log(f"PreCog v4 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x lev")
-    log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
+    log(f"PreCog v6 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x lev")
+    log(f"Risk: {INITIAL_RISK_PCT*100:.1f}% → {SCALED_RISK_PCT*100:.2f}% at ${SCALE_DOWN_AT} | 20 concurrent, NO STACKING")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Grid config: {GRID}")
     log(f"Derived: pivot_lb={SP['pivot_lb']} rsi_lo={BP['rsi_lo']} rsi_hi={SP['rsi_hi']} cd={SP['cd']}")
