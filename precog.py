@@ -53,7 +53,7 @@ MAX_POSITIONS = 20           # v5: 20 concurrent = 20% total at 1%/trade
 MAX_SAME_SIDE = 15           # max one side (keeps some directional balance)
 MAX_TOTAL_RISK = 0.65        # v6.1: 20 x 3% = 60% + 5% buffer
 BTC_VOL_THRESHOLD = 0.03     # 3% 1h range = halve risk
-MAX_HOLD_BARS = 6            # v6.2: force close at 6 bars (30min) — matches backtest timeout
+MAX_HOLD_BARS = 9999         # v6.3: time stop effectively DISABLED — live showed winners need to run
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
