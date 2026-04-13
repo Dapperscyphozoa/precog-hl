@@ -53,6 +53,7 @@ MAX_POSITIONS = 20           # v5: 20 concurrent = 20% total at 1%/trade
 MAX_SAME_SIDE = 15           # max one side (keeps some directional balance)
 MAX_TOTAL_RISK = 0.65        # v6.1: 20 x 3% = 60% + 5% buffer
 BTC_VOL_THRESHOLD = 0.03     # 3% 1h range = halve risk
+MAX_HOLD_BARS = 6            # v6.2: force close at 6 bars (30min) — matches backtest timeout
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -70,6 +71,10 @@ def load_state():
         if 'positions' in loaded: s['positions'] = loaded['positions']
         if 'cooldowns' in loaded: s['cooldowns'] = loaded['cooldowns']
     except: pass
+    # Migrate old string-format positions to dict format {side, opened_at}
+    for k,v in list(s['positions'].items()):
+        if isinstance(v, str):
+            s['positions'][k] = {'side': v, 'opened_at': time.time()}
     return s
 
 def save_state(s):
@@ -205,8 +210,9 @@ def process(coin, state, equity, risk_mult=1.0):
     sig, bar = signal(candles, last_s, last_b)
     if not sig: return
     
-    cur = state['positions'].get(coin)
-    open_pos = {k:v for k,v in state['positions'].items() if v}
+    cur_entry = state['positions'].get(coin)
+    cur = cur_entry.get('side') if isinstance(cur_entry, dict) else cur_entry
+    open_pos = {k:(v.get('side') if isinstance(v,dict) else v) for k,v in state['positions'].items() if v}
     want_side = 'L' if sig=='BUY' else 'S'
     
     # Position cap
@@ -227,25 +233,25 @@ def process(coin, state, equity, risk_mult=1.0):
     
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar
-        if cur == 'L': close(coin)
+        if cur == 'L': close(coin); state['positions'][coin] = None
         if cur != 'S':
             px = get_mid(coin)
             if px:
                 place(coin, False, calc_size(equity, px, risk_pct, risk_mult))
-                state['positions'][coin] = 'S'
+                state['positions'][coin] = {'side': 'S', 'opened_at': time.time()}
     else:
         state['cooldowns'][coin+'_buy'] = bar
-        if cur == 'S': close(coin)
+        if cur == 'S': close(coin); state['positions'][coin] = None
         if cur != 'L':
             px = get_mid(coin)
             if px:
                 place(coin, True, calc_size(equity, px, risk_pct, risk_mult))
-                state['positions'][coin] = 'L'
+                state['positions'][coin] = {'side': 'L', 'opened_at': time.time()}
 
 def main():
     log(f"PreCog v6 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x lev")
     log(f"Risk: {INITIAL_RISK_PCT*100:.1f}% → {SCALED_RISK_PCT*100:.2f}% at ${SCALE_DOWN_AT} | 20 concurrent, NO STACKING")
-    log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
+    log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}% hold={MAX_HOLD_BARS}bars")
     log(f"Grid config: {GRID}")
     log(f"Derived: pivot_lb={SP['pivot_lb']} rsi_lo={BP['rsi_lo']} rsi_hi={SP['rsi_hi']} cd={SP['cd']}")
     
@@ -266,10 +272,12 @@ def main():
                 for k in phantom:
                     log(f"RECONCILE: clearing phantom {k}")
                     state['positions'][k] = None
-                # Add any actual positions missing from state
+                # Add/update actual positions (preserve opened_at if already tracked)
                 for k, v in actual.items():
-                    if state['positions'].get(k) != v:
-                        state['positions'][k] = v
+                    existing = state['positions'].get(k)
+                    existing_side = existing.get('side') if isinstance(existing, dict) else existing
+                    if existing_side != v:
+                        state['positions'][k] = {'side': v, 'opened_at': time.time()}
                         log(f"RECONCILE: tracking existing {k} {v}")
             except Exception as e:
                 log(f"reconcile err: {e}")
@@ -290,6 +298,20 @@ def main():
             cur_risk = current_risk_pct(equity)
             scaled_status = "SCALED" if equity >= SCALE_DOWN_AT else "INITIAL"
             log(f"--- tick eq=${equity:.2f} risk={int(cur_risk*100)}%({scaled_status}) mult={risk_mult} positions={sum(1 for v in state['positions'].values() if v)} ---")
+            # TIME STOP: force close any position held beyond MAX_HOLD_BARS (30min on 5m)
+            now = time.time()
+            max_age = MAX_HOLD_BARS * 5 * 60  # 6 bars x 5min = 1800s
+            for coin, entry in list(state['positions'].items()):
+                if not entry or not isinstance(entry, dict): continue
+                age = now - entry.get('opened_at', now)
+                if age > max_age:
+                    log(f"TIME_STOP {coin} {entry['side']} age={age/60:.1f}min > {max_age/60:.0f}min — force closing")
+                    try:
+                        close(coin)
+                        state['positions'][coin] = None
+                    except Exception as e:
+                        log(f"time_stop close err {coin}: {e}")
+                    time.sleep(0.3)
             
             for c in COINS:
                 try:
