@@ -53,7 +53,11 @@ MAX_POSITIONS = 20           # v5: 20 concurrent = 20% total at 1%/trade
 MAX_SAME_SIDE = 15           # max one side (keeps some directional balance)
 MAX_TOTAL_RISK = 0.65        # v6.1: 20 x 3% = 60% + 5% buffer
 BTC_VOL_THRESHOLD = 0.03     # 3% 1h range = halve risk
-MAX_HOLD_BARS = 9999         # v6.3: time stop effectively DISABLED — live showed winners need to run
+# v6.4 FAST rules (no price SL — winners dip before running)
+CUT_NEG_BARS = 12          # 60min: if still negative, cut at market
+CHOP_CUT_BARS = 9          # 45min: if |PnL| < 0.5%, cut at market
+CHOP_BAND = 0.005          # 0.5% price band for chop detection
+HARD_MAX_BARS = 48         # 4h: absolute hold ceiling
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -251,7 +255,7 @@ def process(coin, state, equity, risk_mult=1.0):
 def main():
     log(f"PreCog v6 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x lev")
     log(f"Risk: {INITIAL_RISK_PCT*100:.1f}% → {SCALED_RISK_PCT*100:.2f}% at ${SCALE_DOWN_AT} | 20 concurrent, NO STACKING")
-    log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}% hold={MAX_HOLD_BARS}bars")
+    log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}% | v6.4 rules: neg_cut=1h chop=45min max=4h")
     log(f"Grid config: {GRID}")
     log(f"Derived: pivot_lb={SP['pivot_lb']} rsi_lo={BP['rsi_lo']} rsi_hi={SP['rsi_hi']} cd={SP['cd']}")
     
@@ -298,20 +302,53 @@ def main():
             cur_risk = current_risk_pct(equity)
             scaled_status = "SCALED" if equity >= SCALE_DOWN_AT else "INITIAL"
             log(f"--- tick eq=${equity:.2f} risk={int(cur_risk*100)}%({scaled_status}) mult={risk_mult} positions={sum(1 for v in state['positions'].values() if v)} ---")
-            # TIME STOP: force close any position held beyond MAX_HOLD_BARS (30min on 5m)
+            # v6.4 FAST RULES: check each open position per tick
+            # - HARD MAX (4h): force close
+            # - NEG CUT (1h): if still negative, cut
+            # - CHOP CUT (45min): if |PnL| < 0.5%, cut at breakeven
             now = time.time()
-            max_age = MAX_HOLD_BARS * 5 * 60  # 6 bars x 5min = 1800s
+            hard_max_sec = HARD_MAX_BARS * 5 * 60     # 14400s = 4h
+            neg_cut_sec = CUT_NEG_BARS * 5 * 60       # 3600s = 1h
+            chop_sec = CHOP_CUT_BARS * 5 * 60         # 2700s = 45min
             for coin, entry in list(state['positions'].items()):
                 if not entry or not isinstance(entry, dict): continue
                 age = now - entry.get('opened_at', now)
-                if age > max_age:
-                    log(f"TIME_STOP {coin} {entry['side']} age={age/60:.1f}min > {max_age/60:.0f}min — force closing")
-                    try:
-                        close(coin)
-                        state['positions'][coin] = None
-                    except Exception as e:
-                        log(f"time_stop close err {coin}: {e}")
+                if age < chop_sec: continue  # too young for any rule
+                # Get live PnL
+                try:
+                    pos = get_position(coin)
+                    if not pos: continue
+                    entry_px = float(pos.get('entry', 0))
+                    mid = get_mid(coin)
+                    if not entry_px or not mid: continue
+                    if entry['side'] == 'L':
+                        pnl_pct = (mid - entry_px) / entry_px
+                    else:
+                        pnl_pct = (entry_px - mid) / entry_px
+                except Exception as e:
+                    log(f"pnl check err {coin}: {e}")
+                    continue
+                # HARD MAX
+                if age > hard_max_sec:
+                    log(f"HARD_MAX {coin} {entry['side']} age={age/60:.0f}min pnl={pnl_pct*100:+.2f}% — closing")
+                    try: close(coin); state['positions'][coin] = None
+                    except Exception as e: log(f"close err {coin}: {e}")
                     time.sleep(0.3)
+                    continue
+                # NEG CUT at 1h
+                if age > neg_cut_sec and pnl_pct < 0:
+                    log(f"NEG_CUT {coin} {entry['side']} age={age/60:.0f}min pnl={pnl_pct*100:+.2f}% — closing")
+                    try: close(coin); state['positions'][coin] = None
+                    except Exception as e: log(f"close err {coin}: {e}")
+                    time.sleep(0.3)
+                    continue
+                # CHOP CUT at 45min
+                if age > chop_sec and abs(pnl_pct) < CHOP_BAND:
+                    log(f"CHOP_CUT {coin} {entry['side']} age={age/60:.0f}min pnl={pnl_pct*100:+.2f}% — closing")
+                    try: close(coin); state['positions'][coin] = None
+                    except Exception as e: log(f"close err {coin}: {e}")
+                    time.sleep(0.3)
+                    continue
             
             for c in COINS:
                 try:
