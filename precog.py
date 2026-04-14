@@ -27,7 +27,7 @@ KILL_FILE  = '/var/data/KILL'
 # Top 105 coins (culled from 176)
 COINS = ['VVV','FARTCOIN','ZEC','XPL','ENA','TAO','WLD','kPEPE','AAVE','HYPE','DOT','ETH','SPX','PUMP','BLUR','MORPHO','FET','PENGU','VIRTUAL','NEAR','kBONK','ZRO','SOL','AVAX','WLFI','ARB','SUI','ALGO','RENDER','BTC','LINK','UNI','CRV','APT','ADA','TON','DOGE','XRP','TRUMP','TST']
 
-GRID = {'sens':1, 'rsi':3, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
+GRID = {'sens':1, 'rsi':9, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
 
 def derive(s):
     return {
