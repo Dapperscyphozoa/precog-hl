@@ -41,8 +41,8 @@ SP = derive(GRID)   # SELL params
 BP = derive(GRID)   # BUY params (symmetric)
 
 # === RISK CONFIG with auto-scaledown at $50k ===
-INITIAL_RISK_PCT = 0.03      # 3% per position (20 concurrent = 60% deployed)
-SCALED_RISK_PCT  = 0.005     # 0.5% post-50k (maintain diversification)
+INITIAL_RISK_PCT = 0.05      # v7: 5% per position (was 3%)
+SCALED_RISK_PCT  = 0.005     # 0.5% post-50k
 SCALE_DOWN_AT    = 50000     # $50k trigger
 
 LEV = 10                     # 10x leverage (up from 5x — matches backtest model)
@@ -51,13 +51,8 @@ LOOP_SEC = 300               # 5 min loop (5m bar close cadence)
 # === POSITION CAPS (safety) ===
 MAX_POSITIONS = 20           # v5: 20 concurrent = 20% total at 1%/trade
 MAX_SAME_SIDE = 15           # max one side (keeps some directional balance)
-MAX_TOTAL_RISK = 0.65        # v6.1: 20 x 3% = 60% + 5% buffer
+MAX_TOTAL_RISK = 0.95        # v7: 20 × 5% = 100% theoretical, cap at 95% for buffer
 BTC_VOL_THRESHOLD = 0.03     # 3% 1h range = halve risk
-# v6.4 FAST rules (no price SL — winners dip before running)
-CUT_NEG_BARS = 12          # 60min: if still negative, cut at market
-CHOP_CUT_BARS = 9          # 45min: if |PnL| < 0.5%, cut at market
-CHOP_BAND = 0.005          # 0.5% price band for chop detection
-HARD_MAX_BARS = 48         # 4h: absolute hold ceiling
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -75,10 +70,6 @@ def load_state():
         if 'positions' in loaded: s['positions'] = loaded['positions']
         if 'cooldowns' in loaded: s['cooldowns'] = loaded['cooldowns']
     except: pass
-    # Migrate old string-format positions to dict format {side, opened_at}
-    for k,v in list(s['positions'].items()):
-        if isinstance(v, str):
-            s['positions'][k] = {'side': v, 'opened_at': time.time()}
     return s
 
 def save_state(s):
@@ -214,9 +205,8 @@ def process(coin, state, equity, risk_mult=1.0):
     sig, bar = signal(candles, last_s, last_b)
     if not sig: return
     
-    cur_entry = state['positions'].get(coin)
-    cur = cur_entry.get('side') if isinstance(cur_entry, dict) else cur_entry
-    open_pos = {k:(v.get('side') if isinstance(v,dict) else v) for k,v in state['positions'].items() if v}
+    cur = state['positions'].get(coin)
+    open_pos = {k:v for k,v in state['positions'].items() if v}
     want_side = 'L' if sig=='BUY' else 'S'
     
     # Position cap
@@ -237,25 +227,25 @@ def process(coin, state, equity, risk_mult=1.0):
     
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar
-        if cur == 'L': close(coin); state['positions'][coin] = None
+        if cur == 'L': close(coin)
         if cur != 'S':
             px = get_mid(coin)
             if px:
                 place(coin, False, calc_size(equity, px, risk_pct, risk_mult))
-                state['positions'][coin] = {'side': 'S', 'opened_at': time.time()}
+                state['positions'][coin] = 'S'
     else:
         state['cooldowns'][coin+'_buy'] = bar
-        if cur == 'S': close(coin); state['positions'][coin] = None
+        if cur == 'S': close(coin)
         if cur != 'L':
             px = get_mid(coin)
             if px:
                 place(coin, True, calc_size(equity, px, risk_pct, risk_mult))
-                state['positions'][coin] = {'side': 'L', 'opened_at': time.time()}
+                state['positions'][coin] = 'L'
 
 def main():
     log(f"PreCog v6 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x lev")
     log(f"Risk: {INITIAL_RISK_PCT*100:.1f}% → {SCALED_RISK_PCT*100:.2f}% at ${SCALE_DOWN_AT} | 20 concurrent, NO STACKING")
-    log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}% | v6.4 rules: neg_cut=1h chop=45min max=4h")
+    log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Grid config: {GRID}")
     log(f"Derived: pivot_lb={SP['pivot_lb']} rsi_lo={BP['rsi_lo']} rsi_hi={SP['rsi_hi']} cd={SP['cd']}")
     
@@ -276,12 +266,10 @@ def main():
                 for k in phantom:
                     log(f"RECONCILE: clearing phantom {k}")
                     state['positions'][k] = None
-                # Add/update actual positions (preserve opened_at if already tracked)
+                # Add any actual positions missing from state
                 for k, v in actual.items():
-                    existing = state['positions'].get(k)
-                    existing_side = existing.get('side') if isinstance(existing, dict) else existing
-                    if existing_side != v:
-                        state['positions'][k] = {'side': v, 'opened_at': time.time()}
+                    if state['positions'].get(k) != v:
+                        state['positions'][k] = v
                         log(f"RECONCILE: tracking existing {k} {v}")
             except Exception as e:
                 log(f"reconcile err: {e}")
@@ -302,53 +290,6 @@ def main():
             cur_risk = current_risk_pct(equity)
             scaled_status = "SCALED" if equity >= SCALE_DOWN_AT else "INITIAL"
             log(f"--- tick eq=${equity:.2f} risk={int(cur_risk*100)}%({scaled_status}) mult={risk_mult} positions={sum(1 for v in state['positions'].values() if v)} ---")
-            # v6.4 FAST RULES: check each open position per tick
-            # - HARD MAX (4h): force close
-            # - NEG CUT (1h): if still negative, cut
-            # - CHOP CUT (45min): if |PnL| < 0.5%, cut at breakeven
-            now = time.time()
-            hard_max_sec = HARD_MAX_BARS * 5 * 60     # 14400s = 4h
-            neg_cut_sec = CUT_NEG_BARS * 5 * 60       # 3600s = 1h
-            chop_sec = CHOP_CUT_BARS * 5 * 60         # 2700s = 45min
-            for coin, entry in list(state['positions'].items()):
-                if not entry or not isinstance(entry, dict): continue
-                age = now - entry.get('opened_at', now)
-                if age < chop_sec: continue  # too young for any rule
-                # Get live PnL
-                try:
-                    pos = get_position(coin)
-                    if not pos: continue
-                    entry_px = float(pos.get('entry', 0))
-                    mid = get_mid(coin)
-                    if not entry_px or not mid: continue
-                    if entry['side'] == 'L':
-                        pnl_pct = (mid - entry_px) / entry_px
-                    else:
-                        pnl_pct = (entry_px - mid) / entry_px
-                except Exception as e:
-                    log(f"pnl check err {coin}: {e}")
-                    continue
-                # HARD MAX
-                if age > hard_max_sec:
-                    log(f"HARD_MAX {coin} {entry['side']} age={age/60:.0f}min pnl={pnl_pct*100:+.2f}% — closing")
-                    try: close(coin); state['positions'][coin] = None
-                    except Exception as e: log(f"close err {coin}: {e}")
-                    time.sleep(0.3)
-                    continue
-                # NEG CUT at 1h
-                if age > neg_cut_sec and pnl_pct < 0:
-                    log(f"NEG_CUT {coin} {entry['side']} age={age/60:.0f}min pnl={pnl_pct*100:+.2f}% — closing")
-                    try: close(coin); state['positions'][coin] = None
-                    except Exception as e: log(f"close err {coin}: {e}")
-                    time.sleep(0.3)
-                    continue
-                # CHOP CUT at 45min
-                if age > chop_sec and abs(pnl_pct) < CHOP_BAND:
-                    log(f"CHOP_CUT {coin} {entry['side']} age={age/60:.0f}min pnl={pnl_pct*100:+.2f}% — closing")
-                    try: close(coin); state['positions'][coin] = None
-                    except Exception as e: log(f"close err {coin}: {e}")
-                    time.sleep(0.3)
-                    continue
             
             for c in COINS:
                 try:
