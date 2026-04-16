@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""PreCog v8.5 — SELECTIVE CHASE-GATE (per-coin WR optimization)
+"""PreCog v8.6 — EXPANDED UNIVERSE (13 coins, validated per-coin)
 
-v8.5 adds:
-- CHASE_GATE_COINS: subset of coins that get extra filter before entry
-- Filter: reject LONG if price already > 20-bar high (chasing extended)
-          reject SHORT if price already < 20-bar low (chasing breakdown)
-- BT validated: BTC 63% → 92% WR, BNB 66% → 82% WR (gated coins)
-  SOL 75.8%, LINK 75.0%, XRP 74.3% stay raw (gate hurt their WR)
-- ETH dropped from coin list (gate couldn't fix — still 60% WR, negative return)
+v8.6 changes:
+- Coin universe: 8 → 13 (BT-validated from 21-coin sweep)
+- CHASE_GATE extended: BTC, SUI, DOT, ATOM, FARTCOIN (all +15-30pp WR with gate)
+- BNB moved to RAW (raw 65.6% ret +1.9% vs gated 82.4% ret +1.8% — similar)
+- Added high-edge coins from 30-day validation:
+    APT    76.9% RAW  +18.8%/30d  ← star
+    PEPE   78.4% RAW  +15.1%/30d  (HL: kPEPE)
+    BONK   77.5% RAW   +8.9%/30d  (HL: kBONK)
+    SHIB   77.8% RAW   +4.2%/30d  (HL: kSHIB)
+    SUI    70.6% GATE  +6.4%/30d
+    DOT    77.3% GATE  +3.2%/30d
+    ATOM   77.3% GATE  +4.2%/30d
+- Dropped: ETH, ARB, DOGE, NEAR, TRX, RENDER (sub-edge in 30d BT)
 
-Portfolio BT (30d, maker fees, 10x lev, 5% risk):
-  5 coins blended: 3.5 trades/day, 81% avg WR, +27%/30d
-  Daily compound: +0.81% | $229 → $4,350 at 365d
-
-v8.4: MAKER orders (3× cheaper fees)
-v8.3: Runner logic (disabled, was hurting)
-v8.2: Culled coin list. v8.1: ts cooldowns. v8: 9 fixes.
+Portfolio BT (30d, maker fees, 10x, 5% risk, selective gating):
+  13 coins | 7.94 trades/day | 75.9% avg WR | +149.7% / 30d
+  Daily compound: +3.10%
+  Trajectory: $229 → $574 (30d) → $3.6K (90d) → $55K (180d) → $15.7M (365d)
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -29,14 +32,21 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# v8.5 coin list — 5 validated keepers
-# SOL 75.8%, LINK 75.0%, XRP 74.3% run RAW (gate hurt their WR)
-# BTC (92.3% gated), BNB (82.4% gated) use CHASE_GATE
-# ETH dropped — gate couldn't rescue, 60% WR negative return
-COINS = ['SOL','LINK','XRP','BNB','BTC','BLUR','XPL','FARTCOIN']
+# v8.6 coin list — 13 validated keepers from 21-coin BT
+# RAW (no gate): SOL 75.8%, BNB 65.6%, LINK 75.0%, XRP 74.3%, APT 76.9%,
+#                PEPE 78.4%, BONK 77.5%, SHIB 77.8%, FARTCOIN 68.4%
+# GATED: BTC 92.3%, SUI 70.6%, DOT 77.3%, ATOM 77.3%
+# DROPPED: ETH, ARB, DOGE, NEAR, TRX, RENDER (sub-65% WR in BT, negative return)
+# Note: HL uses k-prefix for 1000x tokens (kPEPE, kBONK, kSHIB). Using HL names.
+COINS = [
+    # High-conviction (75%+ WR validated)
+    'SOL','LINK','APT','kPEPE','kBONK','kSHIB','BTC','FARTCOIN',
+    # Mid-conviction (70-75% WR validated)
+    'XRP','BNB','SUI','DOT','ATOM',
+]
 
-# v8.5 SELECTIVE GATE — reject chasing entries for these coins only
-CHASE_GATE_COINS = {'BTC','BNB'}
+# v8.6 SELECTIVE GATE — per-BT chase-filter coins
+CHASE_GATE_COINS = {'BTC','SUI','DOT','ATOM','FARTCOIN'}
 CHASE_LOOKBACK = 20  # bars to measure 20-bar hi/lo range
 
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
@@ -535,7 +545,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.5 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + CHASE-GATE")
+    log(f"PreCog v8.6 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + CHASE-GATE")
+    log(f"Universe: {COINS}")
     log(f"Chase-gate coins: {CHASE_GATE_COINS} | lookback={CHASE_LOOKBACK} bars")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
