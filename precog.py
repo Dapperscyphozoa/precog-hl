@@ -29,10 +29,11 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# Top 105 coins (culled from 176)
-COINS = ['VVV','FARTCOIN','ZEC','XPL','ENA','TAO','WLD','kPEPE','AAVE','HYPE','DOT','ETH','SPX','PUMP','BLUR','MORPHO','FET','PENGU','VIRTUAL','NEAR','kBONK','ZRO','SOL','AVAX','WLFI','ARB','SUI','ALGO','RENDER','BTC','LINK','UNI','CRV','APT','ADA','TON','DOGE','XRP','TRUMP','TST']
+# v8.2: Culled from 40 → 8 based on 30d BT. Only coins with positive PnL + >50% WR kept.
+# BT: +20.4% return, 53.4% WR, 26% DD over 30d. Projection: $229→$2,205/yr at current edge.
+COINS = ['BLUR','XPL','FARTCOIN','MORPHO','SPX','WLFI','ETH','TAO']
 
-GRID = {'sens':1, 'rsi':9, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
+GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
 
 def derive(s):
     return {
@@ -361,7 +362,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.1 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
+    log(f"PreCog v8.2 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Safety: max_hold={MAX_HOLD_SEC/3600:.0f}h | CB={CB_CONSEC_LOSSES} losses→{CB_PAUSE_SEC/60:.0f}min pause")
