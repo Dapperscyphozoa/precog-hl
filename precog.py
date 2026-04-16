@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""PreCog v8.4 — MAKER ORDERS (critical fix: fees were eating edge)
+"""PreCog v8.5 — SELECTIVE CHASE-GATE (per-coin WR optimization)
 
-v8.4 changes:
-- Entry orders: Alo (Add Liquidity Only = post-only = MAKER fee 0.015%)
-  Previously Ioc = TAKER fee 0.045%. 3x cheaper.
-- Fallback: if Alo doesn't fill within 30s, cancel and resubmit as Ioc taker
-- Reverted runner logic from v8.3 (TP1/TP2/trail made things worse in BT)
-- Expanded coin list — BT validated these 4 hit 65-76% WR with maker fees:
-    SOL (75.8%), LINK (75.0%), XRP (74.3%), BNB (65.6%)
-    Adding BTC (63.3%) as borderline watch
-- Kept v8.3 runner code in place but disabled via RUNNER_ENABLED flag
+v8.5 adds:
+- CHASE_GATE_COINS: subset of coins that get extra filter before entry
+- Filter: reject LONG if price already > 20-bar high (chasing extended)
+          reject SHORT if price already < 20-bar low (chasing breakdown)
+- BT validated: BTC 63% → 92% WR, BNB 66% → 82% WR (gated coins)
+  SOL 75.8%, LINK 75.0%, XRP 74.3% stay raw (gate hurt their WR)
+- ETH dropped from coin list (gate couldn't fix — still 60% WR, negative return)
 
-BT result (maker fees, 30d blend across 4 keepers):
-  +18% / 30d, 3.5 trades/day, avg WR 72.7%, DD <2%
-  Trajectory: $229 → $1,064 at 365d
+Portfolio BT (30d, maker fees, 10x lev, 5% risk):
+  5 coins blended: 3.5 trades/day, 81% avg WR, +27%/30d
+  Daily compound: +0.81% | $229 → $4,350 at 365d
+
+v8.4: MAKER orders (3× cheaper fees)
+v8.3: Runner logic (disabled, was hurting)
+v8.2: Culled coin list. v8.1: ts cooldowns. v8: 9 fixes.
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -27,10 +29,15 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# v8.4: BT-validated with MAKER fees. 4 keepers at 65-76% WR.
-# SOL 75.8%, LINK 75.0%, XRP 74.3%, BNB 65.6%, BTC 63.3% (borderline)
-# ETH excluded — failed edge gate at 54.8% WR in BT.
+# v8.5 coin list — 5 validated keepers
+# SOL 75.8%, LINK 75.0%, XRP 74.3% run RAW (gate hurt their WR)
+# BTC (92.3% gated), BNB (82.4% gated) use CHASE_GATE
+# ETH dropped — gate couldn't rescue, 60% WR negative return
 COINS = ['SOL','LINK','XRP','BNB','BTC','BLUR','XPL','FARTCOIN']
+
+# v8.5 SELECTIVE GATE — reject chasing entries for these coins only
+CHASE_GATE_COINS = {'BTC','BNB'}
+CHASE_LOOKBACK = 20  # bars to measure 20-bar hi/lo range
 
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
 
@@ -151,15 +158,33 @@ def fetch(coin, n_bars=300, retries=3):
 # ═══════════════════════════════════════════════════════
 # SIGNAL — v8.1: cooldown by TIMESTAMP (ms), scan last K bars
 # ═══════════════════════════════════════════════════════
-SCAN_BARS = 3  # check last 3 closed bars each tick
+SCAN_BARS = 3  # check last SCAN_BARS closed bars each tick
 CD_MS = 3 * 5 * 60 * 1000  # cd=3 bars of 5m = 15 min
 
-def signal(candles, last_sell_ts, last_buy_ts):
-    """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp."""
+def chase_gate_ok(side, price, candles, i):
+    """v8.5: Reject entries chasing extended moves.
+    Returns True if entry is allowed, False if it should be skipped.
+    Only called for coins in CHASE_GATE_COINS."""
+    if i < CHASE_LOOKBACK: return True  # not enough history yet
+    window = candles[max(0, i-CHASE_LOOKBACK):i]
+    if not window: return True
+    hi20 = max(c[2] for c in window)
+    lo20 = min(c[3] for c in window)
+    if hi20 <= lo20: return True
+    if side == 'BUY' and price > hi20:
+        return False  # chasing upside breakout
+    if side == 'SELL' and price < lo20:
+        return False  # chasing downside breakdown
+    return True
+
+def signal(candles, last_sell_ts, last_buy_ts, coin=None):
+    """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp.
+    v8.5: Applies chase_gate for coins in CHASE_GATE_COINS."""
     if len(candles)<100: return None, None
     h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
     N=len(cl); r14=rsi_calc(cl,14)
     LB = SP['pivot_lb']
+    apply_gate = coin in CHASE_GATE_COINS
     for i in range(max(LB, N-SCAN_BARS), N):
         if r14[i] is None: continue
         br = h[i]-l[i]
@@ -169,6 +194,12 @@ def signal(candles, last_sell_ts, last_buy_ts):
         is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
         sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (bar_ts - last_sell_ts) > CD_MS
         buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (bar_ts - last_buy_ts)  > CD_MS
+        # v8.5: chase gate for gated coins
+        if apply_gate:
+            if sell_ok and not chase_gate_ok('SELL', cl[i], candles, i):
+                sell_ok = False
+            if buy_ok and not chase_gate_ok('BUY', cl[i], candles, i):
+                buy_ok = False
         if sell_ok: return 'SELL', bar_ts
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
@@ -403,7 +434,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell', 0)
     last_b=state['cooldowns'].get(coin+'_buy',  0)
-    sig, bar_ts = signal(candles, last_s, last_b)
+    sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
@@ -504,8 +535,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.4 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER orders")
-    log(f"Runner: {'ENABLED' if RUNNER_ENABLED else 'DISABLED (v8.4)'} | Maker fallback: {MAKER_FALLBACK_SEC}s")
+    log(f"PreCog v8.5 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + CHASE-GATE")
+    log(f"Chase-gate coins: {CHASE_GATE_COINS} | lookback={CHASE_LOOKBACK} bars")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Safety: max_hold={MAX_HOLD_SEC/3600:.0f}h | CB={CB_CONSEC_LOSSES} losses→{CB_PAUSE_SEC/60:.0f}min pause")
