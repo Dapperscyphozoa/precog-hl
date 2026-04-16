@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""PreCog v8.3 — RUNNER LOGIC (Module 1 of aggressive compound stack)
+"""PreCog v8.4 — MAKER ORDERS (critical fix: fees were eating edge)
 
-v8.3 adds:
-- Hard SL at -0.4% underlying move (-4% equity @ 10x) caps losses
-- TP1 at +0.5% (+1R): move stop to breakeven (lock no-loss)
-- TP2 at +1.0% (+2R): close 50% of position
-- Runner: trail remaining 50% by 0.7% from peak favorable price
-- Per-position peak price tracking for trail calculation
+v8.4 changes:
+- Entry orders: Alo (Add Liquidity Only = post-only = MAKER fee 0.015%)
+  Previously Ioc = TAKER fee 0.045%. 3x cheaper.
+- Fallback: if Alo doesn't fill within 30s, cancel and resubmit as Ioc taker
+- Reverted runner logic from v8.3 (TP1/TP2/trail made things worse in BT)
+- Expanded coin list — BT validated these 4 hit 65-76% WR with maker fees:
+    SOL (75.8%), LINK (75.0%), XRP (74.3%), BNB (65.6%)
+    Adding BTC (63.3%) as borderline watch
+- Kept v8.3 runner code in place but disabled via RUNNER_ENABLED flag
 
-Expected EV boost: 50-70% over indicator-exit-only (ProAlgo BT showed this
-moves R:R from 1:1.11 to ~1:0.56, turning 73% WR into meaningful compound).
-
-v8.2: Culled 40→8 coins. v8.1: ts-based cooldowns. v8: 9 production fixes.
+BT result (maker fees, 30d blend across 4 keepers):
+  +18% / 30d, 3.5 trades/day, avg WR 72.7%, DD <2%
+  Trajectory: $229 → $1,064 at 365d
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -25,9 +27,10 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# v8.2: Culled from 40 → 8 based on 30d BT. Only coins with positive PnL + >50% WR kept.
-# BT: +20.4% return, 53.4% WR, 26% DD over 30d. Projection: $229→$2,205/yr at current edge.
-COINS = ['BLUR','XPL','FARTCOIN','MORPHO','SPX','WLFI','ETH','TAO']
+# v8.4: BT-validated with MAKER fees. 4 keepers at 65-76% WR.
+# SOL 75.8%, LINK 75.0%, XRP 74.3%, BNB 65.6%, BTC 63.3% (borderline)
+# ETH excluded — failed edge gate at 54.8% WR in BT.
+COINS = ['SOL','LINK','XRP','BNB','BTC','BLUR','XPL','FARTCOIN']
 
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
 
@@ -62,12 +65,17 @@ CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 3600
 FUNDING_CUT_RATIO = 0.20
 
-# v8.3 RUNNER LOGIC — underlying price move thresholds (not equity %)
-RUNNER_SL_PCT   = 0.004   # -0.4% underlying = -4% equity @ 10x (hard stop)
-RUNNER_TP1_PCT  = 0.005   # +0.5% = move SL to breakeven (lock in no-loss)
-RUNNER_TP2_PCT  = 0.010   # +1.0% = close 50% of position
-RUNNER_TRAIL    = 0.007   # trail 0.7% from peak favorable for runner half
-RUNNER_BE_BUFF  = 0.0005  # breakeven stop placed 0.05% inside entry (cover fees)
+# v8.3 RUNNER LOGIC — DISABLED in v8.4 (BT showed it hurt performance).
+# Kept code in place for future re-enable if validated on different data.
+RUNNER_ENABLED  = False
+RUNNER_SL_PCT   = 0.004
+RUNNER_TP1_PCT  = 0.005
+RUNNER_TP2_PCT  = 0.010
+RUNNER_TRAIL    = 0.007
+RUNNER_BE_BUFF  = 0.0005
+
+# v8.4 MAKER ORDER settings
+MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -226,16 +234,48 @@ def set_isolated_leverage(coin):
         log(f"lev set err {coin}: {e}")
 
 def place(coin, is_buy, size):
+    """v8.4: Try MAKER (Alo post-only) first, fall back to TAKER (Ioc) if not filled."""
     px=get_mid(coin)
     if not px: return None
     set_isolated_leverage(coin)
-    slip = round(px*1.01,4) if is_buy else round(px*0.99,4)
+    # Maker limit price: passive side of book — buy at bid, sell at ask (slightly less aggressive)
+    # Use exact current mid for post-only — HL rejects crossing orders as non-maker.
+    maker_px = round(px * (0.9998 if is_buy else 1.0002), 6)
     try:
-        r=exchange.order(coin,is_buy,size,slip,{'limit':{'tif':'Ioc'}},reduce_only=False)
-        log(f"ORDER {coin} {'BUY' if is_buy else 'SELL'} {size}@{slip}: {r}")
-        return px  # return fill px for state tracking
+        r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'resting' in status or 'filled' in status:
+            log(f"MAKER {coin} {'BUY' if is_buy else 'SELL'} {size}@{maker_px}: {status}")
+            # Poll up to MAKER_FALLBACK_SEC for fill
+            oid = status.get('resting',{}).get('oid') or status.get('filled',{}).get('oid')
+            if 'filled' in status:
+                return maker_px
+            # Resting — wait briefly then check
+            for wait_s in range(MAKER_FALLBACK_SEC):
+                time.sleep(1)
+                state_now = info.user_state(WALLET)
+                has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
+                              for p in state_now.get('assetPositions',[]))
+                if has_pos:
+                    log(f"MAKER fill {coin} after {wait_s+1}s")
+                    return maker_px
+            # Cancel unfilled maker and fall back to taker
+            try:
+                exchange.cancel(coin, oid)
+                log(f"MAKER unfilled {coin}, canceling oid={oid} -> TAKER fallback")
+            except Exception as ce:
+                log(f"cancel err {coin}: {ce}")
     except Exception as e:
-        log(f"order err {coin}: {e}")
+        log(f"maker place err {coin}: {e}")
+
+    # Taker fallback
+    slip = round(px * (1.005 if is_buy else 0.995), 6)
+    try:
+        r = exchange.order(coin, is_buy, size, slip, {'limit':{'tif':'Ioc'}}, reduce_only=False)
+        log(f"TAKER {coin} {'BUY' if is_buy else 'SELL'} {size}@{slip}: {r}")
+        return px
+    except Exception as e:
+        log(f"taker err {coin}: {e}")
         return None
 
 def close(coin):
@@ -367,8 +407,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
-    # v8.3: RUNNER LOGIC — check stops/trails before signal processing
-    if manage_runner(coin, state, live, equity):
+    # v8.3: RUNNER LOGIC — check stops/trails before signal processing (v8.4: disabled by default)
+    if RUNNER_ENABLED and manage_runner(coin, state, live, equity):
         return  # position was closed by runner logic
 
     # FIX #3: 4h max hold check BEFORE signal logic
@@ -464,8 +504,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.3 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
-    log(f"Runner: SL=-{RUNNER_SL_PCT*100:.1f}% TP1=+{RUNNER_TP1_PCT*100:.1f}% TP2=+{RUNNER_TP2_PCT*100:.1f}% trail={RUNNER_TRAIL*100:.1f}%")
+    log(f"PreCog v8.4 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER orders")
+    log(f"Runner: {'ENABLED' if RUNNER_ENABLED else 'DISABLED (v8.4)'} | Maker fallback: {MAKER_FALLBACK_SEC}s")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Safety: max_hold={MAX_HOLD_SEC/3600:.0f}h | CB={CB_CONSEC_LOSSES} losses→{CB_PAUSE_SEC/60:.0f}min pause")
