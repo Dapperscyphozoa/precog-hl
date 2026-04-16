@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
-"""PreCog v8.1 — cooldown bug fix
+"""PreCog v8.3 — RUNNER LOGIC (Module 1 of aggressive compound stack)
 
-v8.1 FIXES:
-- Cooldown tracked by bar TIMESTAMP (ms) not array index (index was reset every tick, blocking all signals after first fire)
-- Scan last 3 closed bars per tick (catch signals that fire between 5min ticks)
-- Backoff jitter on candle fetch (avoid HL 429 rate limit)
+v8.3 adds:
+- Hard SL at -0.4% underlying move (-4% equity @ 10x) caps losses
+- TP1 at +0.5% (+1R): move stop to breakeven (lock no-loss)
+- TP2 at +1.0% (+2R): close 50% of position
+- Runner: trail remaining 50% by 0.7% from peak favorable price
+- Per-position peak price tracking for trail calculation
 
-FIXES FROM v7 (per user spec):
-1. ISOLATED margin only (no cross)
-2. Pure live pivot detection (no lookahead)
-3. 4h max hold per position (kills zombies, p99=4.1h measured)
-4. State: atomic write + reconcile with HL every tick
-5. Circuit breaker: 5 consecutive losses = 1h pause
-6. Funding filter: cut if funding*fees / profit > 1/5
-7. Ticker cull: top 105 coins by volume*ATR*signal_productivity
-8. Kill switch: file /var/data/KILL flattens & exits
-9. PnL logged on every close with pct return
+Expected EV boost: 50-70% over indicator-exit-only (ProAlgo BT showed this
+moves R:R from 1:1.11 to ~1:0.56, turning 73% WR into meaningful compound).
+
+v8.2: Culled 40→8 coins. v8.1: ts-based cooldowns. v8: 9 production fixes.
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -65,6 +61,13 @@ MAX_HOLD_SEC = 4 * 3600
 CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 3600
 FUNDING_CUT_RATIO = 0.20
+
+# v8.3 RUNNER LOGIC — underlying price move thresholds (not equity %)
+RUNNER_SL_PCT   = 0.004   # -0.4% underlying = -4% equity @ 10x (hard stop)
+RUNNER_TP1_PCT  = 0.005   # +0.5% = move SL to breakeven (lock in no-loss)
+RUNNER_TP2_PCT  = 0.010   # +1.0% = close 50% of position
+RUNNER_TRAIL    = 0.007   # trail 0.7% from peak favorable for runner half
+RUNNER_BE_BUFF  = 0.0005  # breakeven stop placed 0.05% inside entry (cover fees)
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -263,6 +266,99 @@ def flatten_all(reason='KILL'):
 # ═══════════════════════════════════════════════════════
 # PROCESS — one coin per tick
 # ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════
+# v8.3 RUNNER MANAGEMENT — called BEFORE signal check each tick
+# ═══════════════════════════════════════════════════════
+def manage_runner(coin, state, live, equity):
+    """Returns True if position was closed (signal processing should skip).
+    Manages: hard SL, breakeven stop, TP1 partial, TP2 trail.
+
+    Stages per position:
+      'initial'    — fresh entry, hard SL active
+      'breakeven'  — +1R hit, SL moved to entry+buffer
+      'tp1_taken'  — +2R hit, half closed, remainder trailing
+    """
+    cur = state['positions'].get(coin)
+    if not cur or not live: return False
+
+    entry = cur.get('entry', live['entry'])
+    side  = cur.get('side')  # 'L' or 'S'
+    stage = cur.get('stage', 'initial')
+    peak  = cur.get('peak', entry)  # peak favorable price
+    mark  = live.get('mark', get_mid(coin))
+    if not mark: return False
+
+    # Compute favorable/adverse % move from entry
+    if side == 'L':
+        fav = (mark - entry) / entry
+        # update peak (highest mark for long)
+        if mark > peak: cur['peak'] = mark; peak = mark
+        trail_trigger = peak * (1 - RUNNER_TRAIL)
+        be_stop = entry * (1 + RUNNER_BE_BUFF)
+    else:  # 'S'
+        fav = (entry - mark) / entry
+        if mark < peak or peak == entry: cur['peak'] = mark; peak = mark
+        trail_trigger = peak * (1 + RUNNER_TRAIL)
+        be_stop = entry * (1 - RUNNER_BE_BUFF)
+
+    # STAGE TRANSITIONS
+    if stage == 'initial' and fav >= RUNNER_TP1_PCT:
+        cur['stage'] = 'breakeven'
+        log(f"{coin} TP1 hit ({fav*100:+.2f}%) — stage=breakeven, SL@{be_stop:.4f}")
+        stage = 'breakeven'
+
+    if stage == 'breakeven' and fav >= RUNNER_TP2_PCT:
+        # Close 50% of position
+        size = abs(live['size']) * 0.5
+        is_buy_close = (side == 'S')  # opposite direction to close
+        slip_px = round(mark * (1.005 if is_buy_close else 0.995), 6)
+        try:
+            exchange.order(coin, is_buy_close, size, slip_px,
+                          {'limit':{'tif':'Ioc'}}, reduce_only=True)
+            log(f"{coin} TP2 hit ({fav*100:+.2f}%) — closed 50% ({size}), runner active")
+            cur['stage'] = 'tp1_taken'
+            stage = 'tp1_taken'
+        except Exception as e:
+            log(f"{coin} TP2 close err: {e}")
+
+    # EXIT CHECKS (in order of priority)
+    exit_reason = None; exit_px_target = None
+
+    # 1. Hard SL (only in 'initial' stage)
+    if stage == 'initial':
+        if side == 'L' and mark <= entry * (1 - RUNNER_SL_PCT):
+            exit_reason = 'SL'; exit_px_target = mark
+        elif side == 'S' and mark >= entry * (1 + RUNNER_SL_PCT):
+            exit_reason = 'SL'; exit_px_target = mark
+
+    # 2. Breakeven stop (in 'breakeven' stage — price pulled back to entry+buffer)
+    elif stage == 'breakeven':
+        if side == 'L' and mark <= be_stop:
+            exit_reason = 'BE'; exit_px_target = mark
+        elif side == 'S' and mark >= be_stop:
+            exit_reason = 'BE'; exit_px_target = mark
+
+    # 3. Trail stop (in 'tp1_taken' stage — runner half)
+    elif stage == 'tp1_taken':
+        if side == 'L' and mark <= trail_trigger:
+            exit_reason = 'TRAIL'; exit_px_target = mark
+        elif side == 'S' and mark >= trail_trigger:
+            exit_reason = 'TRAIL'; exit_px_target = mark
+
+    if exit_reason:
+        pnl_pct = close(coin)
+        if pnl_pct is not None:
+            if pnl_pct < 0: state['consec_losses'] += 1
+            else: state['consec_losses'] = 0
+            state['last_pnl_close'] = pnl_pct
+        log(f"{coin} RUNNER EXIT [{exit_reason}] @ {mark:.4f} | stage was {stage} | peak={peak:.4f}")
+        state['positions'].pop(coin, None)
+        return True
+
+    # Save updated peak
+    state['positions'][coin] = cur
+    return False
+
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell', 0)
@@ -270,6 +366,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     sig, bar_ts = signal(candles, last_s, last_b)
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
+
+    # v8.3: RUNNER LOGIC — check stops/trails before signal processing
+    if manage_runner(coin, state, live, equity):
+        return  # position was closed by runner logic
 
     # FIX #3: 4h max hold check BEFORE signal logic
     if cur and cur.get('opened_at'):
@@ -342,7 +442,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if px:
                 fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult))
                 if fill_px:
-                    state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px}
+                    state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
+                                                'stage':'initial', 'peak':fill_px}
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
@@ -356,13 +457,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if px:
                 fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult))
                 if fill_px:
-                    state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px}
+                    state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
+                                                'stage':'initial', 'peak':fill_px}
 
 # ═══════════════════════════════════════════════════════
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.2 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
+    log(f"PreCog v8.3 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
+    log(f"Runner: SL=-{RUNNER_SL_PCT*100:.1f}% TP1=+{RUNNER_TP1_PCT*100:.1f}% TP2=+{RUNNER_TP2_PCT*100:.1f}% trail={RUNNER_TRAIL*100:.1f}%")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Safety: max_hold={MAX_HOLD_SEC/3600:.0f}h | CB={CB_CONSEC_LOSSES} losses→{CB_PAUSE_SEC/60:.0f}min pause")
@@ -411,7 +514,9 @@ def main():
             for k in live_positions:
                 if k not in state['positions']:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
-                    state['positions'][k] = {'side':side, 'opened_at':now, 'entry':live_positions[k]['entry']}
+                    entry_px = live_positions[k]['entry']
+                    state['positions'][k] = {'side':side, 'opened_at':now, 'entry':entry_px,
+                                             'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side}")
 
             # BTC vol throttle
