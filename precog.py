@@ -44,13 +44,9 @@ COINS = [
     'BLUR','VVV','APE','OP','TON',
 ]
 
-# v8.8 SELECTIVE GATE
+# v8.8 SELECTIVE GATE — 14 coins where chase-filter improved WR in BT
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
                     'BLUR','VVV','APE','OP','TON'}
-CHASE_LOOKBACK = 20
-
-# v8.7 SELECTIVE GATE — chase-filter these coins only
-CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO'}
 CHASE_LOOKBACK = 20
 
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
