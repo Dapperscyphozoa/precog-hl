@@ -102,6 +102,35 @@ info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
 exchange = Exchange(account, constants.MAINNET_API_URL, account_address=WALLET)
 
+# v8.8 HL price rounding — cache per-coin szDecimals from meta
+_META_CACHE = None
+def _get_sz_decimals(coin):
+    """Perps: price <= 5 sig figs AND <= (MAX_DECIMALS - szDecimals) decimals. MAX_DECIMALS=6 for perps."""
+    global _META_CACHE
+    if _META_CACHE is None:
+        try:
+            m = info.meta()
+            _META_CACHE = {u['name']: int(u.get('szDecimals',0)) for u in m['universe']}
+        except Exception: _META_CACHE = {}
+    return _META_CACHE.get(coin, 2)
+
+def round_price(coin, px):
+    """HL-compliant price rounding: max 5 sig figs AND max (6 - szDecimals) decimals."""
+    szD = _get_sz_decimals(coin)
+    max_dec = max(0, 6 - szD)
+    # First: 5 significant figures
+    if px > 0:
+        import math
+        sig_scale = 10 ** (5 - int(math.floor(math.log10(abs(px)))) - 1)
+        px_sig = round(px * sig_scale) / sig_scale
+    else: px_sig = px
+    # Then: max_dec decimal places
+    return round(px_sig, max_dec)
+
+def round_size(coin, sz):
+    szD = _get_sz_decimals(coin)
+    return round(sz, szD)
+
 def log(m): print(f"[{datetime.utcnow().isoformat()}] {m}", flush=True)
 
 def current_risk_pct(equity):
@@ -279,32 +308,32 @@ def set_isolated_leverage(coin):
         log(f"lev set err {coin}: {e}")
 
 def place(coin, is_buy, size):
-    """v8.4: Try MAKER (Alo post-only) first, fall back to TAKER (Ioc) if not filled."""
-    px=get_mid(coin)
+    """v8.8: HL-compliant price rounding + proper maker/taker error handling."""
+    px = get_mid(coin)
     if not px: return None
     set_isolated_leverage(coin)
-    # Maker limit price: passive side of book — buy at bid, sell at ask (slightly less aggressive)
-    # Use exact current mid for post-only — HL rejects crossing orders as non-maker.
-    maker_px = round(px * (0.9998 if is_buy else 1.0002), 6)
+    size = round_size(coin, size)
+    if size <= 0:
+        log(f"{coin} size rounded to 0 — skip"); return None
+
+    # MAKER attempt (Alo post-only) at inside-book price
+    maker_px = round_price(coin, px * (0.9998 if is_buy else 1.0002))
     try:
         r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
-        if 'resting' in status or 'filled' in status:
+        if 'error' in status:
+            log(f"MAKER {coin} rejected: {status['error']} @ {maker_px}")
+        elif 'resting' in status or 'filled' in status:
             log(f"MAKER {coin} {'BUY' if is_buy else 'SELL'} {size}@{maker_px}: {status}")
-            # Poll up to MAKER_FALLBACK_SEC for fill
             oid = status.get('resting',{}).get('oid') or status.get('filled',{}).get('oid')
-            if 'filled' in status:
-                return maker_px
-            # Resting — wait briefly then check
+            if 'filled' in status: return maker_px
             for wait_s in range(MAKER_FALLBACK_SEC):
                 time.sleep(1)
                 state_now = info.user_state(WALLET)
                 has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
                               for p in state_now.get('assetPositions',[]))
                 if has_pos:
-                    log(f"MAKER fill {coin} after {wait_s+1}s")
-                    return maker_px
-            # Cancel unfilled maker and fall back to taker
+                    log(f"MAKER fill {coin} after {wait_s+1}s"); return maker_px
             try:
                 exchange.cancel(coin, oid)
                 log(f"MAKER unfilled {coin}, canceling oid={oid} -> TAKER fallback")
@@ -313,15 +342,18 @@ def place(coin, is_buy, size):
     except Exception as e:
         log(f"maker place err {coin}: {e}")
 
-    # Taker fallback
-    slip = round(px * (1.005 if is_buy else 0.995), 6)
+    # TAKER fallback (Ioc) — refresh price in case market moved
+    px = get_mid(coin) or px
+    slip_px = round_price(coin, px * (1.005 if is_buy else 0.995))
     try:
-        r = exchange.order(coin, is_buy, size, slip, {'limit':{'tif':'Ioc'}}, reduce_only=False)
-        log(f"TAKER {coin} {'BUY' if is_buy else 'SELL'} {size}@{slip}: {r}")
+        r = exchange.order(coin, is_buy, size, slip_px, {'limit':{'tif':'Ioc'}}, reduce_only=False)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"TAKER {coin} rejected: {status['error']} @ {slip_px}"); return None
+        log(f"TAKER {coin} {'BUY' if is_buy else 'SELL'} {size}@{slip_px}: {status}")
         return px
     except Exception as e:
-        log(f"taker err {coin}: {e}")
-        return None
+        log(f"taker err {coin}: {e}"); return None
 
 def close(coin):
     """Returns realized pnl_pct for logging (FIX #11)."""
@@ -329,7 +361,8 @@ def close(coin):
     if not live: return None
     is_buy=live['size']<0; size=abs(live['size']); px=get_mid(coin)
     if not px: return None
-    slip=round(px*1.01,4) if is_buy else round(px*0.99,4)
+    size = round_size(coin, size)
+    slip = round_price(coin, px * (1.005 if is_buy else 0.995))
     try:
         r=exchange.order(coin,is_buy,size,slip,{'limit':{'tif':'Ioc'}},reduce_only=True)
         entry = live['entry']
@@ -396,7 +429,8 @@ def manage_runner(coin, state, live, equity):
         # Close 50% of position
         size = abs(live['size']) * 0.5
         is_buy_close = (side == 'S')  # opposite direction to close
-        slip_px = round(mark * (1.005 if is_buy_close else 0.995), 6)
+        slip_px = round_price(coin, mark * (1.005 if is_buy_close else 0.995))
+        size = round_size(coin, size)
         try:
             exchange.order(coin, is_buy_close, size, slip_px,
                           {'limit':{'tif':'Ioc'}}, reduce_only=True)
@@ -549,7 +583,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.7 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + SELECTIVE GATE")
+    log(f"PreCog v8.8 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + SELECTIVE GATE")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
