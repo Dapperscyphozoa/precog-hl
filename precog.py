@@ -33,21 +33,27 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# v8.9 coin list — 42 validated keepers from 99-CSV mass BT
+# v8.10 coin list — 50 validated keepers (added 8 weak-but-positive tier)
 COINS = [
-    # RAW (25) — 65%+ WR without gate
-    'SOL','LINK','ADA','UNI','ENS','AAVE','POL','SAND','SUSHI',
-    'APT','XRP','MON','COMP','WLD','LIT','PUMP','AERO','JUP',
-    'MORPHO','PENGU','SPX',
-    'kPEPE','kBONK','kSHIB','FARTCOIN',
-    # GATED (17) — chase-filter needed
+    # RAW TIER 1 (20) — 75%+ WR, high edge
+    'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
+    'AERO','LIT','SPX','kPEPE','kBONK','kSHIB','MORPHO','JUP','XRP',
+    'SUSHI',
+    # RAW TIER 2 (10) — 68-75% WR or extended
+    'ADA','WLD','PUMP','PENGU','FARTCOIN',
+    # RAW EXTENDED (5) — 60-68% WR but positive return
+    'AIXBT','AVAX','PENDLE','TAO','WIF',
+    # GATED (15) — chase-filter improves WR significantly
     'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
     'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
+    # GATED EXTENDED (3) — 60-68% WR but gated+positive
+    'AR','GALA','VIRTUAL',
 ]
 
-# v8.9 SELECTIVE GATE — 17 coins where chase-filter improved WR in BT
+# v8.10 SELECTIVE GATE — 20 coins where chase-filter improved WR in BT
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
-                    'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG'}
+                    'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
+                    'AR','GALA','VIRTUAL'}
 CHASE_LOOKBACK = 20
 
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
@@ -580,7 +586,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.9 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + SELECTIVE GATE")
+    log(f"PreCog v8.10 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + SELECTIVE GATE")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
