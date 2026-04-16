@@ -98,7 +98,9 @@ RUNNER_TP2_PCT  = 0.010
 RUNNER_TRAIL    = 0.007
 RUNNER_BE_BUFF  = 0.0005
 
-# v8.4 MAKER ORDER settings
+# v8.10 EXIT IMPROVEMENTS — TP + cloud-break exit (doesn't affect entry count)
+TP_PCT = 0.008          # +0.8% underlying = +8% equity @ 10x → lock winner
+CLOUD_EXIT_ENABLED = True  # close if price crosses back through slow EMA (trend over)
 MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
@@ -493,6 +495,52 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if RUNNER_ENABLED and manage_runner(coin, state, live, equity):
         return  # position was closed by runner logic
 
+    # v8.10: TP + CLOUD-BREAK EXIT — improves WR without reducing trade count
+    if cur and live:
+        mark = get_mid(coin)
+        if mark and cur.get('entry'):
+            entry = cur['entry']
+            side = cur['side']
+            fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
+
+            # TP: lock in winners at +0.8% underlying
+            if fav >= TP_PCT:
+                pnl_pct = close(coin)
+                if pnl_pct is not None:
+                    state['consec_losses'] = 0
+                    state['last_pnl_close'] = pnl_pct
+                log(f"{coin} TP EXIT +{fav*100:.2f}% (threshold {TP_PCT*100:.1f}%)")
+                state['positions'].pop(coin, None)
+                return
+
+            # CLOUD BREAK: trend over — price crossed back through slow EMA
+            if CLOUD_EXIT_ENABLED:
+                candles = fetch(coin, retries=1)
+                if candles and len(candles) >= 60:
+                    closes = [c[4] for c in candles]
+                    # Quick EMA50 from last 60 bars
+                    k = 2/51; ema50 = sum(closes[:50])/50
+                    for j in range(50, len(closes)):
+                        ema50 = closes[j]*k + ema50*(1-k)
+                    if side == 'L' and mark < ema50:
+                        pnl_pct = close(coin)
+                        if pnl_pct is not None:
+                            if pnl_pct < 0: state['consec_losses'] += 1
+                            else: state['consec_losses'] = 0
+                            state['last_pnl_close'] = pnl_pct
+                        log(f"{coin} CLOUD EXIT: price {mark:.4f} < ema50 {ema50:.4f}")
+                        state['positions'].pop(coin, None)
+                        return
+                    elif side == 'S' and mark > ema50:
+                        pnl_pct = close(coin)
+                        if pnl_pct is not None:
+                            if pnl_pct < 0: state['consec_losses'] += 1
+                            else: state['consec_losses'] = 0
+                            state['last_pnl_close'] = pnl_pct
+                        log(f"{coin} CLOUD EXIT: price {mark:.4f} > ema50 {ema50:.4f}")
+                        state['positions'].pop(coin, None)
+                        return
+
     # FIX #3: 4h max hold check BEFORE signal logic
     if cur and cur.get('opened_at'):
         age = time.time() - cur['opened_at']
@@ -586,7 +634,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.10 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + SELECTIVE GATE")
+    log(f"PreCog v8.10.1 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | TP+CLOUD EXIT")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
