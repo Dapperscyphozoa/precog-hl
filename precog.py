@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""PreCog v8.6 — EXPANDED UNIVERSE (13 coins, validated per-coin)
+#!/usr/bin/env python3
+"""PreCog v8.7 — MAIN WALLET via agent + 22-COIN UNIVERSE
 
-v8.6 changes:
-- Coin universe: 8 → 13 (BT-validated from 21-coin sweep)
-- CHASE_GATE extended: BTC, SUI, DOT, ATOM, FARTCOIN (all +15-30pp WR with gate)
-- BNB moved to RAW (raw 65.6% ret +1.9% vs gated 82.4% ret +1.8% — similar)
-- Added high-edge coins from 30-day validation:
-    APT    76.9% RAW  +18.8%/30d  ← star
-    PEPE   78.4% RAW  +15.1%/30d  (HL: kPEPE)
-    BONK   77.5% RAW   +8.9%/30d  (HL: kBONK)
-    SHIB   77.8% RAW   +4.2%/30d  (HL: kSHIB)
-    SUI    70.6% GATE  +6.4%/30d
-    DOT    77.3% GATE  +3.2%/30d
-    ATOM   77.3% GATE  +4.2%/30d
-- Dropped: ETH, ARB, DOGE, NEAR, TRX, RENDER (sub-edge in 30d BT)
+v8.7 changes:
+- Trades MAIN wallet (0x3eDaD064...) via approved agent "HL PreCog"
+  (agent address 0xAED87768..., valid 180d)
+- Coin universe expanded: 13 → 22 (validated from 47-CSV mass BT)
+- Added 9 new keepers: UNI, ENS, AAVE, POL, SAND, SUSHI, ADA (RAW);
+                       LDO, INJ, UMA, ALGO (GATED)
 
 Portfolio BT (30d, maker fees, 10x, 5% risk, selective gating):
-  13 coins | 7.94 trades/day | 75.9% avg WR | +149.7% / 30d
-  Daily compound: +3.10%
-  Trajectory: $229 → $574 (30d) → $3.6K (90d) → $55K (180d) → $15.7M (365d)
+  22 coins | 13.3 trades/day | 616 trades/30d | 76.4% avg WR
+  Daily compound: ~5.4%
+  Trajectory: $229 → $1,106 (30d) → $25K (90d) → $2.8M (180d)
+
+Standouts:
+  UNI   81.1% RAW   +12.8%/30d
+  ENS   80.0% RAW   +12.5%/30d
+  LDO   78.9% GATED +11.3%
+  AAVE  74.3% RAW   +11.3%
+  POL   76.9% RAW   +11.1%
+  INJ   76.5% GATED +10.8%
+  SOL   75.8% RAW   +10.0%
+  UMA   76.2% GATED +9.6%
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -32,22 +36,19 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# v8.6 coin list — 13 validated keepers from 21-coin BT
-# RAW (no gate): SOL 75.8%, BNB 65.6%, LINK 75.0%, XRP 74.3%, APT 76.9%,
-#                PEPE 78.4%, BONK 77.5%, SHIB 77.8%, FARTCOIN 68.4%
-# GATED: BTC 92.3%, SUI 70.6%, DOT 77.3%, ATOM 77.3%
-# DROPPED: ETH, ARB, DOGE, NEAR, TRX, RENDER (sub-65% WR in BT, negative return)
-# Note: HL uses k-prefix for 1000x tokens (kPEPE, kBONK, kSHIB). Using HL names.
+# v8.7 coin list — 22 validated keepers from 47-CSV mass BT
 COINS = [
-    # High-conviction (75%+ WR validated)
-    'SOL','LINK','APT','kPEPE','kBONK','kSHIB','BTC','FARTCOIN',
-    # Mid-conviction (70-75% WR validated)
-    'XRP','BNB','SUI','DOT','ATOM',
+    # RAW (14) — 65%+ WR without gate
+    'SOL','LINK','ADA','UNI','ENS','AAVE','POL','SAND','SUSHI',
+    'APT','XRP',  # from earlier v8.6 BT (regex missed these in mass BT)
+    'kPEPE','kBONK','kSHIB','FARTCOIN',
+    # GATED (9) — chase-filter needed
+    'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
 ]
 
-# v8.6 SELECTIVE GATE — per-BT chase-filter coins
-CHASE_GATE_COINS = {'BTC','SUI','DOT','ATOM','FARTCOIN'}
-CHASE_LOOKBACK = 20  # bars to measure 20-bar hi/lo range
+# v8.7 SELECTIVE GATE — chase-filter these coins only
+CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO'}
+CHASE_LOOKBACK = 20
 
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
 
@@ -545,9 +546,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.6 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + CHASE-GATE")
-    log(f"Universe: {COINS}")
-    log(f"Chase-gate coins: {CHASE_GATE_COINS} | lookback={CHASE_LOOKBACK} bars")
+    log(f"PreCog v8.7 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | MAKER + SELECTIVE GATE")
+    log(f"Universe ({len(COINS)}): {COINS}")
+    log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Safety: max_hold={MAX_HOLD_SEC/3600:.0f}h | CB={CB_CONSEC_LOSSES} losses→{CB_PAUSE_SEC/60:.0f}min pause")
