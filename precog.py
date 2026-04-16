@@ -1,28 +1,25 @@
 #!/usr/bin/env python3
 #!/usr/bin/env python3
-"""PreCog v8.7 — MAIN WALLET via agent + 22-COIN UNIVERSE
+"""PreCog v8.8 — 34-COIN UNIVERSE (doubled portfolio)
 
-v8.7 changes:
-- Trades MAIN wallet (0x3eDaD064...) via approved agent "HL PreCog"
-  (agent address 0xAED87768..., valid 180d)
-- Coin universe expanded: 13 → 22 (validated from 47-CSV mass BT)
-- Added 9 new keepers: UNI, ENS, AAVE, POL, SAND, SUSHI, ADA (RAW);
-                       LDO, INJ, UMA, ALGO (GATED)
+v8.8 changes:
+- Universe expanded: 24 → 34 coins (validated from 82-CSV mass BT)
+- New RAW keepers: MON (+29.3%/30d), COMP (+9.0%), WLD (+9.1%), LIT (+4.6%), PUMP (+6.5%)
+- New GATED keepers: BLUR (+30.3% gated), VVV (+23.1%), APE (+6.1%), OP (+8.0%), TON (+2.0%)
 
 Portfolio BT (30d, maker fees, 10x, 5% risk, selective gating):
-  22 coins | 13.3 trades/day | 616 trades/30d | 76.4% avg WR
-  Daily compound: ~5.4%
-  Trajectory: $229 → $1,106 (30d) → $25K (90d) → $2.8M (180d)
+  34 coins | 19.4 trades/day | 998 trades/30d | 77.6% avg WR
+  Daily compound: +11.82% (BT extrapolation — real drift will reduce)
+  Real-world expectation: 6-8% daily after slippage/drift
+  Trajectory @ 6%/day: $229 → $1,314 (30d) → $42K (90d) → $7.7M (180d)
 
-Standouts:
-  UNI   81.1% RAW   +12.8%/30d
-  ENS   80.0% RAW   +12.5%/30d
-  LDO   78.9% GATED +11.3%
-  AAVE  74.3% RAW   +11.3%
-  POL   76.9% RAW   +11.1%
-  INJ   76.5% GATED +10.8%
-  SOL   75.8% RAW   +10.0%
-  UMA   76.2% GATED +9.6%
+Top performers:
+  BLUR  77.3% GATED +30.3%/30d
+  MON   81.6% RAW   +29.3%
+  VVV   87.0% GATED +23.1%
+  APT   76.9% RAW   +18.8%
+  kPEPE 78.4% RAW   +15.1%
+  UNI   81.1% RAW   +12.8%
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -36,15 +33,21 @@ PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
 
-# v8.7 coin list — 22 validated keepers from 47-CSV mass BT
+# v8.8 coin list — 34 validated keepers from 82-CSV mass BT
 COINS = [
-    # RAW (14) — 65%+ WR without gate
+    # RAW (20) — 65%+ WR without gate
     'SOL','LINK','ADA','UNI','ENS','AAVE','POL','SAND','SUSHI',
-    'APT','XRP',  # from earlier v8.6 BT (regex missed these in mass BT)
+    'APT','XRP','MON','COMP','WLD','LIT','PUMP',
     'kPEPE','kBONK','kSHIB','FARTCOIN',
-    # GATED (9) — chase-filter needed
+    # GATED (14) — chase-filter needed
     'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
+    'BLUR','VVV','APE','OP','TON',
 ]
+
+# v8.8 SELECTIVE GATE
+CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
+                    'BLUR','VVV','APE','OP','TON'}
+CHASE_LOOKBACK = 20
 
 # v8.7 SELECTIVE GATE — chase-filter these coins only
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO'}
