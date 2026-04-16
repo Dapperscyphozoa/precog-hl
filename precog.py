@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""PreCog v8 — production hardening
+"""PreCog v8.1 — cooldown bug fix
+
+v8.1 FIXES:
+- Cooldown tracked by bar TIMESTAMP (ms) not array index (index was reset every tick, blocking all signals after first fire)
+- Scan last 3 closed bars per tick (catch signals that fire between 5min ticks)
+- Backoff jitter on candle fetch (avoid HL 429 rate limit)
 
 FIXES FROM v7 (per user spec):
 1. ISOLATED margin only (no cross)
@@ -12,7 +17,7 @@ FIXES FROM v7 (per user spec):
 8. Kill switch: file /var/data/KILL flattens & exits
 9. PnL logged on every close with pct return
 """
-import os, json, time, traceback
+import os, json, time, random, traceback
 from datetime import datetime
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
@@ -73,10 +78,14 @@ def current_risk_pct(equity):
 # STATE — atomic write, rich position tracking (FIX #4)
 # ═══════════════════════════════════════════════════════
 def load_state():
-    default = {'positions':{}, 'cooldowns':{}, 'consec_losses':0, 'cb_pause_until':0, 'last_pnl_close':None}
+    default = {'positions':{}, 'cooldowns':{}, 'consec_losses':0, 'cb_pause_until':0, 'last_pnl_close':None, 'cd_format':'ts'}
     try:
         with open(STATE_PATH) as f:
             loaded = json.load(f)
+        # v8.1 migration: wipe old bar-index cooldowns (values were small ints, new format is ms timestamps ~1.7e12)
+        if loaded.get('cd_format') != 'ts':
+            loaded['cooldowns'] = {}
+            loaded['cd_format'] = 'ts'
         for k,v in default.items():
             if k not in loaded: loaded[k]=v
         return loaded
@@ -113,35 +122,43 @@ def rsi_calc(c,n=14):
         r[i]=100 if al[i]==0 else 100-100/(1+ag[i]/al[i])
     return r
 
-def fetch(coin, n_bars=300):
+def fetch(coin, n_bars=300, retries=3):
     end=int(time.time()*1000); start=end-n_bars*5*60*1000
-    try:
-        d=info.candles_snapshot(coin,'5m',start,end)
-        return [(int(c['t']),float(c['o']),float(c['h']),float(c['l']),float(c['c']),float(c['v'])) for c in d]
-    except Exception as e:
-        log(f"candle err {coin}: {e}"); return []
+    for attempt in range(retries):
+        try:
+            d=info.candles_snapshot(coin,'5m',start,end)
+            return [(int(c['t']),float(c['o']),float(c['h']),float(c['l']),float(c['c']),float(c['v'])) for c in d]
+        except Exception as e:
+            es = str(e)
+            if '429' in es and attempt < retries-1:
+                time.sleep(1.5 + random.random()*1.5)
+                continue
+            log(f"candle err {coin}: {e}"); return []
+    return []
 
 # ═══════════════════════════════════════════════════════
-# SIGNAL — pure live bars, no lookahead (FIX #2 confirmed)
+# SIGNAL — v8.1: cooldown by TIMESTAMP (ms), scan last K bars
 # ═══════════════════════════════════════════════════════
-def signal(candles, last_sell_bar, last_buy_bar):
-    """Uses only bars [0..N-1], all historical/confirmed. No future lookahead."""
-    if len(candles)<100: return None,None
-    o=[c[1] for c in candles]; h=[c[2] for c in candles]; l=[c[3] for c in candles]
-    cl=[c[4] for c in candles]
+SCAN_BARS = 3  # check last 3 closed bars each tick
+CD_MS = 3 * 5 * 60 * 1000  # cd=3 bars of 5m = 15 min
+
+def signal(candles, last_sell_ts, last_buy_ts):
+    """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp."""
+    if len(candles)<100: return None, None
+    h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
     N=len(cl); r14=rsi_calc(cl,14)
-    i = N-1  # most recent closed bar
-    if r14[i] is None: return None, None
-    br = h[i]-l[i]
-    if br <= 0: return None, None
-    LB = SP['pivot_lb']  # =8
-    # Pivot confirmation requires LB bars of history before i (not future)
-    is_pivot_high = h[i] == max(h[max(0,i-LB):i+1])
-    is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
-    sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (i-last_sell_bar) > SP['cd']
-    buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (i-last_buy_bar)  > BP['cd']
-    if sell_ok: return 'SELL', i
-    if buy_ok:  return 'BUY', i
+    LB = SP['pivot_lb']
+    for i in range(max(LB, N-SCAN_BARS), N):
+        if r14[i] is None: continue
+        br = h[i]-l[i]
+        if br <= 0: continue
+        bar_ts = candles[i][0]
+        is_pivot_high = h[i] == max(h[max(0,i-LB):i+1])
+        is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
+        sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (bar_ts - last_sell_ts) > CD_MS
+        buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (bar_ts - last_buy_ts)  > CD_MS
+        if sell_ok: return 'SELL', bar_ts
+        if buy_ok:  return 'BUY',  bar_ts
     return None, None
 
 # ═══════════════════════════════════════════════════════
@@ -247,9 +264,9 @@ def flatten_all(reason='KILL'):
 # ═══════════════════════════════════════════════════════
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     candles=fetch(coin)
-    last_s=state['cooldowns'].get(coin+'_sell',-1000)
-    last_b=state['cooldowns'].get(coin+'_buy',-1000)
-    sig,bar=signal(candles,last_s,last_b)
+    last_s=state['cooldowns'].get(coin+'_sell', 0)
+    last_b=state['cooldowns'].get(coin+'_buy',  0)
+    sig, bar_ts = signal(candles, last_s, last_b)
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
@@ -312,7 +329,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
     now = time.time()
     if sig == 'SELL':
-        state['cooldowns'][coin+'_sell'] = bar
+        state['cooldowns'][coin+'_sell'] = bar_ts
         if live and live['size']>0:
             pnl_pct = close(coin)
             if pnl_pct is not None:
@@ -326,7 +343,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px}
     else:
-        state['cooldowns'][coin+'_buy'] = bar
+        state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
             pnl_pct = close(coin)
             if pnl_pct is not None:
@@ -344,7 +361,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
+    log(f"PreCog v8.1 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
     log(f"Caps: max_pos={MAX_POSITIONS} side={MAX_SAME_SIDE} margin={int(MAX_TOTAL_RISK*100)}%")
     log(f"Safety: max_hold={MAX_HOLD_SEC/3600:.0f}h | CB={CB_CONSEC_LOSSES} losses→{CB_PAUSE_SEC/60:.0f}min pause")
