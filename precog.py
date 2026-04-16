@@ -513,16 +513,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 state['positions'].pop(coin, None)
                 return
 
-            # CLOUD BREAK: trend over — price crossed back through slow EMA
-            if CLOUD_EXIT_ENABLED:
+            # CLOUD BREAK: trend over — price crossed back through slow EMA by significant margin
+            if CLOUD_EXIT_ENABLED and fav < -0.003:  # only if position is losing >0.3% (not marginal)
                 candles = fetch(coin, retries=1)
                 if candles and len(candles) >= 60:
                     closes = [c[4] for c in candles]
-                    # Quick EMA50 from last 60 bars
                     k = 2/51; ema50 = sum(closes[:50])/50
                     for j in range(50, len(closes)):
                         ema50 = closes[j]*k + ema50*(1-k)
-                    if side == 'L' and mark < ema50:
+                    # Require price to be >0.2% through EMA (not just touching)
+                    if side == 'L' and mark < ema50 * 0.998:
                         pnl_pct = close(coin)
                         if pnl_pct is not None:
                             if pnl_pct < 0: state['consec_losses'] += 1
@@ -531,7 +531,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                         log(f"{coin} CLOUD EXIT: price {mark:.4f} < ema50 {ema50:.4f}")
                         state['positions'].pop(coin, None)
                         return
-                    elif side == 'S' and mark > ema50:
+                    elif side == 'S' and mark > ema50 * 1.002:
                         pnl_pct = close(coin)
                         if pnl_pct is not None:
                             if pnl_pct < 0: state['consec_losses'] += 1
@@ -715,7 +715,7 @@ def main():
                         live_positions = get_all_positions_live()
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(0.6)
+                time.sleep(1.0)  # v8.10.1: increased from 0.6s to avoid HL 429 rate limits with 50 coins
 
             save_state(state)
             log(f"--- tick complete ---")
