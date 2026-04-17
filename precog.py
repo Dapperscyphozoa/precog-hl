@@ -107,18 +107,14 @@ def health():
     eq = 0
     try: eq = get_balance()
     except: pass
-    try:
-        from latency_arb import get_la_status
-        la = get_la_status()
-    except: la = {'la_active': False}
-    return jsonify({'status':'ok','version':'v8.11.0','equity':eq,
+    la = {'la_active': False}
+    return jsonify({'status':'ok','version':'v8.12.0','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
                     'risk':INITIAL_RISK_PCT,
                     'trail':TRAIL_PCT,
                     'gates_loaded':len(TICKER_GATES),
-                    'la':la,
                     'recent_logs':LOG_BUFFER[-20:]})
 
 LOG_BUFFER = []  # ring buffer for last 100 log lines
@@ -616,22 +612,46 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
 # HL INTERFACE
 # ═══════════════════════════════════════════════════════
 def get_balance():
-    try: return float(info.user_state(WALLET)['marginSummary']['accountValue'])
+    try: return float(_cached_user_state()['marginSummary']['accountValue'])
     except: return 0
 
 def get_total_margin():
-    try: return float(info.user_state(WALLET)['marginSummary'].get('totalMarginUsed', 0))
+    try: return float(_cached_user_state()['marginSummary'].get('totalMarginUsed', 0))
     except: return 0
 
+# ═══════════════════════════════════════════════════════
+# API CACHE — reduces HL API calls from 100+/cycle to ~3/cycle
+# ═══════════════════════════════════════════════════════
+_cache = {'mids': None, 'mids_ts': 0, 'state': None, 'state_ts': 0}
+CACHE_TTL = 5  # seconds
+
+def _cached_mids():
+    now = time.time()
+    if _cache['mids'] is None or now - _cache['mids_ts'] > CACHE_TTL:
+        try:
+            _cache['mids'] = info.all_mids()
+            _cache['mids_ts'] = now
+        except: pass
+    return _cache['mids'] or {}
+
+def _cached_user_state():
+    now = time.time()
+    if _cache['state'] is None or now - _cache['state_ts'] > CACHE_TTL:
+        try:
+            _cache['state'] = info.user_state(WALLET)
+            _cache['state_ts'] = now
+        except: pass
+    return _cache['state'] or {}
+
 def get_mid(coin):
-    try: return float(info.all_mids()[coin])
+    try: return float(_cached_mids()[coin])
     except: return None
 
 def get_all_positions_live():
     """Returns dict of coin -> {size, entry, pnl, mark} for all actual positions on HL."""
     out={}
     try:
-        for p in info.user_state(WALLET).get('assetPositions',[]):
+        for p in _cached_user_state().get('assetPositions',[]):
             pos=p['position']
             sz=float(pos.get('szi',0))
             if sz!=0:
@@ -1157,15 +1177,7 @@ if __name__ == '__main__':
     t = threading.Thread(target=main, daemon=True)
     t.start()
     # Run latency arbitrage module in background thread
-    try:
-        from latency_arb import start_la_module
-        la_thread = threading.Thread(target=start_la_module,
-            args=(get_mid, place, close, get_balance, get_funding_rate, log),
-            daemon=True)
-        la_thread.start()
-        log("Latency Arb module started")
-    except Exception as e:
-        log(f"LA module failed to start: {e}")
+    # LA KILLED — was burning 60 API calls/sec with 0 trades, causing 429s
     # Run Flask webhook server in main thread (Render expects port 10000)
     port = int(os.environ.get('PORT', 10000))
     log(f"Webhook server starting on port {port}")
