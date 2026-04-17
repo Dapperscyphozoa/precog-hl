@@ -1,0 +1,731 @@
+{
+  "APE": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BONK": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "DOT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "MANA": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "MON": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "OP": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "UNI": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": null,
+    "mcl": 0
+  },
+  "VIRTUAL": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "WIF": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "XPL": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ZEC": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "TON": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "VVV": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "PEPE": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "SHIB": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "RPL": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "TAO": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "SUI": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BLUR": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "POL": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BICO": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "WLD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ENA": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "SAND": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "SPX": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ENS": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "TIA": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ORDI": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "APT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "NEAR": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ATOM": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "COMP": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "FARTCOIN": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "INJ": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "RENDER": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "LDO": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "XAU": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "CHZ": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ADA": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "PUMP": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "GALA": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "PENGU": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "AIXBT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "MOODENG": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "LIT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ZRX": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "1INCH": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ARB": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "CTSI": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "SUSHI": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ALGO": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "YFI": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "LINK": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BAND": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "GRT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BIO": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "AR": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "XRP": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "DOGE": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "AAVE": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BAT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ETH": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "PENDLE": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "MORPHO": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BNB": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "XTZ": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "AVAX": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "LTC": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "BTC": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "FET": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "AERO": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "ASTER": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "TRUMP": {
+    "gb": false,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "UMA": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "JUP": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "HYPE": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.008,
+    "mcl": 3
+  },
+  "BRENTOIL": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "SOL": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 0
+  },
+  "TRX": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 3
+  },
+  "HOOD": {
+    "gb": false,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003,
+    "mcl": 3
+  },
+  "PAXG": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003,
+    "mcl": 0
+  }
+}

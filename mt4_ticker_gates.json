@@ -1,58 +1,378 @@
 {
-  "XAUUSD": {
+  "AUDCAD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "AUDCHF": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "AUDJPY": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.001
+  },
+  "AUDNZD": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "AUDUSD": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "CADCHF": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "CADJPY": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.001
+  },
+  "CHFJPY": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.001
+  },
+  "Coffee": {
+    "gb": false,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.002
+  },
+  "Copper": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.002
+  },
+  "Corn": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.002
+  },
+  "EURAUD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "EURCAD": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "EURCHF": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "EURGBP": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.001
+  },
+  "EURUSD": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "EURX": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "GBPAUD": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.001
+  },
+  "GBPCHF": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.001
+  },
+  "GBPNZD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.001
+  },
+  "GBPUSD": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.001
+  },
+  "GER40": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0015
+  },
+  "HK50": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.0015
+  },
+  "JPN225": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.0015
+  },
+  "NAS100": {
     "gb": true,
     "gs": true,
     "cloud": false,
     "body": 0,
     "glb": 15,
-    "tp": 0.003
+    "tp": 0.0015
   },
-  "XAGUSD": {
+  "NZDCAD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "NZDUSD": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "NatGas": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.002
+  },
+  "Oats": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "SoyOil": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.002
+  },
+  "Soybeans": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.002
+  },
+  "SpotBrent": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.002
+  },
+  "SpotCrude": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.002
+  },
+  "Sugar": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.002
+  },
+  "UK100": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.0015
+  },
+  "US2000": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.0015
+  },
+  "US30": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0015
+  },
+  "US500": {
+    "gb": false,
+    "gs": false,
+    "cloud": true,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.0015
+  },
+  "USDCAD": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "USDCHF": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "USDJPY": {
     "gb": true,
     "gs": false,
     "cloud": false,
     "body": 0,
     "glb": 20,
+    "tp": 0.001
+  },
+  "USDX": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "VIX": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 20,
+    "tp": 0.0008
+  },
+  "Wheat": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.002
+  },
+  "XPDUSD": {
+    "gb": false,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
     "tp": 0.003
   },
   "XPTUSD": {
     "gb": true,
     "gs": false,
     "cloud": false,
-    "body": 0,
-    "glb": 15,
+    "body": 0.3,
+    "glb": 20,
     "tp": 0.003
   },
-  "XPDUSD": {
+  "XAUUSD": {
     "gb": true,
     "gs": true,
     "cloud": false,
     "body": 0,
     "glb": 15,
-    "tp": 0.003
-  },
-  "SPOTCRUDE": {
-    "gb": true,
-    "gs": false,
-    "cloud": false,
-    "body": 0,
-    "glb": 20,
-    "tp": 0.003
-  },
-  "SPOTBRENT": {
-    "gb": true,
-    "gs": true,
-    "cloud": true,
-    "body": 0,
-    "glb": 15,
-    "tp": 0.003
-  },
-  "NATGAS": {
-    "gb": true,
-    "gs": false,
-    "cloud": true,
-    "body": 0,
-    "glb": 20,
     "tp": 0.003
   }
 }

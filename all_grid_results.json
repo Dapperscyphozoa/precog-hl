@@ -1,0 +1,1460 @@
+[
+  {
+    "ticker": "APE",
+    "file": "BINANCE_APEUSDT, 30_9d6b9.csv",
+    "base_wr": 66.2,
+    "base_n": 74,
+    "opt_wr": 100.0,
+    "opt_n": 26,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 33.8
+  },
+  {
+    "ticker": "BONK",
+    "file": "BINANCE_BONKUSDT, 30_fb9cc.csv",
+    "base_wr": 73.0,
+    "base_n": 63,
+    "opt_wr": 100.0,
+    "opt_n": 19,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 27.0
+  },
+  {
+    "ticker": "DOT",
+    "file": "BINANCE_DOTUSDT, 30_cbfbc.csv",
+    "base_wr": 54.4,
+    "base_n": 68,
+    "opt_wr": 100.0,
+    "opt_n": 21,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 45.6
+  },
+  {
+    "ticker": "MANA",
+    "file": "BINANCE_MANAUSDT, 30_922aa.csv",
+    "base_wr": 50.0,
+    "base_n": 10,
+    "opt_wr": 100.0,
+    "opt_n": 7,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 50.0
+  },
+  {
+    "ticker": "MON",
+    "file": "BINANCE_MONUSDT.P, 30_d6b3a.csv",
+    "base_wr": 74.1,
+    "base_n": 54,
+    "opt_wr": 100.0,
+    "opt_n": 27,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 25.9
+  },
+  {
+    "ticker": "OP",
+    "file": "BINANCE_OPUSDT, 30_fa6a8.csv",
+    "base_wr": 64.6,
+    "base_n": 65,
+    "opt_wr": 100.0,
+    "opt_n": 17,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 35.4
+  },
+  {
+    "ticker": "UNI",
+    "file": "BINANCE_UNIUSDT, 30_a0903.csv",
+    "base_wr": 60.6,
+    "base_n": 71,
+    "opt_wr": 100.0,
+    "opt_n": 8,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": null,
+      "mcl": 0
+    },
+    "delta_wr": 39.4
+  },
+  {
+    "ticker": "VIRTUAL",
+    "file": "BINANCE_VIRTUALUSDT, 30_23bf0.csv",
+    "base_wr": 74.0,
+    "base_n": 50,
+    "opt_wr": 100.0,
+    "opt_n": 28,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 26.0
+  },
+  {
+    "ticker": "WIF",
+    "file": "BINANCE_WIFUSDT, 30_614ce.csv",
+    "base_wr": 66.7,
+    "base_n": 48,
+    "opt_wr": 100.0,
+    "opt_n": 34,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 33.3
+  },
+  {
+    "ticker": "XPL",
+    "file": "BINANCE_XPLUSDT, 30_e2a94.csv",
+    "base_wr": 61.4,
+    "base_n": 70,
+    "opt_wr": 100.0,
+    "opt_n": 23,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 38.6
+  },
+  {
+    "ticker": "ZEC",
+    "file": "BINANCE_ZECUSDT, 30_dde3b.csv",
+    "base_wr": 56.9,
+    "base_n": 65,
+    "opt_wr": 100.0,
+    "opt_n": 40,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 43.1
+  },
+  {
+    "ticker": "TON",
+    "file": "BYBIT_TONUSDT, 30_7a606.csv",
+    "base_wr": 70.3,
+    "base_n": 64,
+    "opt_wr": 100.0,
+    "opt_n": 23,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 29.7
+  },
+  {
+    "ticker": "VVV",
+    "file": "BYBIT_VVVUSDT, 30_ef83f.csv",
+    "base_wr": 72.9,
+    "base_n": 85,
+    "opt_wr": 100.0,
+    "opt_n": 23,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 27.1
+  },
+  {
+    "ticker": "PEPE",
+    "file": "CRYPTOCAP_PEPE, 30_d767f.csv",
+    "base_wr": 64.6,
+    "base_n": 79,
+    "opt_wr": 100.0,
+    "opt_n": 17,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 35.4
+  },
+  {
+    "ticker": "SHIB",
+    "file": "CRYPTOCAP_SHIB, 30_29193.csv",
+    "base_wr": 70.8,
+    "base_n": 72,
+    "opt_wr": 100.0,
+    "opt_n": 10,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 29.2
+  },
+  {
+    "ticker": "RPL",
+    "file": "BINANCE_RPLUSDT, 30_f7716.csv",
+    "base_wr": 52.9,
+    "base_n": 70,
+    "opt_wr": 98.1,
+    "opt_n": 54,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 45.3
+  },
+  {
+    "ticker": "TAO",
+    "file": "BINANCE_TAOUSDT, 30_4b636.csv",
+    "base_wr": 64.2,
+    "base_n": 67,
+    "opt_wr": 98.0,
+    "opt_n": 49,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 33.8
+  },
+  {
+    "ticker": "SUI",
+    "file": "BINANCE_SUIUSDT, 30_babbd.csv",
+    "base_wr": 64.7,
+    "base_n": 68,
+    "opt_wr": 97.1,
+    "opt_n": 35,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 32.4
+  },
+  {
+    "ticker": "BLUR",
+    "file": "BINANCE_BLURUSDT, 30_48cc7.csv",
+    "base_wr": 58.1,
+    "base_n": 86,
+    "opt_wr": 96.7,
+    "opt_n": 30,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 38.5
+  },
+  {
+    "ticker": "POL",
+    "file": "BINANCE_POLUSDT, 30_dfc8b.csv",
+    "base_wr": 62.9,
+    "base_n": 70,
+    "opt_wr": 96.7,
+    "opt_n": 30,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 33.8
+  },
+  {
+    "ticker": "BICO",
+    "file": "BINANCE_BICOUSDT, 30_32e36.csv",
+    "base_wr": 66.3,
+    "base_n": 86,
+    "opt_wr": 96.4,
+    "opt_n": 55,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 30.1
+  },
+  {
+    "ticker": "WLD",
+    "file": "BINANCE_WLDUSDT, 30_ed91e.csv",
+    "base_wr": 65.0,
+    "base_n": 60,
+    "opt_wr": 96.0,
+    "opt_n": 25,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 31.0
+  },
+  {
+    "ticker": "ENA",
+    "file": "BINANCE_ENAUSDT, 30_49eae.csv",
+    "base_wr": 57.7,
+    "base_n": 71,
+    "opt_wr": 95.8,
+    "opt_n": 24,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 38.1
+  },
+  {
+    "ticker": "SAND",
+    "file": "BINANCE_SANDUSDT, 30_01cff.csv",
+    "base_wr": 64.8,
+    "base_n": 71,
+    "opt_wr": 95.8,
+    "opt_n": 24,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 31.0
+  },
+  {
+    "ticker": "SPX",
+    "file": "BYBIT_SPXUSDT, 30_a0f68.csv",
+    "base_wr": 65.6,
+    "base_n": 64,
+    "opt_wr": 95.7,
+    "opt_n": 47,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 30.1
+  },
+  {
+    "ticker": "ENS",
+    "file": "BINANCE_ENSUSDT, 30_29b7f.csv",
+    "base_wr": 71.8,
+    "base_n": 71,
+    "opt_wr": 95.3,
+    "opt_n": 43,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 23.5
+  },
+  {
+    "ticker": "TIA",
+    "file": "BINANCE_TIAUSDT, 15_faf95.csv",
+    "base_wr": 56.1,
+    "base_n": 66,
+    "opt_wr": 95.2,
+    "opt_n": 21,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 39.2
+  },
+  {
+    "ticker": "ORDI",
+    "file": "BINANCE_ORDIUSDT, 30_61054.csv",
+    "base_wr": 59.5,
+    "base_n": 74,
+    "opt_wr": 95.1,
+    "opt_n": 41,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 35.7
+  },
+  {
+    "ticker": "APT",
+    "file": "BINANCE_APTUSDT, 30_f1e18.csv",
+    "base_wr": 69.4,
+    "base_n": 72,
+    "opt_wr": 94.9,
+    "opt_n": 59,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 25.5
+  },
+  {
+    "ticker": "NEAR",
+    "file": "BINANCE_NEARUSDT, 30_4f45e.csv",
+    "base_wr": 62.3,
+    "base_n": 61,
+    "opt_wr": 94.9,
+    "opt_n": 39,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 32.6
+  },
+  {
+    "ticker": "ATOM",
+    "file": "BINANCE_ATOMUSDT, 30_366cb.csv",
+    "base_wr": 54.8,
+    "base_n": 84,
+    "opt_wr": 94.7,
+    "opt_n": 19,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 40.0
+  },
+  {
+    "ticker": "COMP",
+    "file": "BINANCE_COMPUSDT, 30_a47a3.csv",
+    "base_wr": 61.8,
+    "base_n": 68,
+    "opt_wr": 94.7,
+    "opt_n": 38,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 33.0
+  },
+  {
+    "ticker": "FARTCOIN",
+    "file": "BINANCE_FARTCOINUSDT.P, 30_c6723.csv",
+    "base_wr": 62.1,
+    "base_n": 66,
+    "opt_wr": 94.7,
+    "opt_n": 19,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 32.6
+  },
+  {
+    "ticker": "INJ",
+    "file": "BINANCE_INJUSDT, 30_f1772.csv",
+    "base_wr": 63.3,
+    "base_n": 79,
+    "opt_wr": 94.4,
+    "opt_n": 18,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 31.2
+  },
+  {
+    "ticker": "RENDER",
+    "file": "BINANCE_RENDERUSDT, 15_bdea2.csv",
+    "base_wr": 47.1,
+    "base_n": 85,
+    "opt_wr": 94.4,
+    "opt_n": 18,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 47.4
+  },
+  {
+    "ticker": "LDO",
+    "file": "BINANCE_LDOUSDT, 30_2ae33.csv",
+    "base_wr": 61.8,
+    "base_n": 68,
+    "opt_wr": 94.1,
+    "opt_n": 17,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 32.4
+  },
+  {
+    "ticker": "XAU",
+    "file": "PEPPERSTONE_XAUUSD, 15_f64fe.csv",
+    "base_wr": 69.7,
+    "base_n": 66,
+    "opt_wr": 94.1,
+    "opt_n": 17,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 24.4
+  },
+  {
+    "ticker": "CHZ",
+    "file": "BINANCE_CHZUSDT, 30_9f31b.csv",
+    "base_wr": 67.9,
+    "base_n": 56,
+    "opt_wr": 93.9,
+    "opt_n": 33,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 26.1
+  },
+  {
+    "ticker": "ADA",
+    "file": "BINANCE_ADAUSDT, 30_11ee8.csv",
+    "base_wr": 75.8,
+    "base_n": 66,
+    "opt_wr": 93.8,
+    "opt_n": 32,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 18.0
+  },
+  {
+    "ticker": "PUMP",
+    "file": "BINANCE_PUMPUSDT, 30_6ba4e.csv",
+    "base_wr": 62.8,
+    "base_n": 78,
+    "opt_wr": 93.3,
+    "opt_n": 30,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 30.5
+  },
+  {
+    "ticker": "GALA",
+    "file": "BINANCE_GALAUSDT, 30_69fd6.csv",
+    "base_wr": 47.8,
+    "base_n": 67,
+    "opt_wr": 93.0,
+    "opt_n": 43,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 45.3
+  },
+  {
+    "ticker": "PENGU",
+    "file": "BINANCE_PENGUUSDT, 30_28a60.csv",
+    "base_wr": 67.7,
+    "base_n": 62,
+    "opt_wr": 93.0,
+    "opt_n": 43,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 25.3
+  },
+  {
+    "ticker": "AIXBT",
+    "file": "BINANCE_AIXBTUSDT, 15_95709.csv",
+    "base_wr": 58.7,
+    "base_n": 63,
+    "opt_wr": 92.9,
+    "opt_n": 42,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 34.1
+  },
+  {
+    "ticker": "MOODENG",
+    "file": "BYBIT_MOODENGUSDT.P, 15_d776f.csv",
+    "base_wr": 72.1,
+    "base_n": 61,
+    "opt_wr": 92.9,
+    "opt_n": 14,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 20.7
+  },
+  {
+    "ticker": "LIT",
+    "file": "KUCOIN_LITUSDT, 30_5e2b8.csv",
+    "base_wr": 55.1,
+    "base_n": 98,
+    "opt_wr": 92.9,
+    "opt_n": 56,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 37.8
+  },
+  {
+    "ticker": "ZRX",
+    "file": "BINANCE_ZRXUSDT, 30_0200c.csv",
+    "base_wr": 52.4,
+    "base_n": 84,
+    "opt_wr": 92.5,
+    "opt_n": 40,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 40.1
+  },
+  {
+    "ticker": "1INCH",
+    "file": "BINANCE_1INCHUSDT, 30_7322b.csv",
+    "base_wr": 65.3,
+    "base_n": 72,
+    "opt_wr": 92.3,
+    "opt_n": 26,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 27.0
+  },
+  {
+    "ticker": "ARB",
+    "file": "BINANCE_ARBUSDT, 30_5af96.csv",
+    "base_wr": 61.4,
+    "base_n": 70,
+    "opt_wr": 92.2,
+    "opt_n": 51,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 30.7
+  },
+  {
+    "ticker": "CTSI",
+    "file": "BINANCE_CTSIUSDT, 30_61522.csv",
+    "base_wr": 52.7,
+    "base_n": 93,
+    "opt_wr": 91.8,
+    "opt_n": 61,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 39.1
+  },
+  {
+    "ticker": "SUSHI",
+    "file": "BINANCE_SUSHIUSDT, 30_71b4e.csv",
+    "base_wr": 62.0,
+    "base_n": 79,
+    "opt_wr": 91.8,
+    "opt_n": 49,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 29.8
+  },
+  {
+    "ticker": "ALGO",
+    "file": "BINANCE_ALGOUSDT, 30_62bea.csv",
+    "base_wr": 64.6,
+    "base_n": 65,
+    "opt_wr": 91.7,
+    "opt_n": 48,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 27.1
+  },
+  {
+    "ticker": "YFI",
+    "file": "BINANCE_YFIUSDT, 30_09576.csv",
+    "base_wr": 58.4,
+    "base_n": 77,
+    "opt_wr": 91.7,
+    "opt_n": 24,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 33.2
+  },
+  {
+    "ticker": "LINK",
+    "file": "BINANCE_LINKUSDT, 15_10075.csv",
+    "base_wr": 53.7,
+    "base_n": 54,
+    "opt_wr": 90.6,
+    "opt_n": 32,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 36.9
+  },
+  {
+    "ticker": "BAND",
+    "file": "BINANCE_BANDUSDT, 30_b87c2.csv",
+    "base_wr": 50.0,
+    "base_n": 80,
+    "opt_wr": 90.5,
+    "opt_n": 63,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 40.5
+  },
+  {
+    "ticker": "GRT",
+    "file": "BINANCE_GRTUSDT, 30_3feeb.csv",
+    "base_wr": 71.0,
+    "base_n": 69,
+    "opt_wr": 90.5,
+    "opt_n": 42,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 19.5
+  },
+  {
+    "ticker": "BIO",
+    "file": "BINANCE_BIOUSDT, 30_eef88.csv",
+    "base_wr": 48.2,
+    "base_n": 56,
+    "opt_wr": 90.0,
+    "opt_n": 40,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 41.8
+  },
+  {
+    "ticker": "AR",
+    "file": "BINANCE_ARUSDT, 30_114fa.csv",
+    "base_wr": 52.4,
+    "base_n": 42,
+    "opt_wr": 89.5,
+    "opt_n": 19,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 37.1
+  },
+  {
+    "ticker": "XRP",
+    "file": "BINANCE_XRPUSDT, 30_2e415.csv",
+    "base_wr": 67.6,
+    "base_n": 68,
+    "opt_wr": 89.5,
+    "opt_n": 19,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 21.8
+  },
+  {
+    "ticker": "DOGE",
+    "file": "BINANCE_DOGEUSDT, 30_77ee1.csv",
+    "base_wr": 61.2,
+    "base_n": 67,
+    "opt_wr": 89.3,
+    "opt_n": 28,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 28.1
+  },
+  {
+    "ticker": "AAVE",
+    "file": "BINANCE_AAVEUSDT, 30_a9294.csv",
+    "base_wr": 62.7,
+    "base_n": 75,
+    "opt_wr": 88.9,
+    "opt_n": 36,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 26.2
+  },
+  {
+    "ticker": "BAT",
+    "file": "BINANCE_BATUSDT, 30_78e67.csv",
+    "base_wr": 54.9,
+    "base_n": 82,
+    "opt_wr": 88.9,
+    "opt_n": 36,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 34.0
+  },
+  {
+    "ticker": "ETH",
+    "file": "CRYPTO_ETHUSD, 15_24c38.csv",
+    "base_wr": 56.2,
+    "base_n": 73,
+    "opt_wr": 88.9,
+    "opt_n": 9,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 32.7
+  },
+  {
+    "ticker": "PENDLE",
+    "file": "BINANCE_PENDLEUSDT, 30_0cf71.csv",
+    "base_wr": 56.1,
+    "base_n": 66,
+    "opt_wr": 88.6,
+    "opt_n": 35,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 32.5
+  },
+  {
+    "ticker": "MORPHO",
+    "file": "BINANCE_MORPHOUSDT, 30_ae091.csv",
+    "base_wr": 60.6,
+    "base_n": 71,
+    "opt_wr": 88.2,
+    "opt_n": 34,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 27.7
+  },
+  {
+    "ticker": "BNB",
+    "file": "BINANCE_BNBUSDT, 15_c3a85.csv",
+    "base_wr": 59.4,
+    "base_n": 69,
+    "opt_wr": 87.5,
+    "opt_n": 8,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 28.1
+  },
+  {
+    "ticker": "XTZ",
+    "file": "BINANCE_XTZUSDT, 30_740a5.csv",
+    "base_wr": 52.2,
+    "base_n": 90,
+    "opt_wr": 86.7,
+    "opt_n": 45,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 34.4
+  },
+  {
+    "ticker": "AVAX",
+    "file": "BINANCE_AVAXUSDT, 30_c1500.csv",
+    "base_wr": 62.1,
+    "base_n": 66,
+    "opt_wr": 85.4,
+    "opt_n": 48,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 23.3
+  },
+  {
+    "ticker": "LTC",
+    "file": "BINANCE_LTCUSDT, 15_6dc29.csv",
+    "base_wr": 55.2,
+    "base_n": 58,
+    "opt_wr": 84.6,
+    "opt_n": 26,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 29.4
+  },
+  {
+    "ticker": "BTC",
+    "file": "CRYPTO_BTCUSD, 5_9d208.csv",
+    "base_wr": 61.1,
+    "base_n": 90,
+    "opt_wr": 84.2,
+    "opt_n": 19,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 23.1
+  },
+  {
+    "ticker": "FET",
+    "file": "BINANCE_FETUSDT, 15_24b5d.csv",
+    "base_wr": 53.7,
+    "base_n": 67,
+    "opt_wr": 83.3,
+    "opt_n": 18,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 29.6
+  },
+  {
+    "ticker": "AERO",
+    "file": "BYBIT_AEROUSDT, 15_4a222.csv",
+    "base_wr": 53.8,
+    "base_n": 78,
+    "opt_wr": 83.3,
+    "opt_n": 36,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 29.5
+  },
+  {
+    "ticker": "ASTER",
+    "file": "BINANCE_ASTERUSDT, 15_46517.csv",
+    "base_wr": 52.3,
+    "base_n": 44,
+    "opt_wr": 82.6,
+    "opt_n": 23,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 30.3
+  },
+  {
+    "ticker": "TRUMP",
+    "file": "BINANCE_TRUMPUSDT, 30_66d59.csv",
+    "base_wr": 56.9,
+    "base_n": 58,
+    "opt_wr": 82.6,
+    "opt_n": 46,
+    "cfg": {
+      "gb": false,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 25.7
+  },
+  {
+    "ticker": "UMA",
+    "file": "BINANCE_UMAUSDT, 30_3c6d9.csv",
+    "base_wr": 51.1,
+    "base_n": 92,
+    "opt_wr": 82.4,
+    "opt_n": 74,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 31.3
+  },
+  {
+    "ticker": "JUP",
+    "file": "OKX_JUPUSDT, 15_53b9d.csv",
+    "base_wr": 42.2,
+    "base_n": 116,
+    "opt_wr": 82.0,
+    "opt_n": 50,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 39.8
+  },
+  {
+    "ticker": "HYPE",
+    "file": "BINANCEUS_HYPEUSDT, 30_b45a9.csv",
+    "base_wr": 37.4,
+    "base_n": 115,
+    "opt_wr": 81.8,
+    "opt_n": 33,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.008,
+      "mcl": 3
+    },
+    "delta_wr": 44.4
+  },
+  {
+    "ticker": "BRENTOIL",
+    "file": "PIONEX_BRENTOILUSDT.P, 30_50485.csv",
+    "base_wr": 43.8,
+    "base_n": 48,
+    "opt_wr": 81.5,
+    "opt_n": 27,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 37.7
+  },
+  {
+    "ticker": "SOL",
+    "file": "BINANCE_SOLUSDT, 15_8fd9b.csv",
+    "base_wr": 64.2,
+    "base_n": 67,
+    "opt_wr": 76.1,
+    "opt_n": 46,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 11.9
+  },
+  {
+    "ticker": "TRX",
+    "file": "BINANCE_TRXUSDT, 30_d13c4.csv",
+    "base_wr": 67.1,
+    "base_n": 79,
+    "opt_wr": 75.5,
+    "opt_n": 53,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 3
+    },
+    "delta_wr": 8.4
+  },
+  {
+    "ticker": "HOOD",
+    "file": "OKX_HOODUSDT.P, 30_78489.csv",
+    "base_wr": 52.9,
+    "base_n": 70,
+    "opt_wr": 71.4,
+    "opt_n": 21,
+    "cfg": {
+      "gb": false,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003,
+      "mcl": 3
+    },
+    "delta_wr": 18.6
+  },
+  {
+    "ticker": "PAXG",
+    "file": "BYBIT_PAXGUSDT.P, 30_87d95.csv",
+    "base_wr": 30.0,
+    "base_n": 10,
+    "opt_wr": 60.0,
+    "opt_n": 5,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003,
+      "mcl": 0
+    },
+    "delta_wr": 30.0
+  }
+]

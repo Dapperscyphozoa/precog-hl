@@ -1,9 +1,189 @@
 [
   {
+    "ticker": "NatGas",
+    "base_wr": 95.0,
+    "opt_wr": 100.0,
+    "opt_n": 47,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.002
+    },
+    "delta_wr": 5.0,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "US30",
+    "base_wr": 90.4,
+    "opt_wr": 100.0,
+    "opt_n": 41,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.0015
+    },
+    "delta_wr": 9.6,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "XPDUSD",
+    "base_wr": 96.5,
+    "opt_wr": 98.6,
+    "opt_n": 71,
+    "cfg": {
+      "gb": false,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003
+    },
+    "delta_wr": 2.1,
+    "tf": "H1",
+    "tp": 0.003
+  },
+  {
+    "ticker": "JPN225",
+    "base_wr": 94.0,
+    "opt_wr": 98.2,
+    "opt_n": 56,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.0015
+    },
+    "delta_wr": 4.2,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "VIX",
+    "base_wr": 96.1,
+    "opt_wr": 98.0,
+    "opt_n": 51,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 2.0,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "SpotBrent",
+    "base_wr": 91.9,
+    "opt_wr": 97.1,
+    "opt_n": 35,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.002
+    },
+    "delta_wr": 5.3,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "XAGUSD",
+    "base_wr": 96.4,
+    "opt_wr": 96.4,
+    "opt_n": 84,
+    "cfg": null,
+    "delta_wr": 0.0,
+    "tf": "H1",
+    "tp": 0.003
+  },
+  {
+    "ticker": "SpotCrude",
+    "base_wr": 92.5,
+    "opt_wr": 95.7,
+    "opt_n": 47,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.002
+    },
+    "delta_wr": 3.2,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "Coffee",
+    "base_wr": 94.7,
+    "opt_wr": 95.0,
+    "opt_n": 60,
+    "cfg": {
+      "gb": false,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.002
+    },
+    "delta_wr": 0.3,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "XPTUSD",
+    "base_wr": 92.7,
+    "opt_wr": 94.6,
+    "opt_n": 56,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.003
+    },
+    "delta_wr": 2.0,
+    "tf": "H1",
+    "tp": 0.003
+  },
+  {
+    "ticker": "SoyOil",
+    "base_wr": 91.5,
+    "opt_wr": 94.4,
+    "opt_n": 36,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.002
+    },
+    "delta_wr": 2.9,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
     "ticker": "XAUUSD",
-    "base_wr": 61.9,
-    "opt_wr": 64.4,
-    "opt_n": 59,
+    "base_wr": 54.4,
+    "opt_wr": 94.1,
+    "opt_n": 17,
     "cfg": {
       "gb": true,
       "gs": true,
@@ -12,96 +192,620 @@
       "glb": 15,
       "tp": 0.003
     },
-    "delta_wr": 2.5
+    "delta_wr": 39.7,
+    "tf": "M15",
+    "tp": 0.003
   },
   {
-    "ticker": "XAGUSD",
-    "base_wr": 78.6,
-    "opt_wr": 79.4,
+    "ticker": "US2000",
+    "base_wr": 86.1,
+    "opt_wr": 93.9,
+    "opt_n": 49,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.0015
+    },
+    "delta_wr": 7.8,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "UK100",
+    "base_wr": 86.7,
+    "opt_wr": 93.3,
+    "opt_n": 60,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0015
+    },
+    "delta_wr": 6.7,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "HK50",
+    "base_wr": 88.2,
+    "opt_wr": 93.1,
+    "opt_n": 58,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.0015
+    },
+    "delta_wr": 4.9,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "Oats",
+    "base_wr": 92.4,
+    "opt_wr": 93.1,
+    "opt_n": 58,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 0.7,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "AUDCAD",
+    "base_wr": 86.2,
+    "opt_wr": 92.3,
+    "opt_n": 39,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 6.1,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "GER40",
+    "base_wr": 82.1,
+    "opt_wr": 91.7,
+    "opt_n": 36,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.0015
+    },
+    "delta_wr": 9.6,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "EURAUD",
+    "base_wr": 86.2,
+    "opt_wr": 91.1,
+    "opt_n": 45,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 4.9,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "NAS100",
+    "base_wr": 87.5,
+    "opt_wr": 90.4,
+    "opt_n": 52,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0015
+    },
+    "delta_wr": 2.9,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "Sugar",
+    "base_wr": 88.9,
+    "opt_wr": 89.6,
+    "opt_n": 67,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.002
+    },
+    "delta_wr": 0.7,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "AUDCHF",
+    "base_wr": 88.4,
+    "opt_wr": 89.3,
+    "opt_n": 75,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 0.9,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "Copper",
+    "base_wr": 85.4,
+    "opt_wr": 89.1,
+    "opt_n": 55,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.002
+    },
+    "delta_wr": 3.7,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "US500",
+    "base_wr": 84.8,
+    "opt_wr": 89.1,
+    "opt_n": 55,
+    "cfg": {
+      "gb": false,
+      "gs": false,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.0015
+    },
+    "delta_wr": 4.3,
+    "tf": "H1",
+    "tp": 0.0015
+  },
+  {
+    "ticker": "CADCHF",
+    "base_wr": 81.1,
+    "opt_wr": 88.9,
     "opt_n": 63,
     "cfg": {
       "gb": true,
       "gs": false,
       "cloud": false,
-      "body": 0,
-      "glb": 20,
-      "tp": 0.003
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.0008
     },
-    "delta_wr": 0.8
+    "delta_wr": 7.8,
+    "tf": "H1",
+    "tp": 0.0008
   },
   {
-    "ticker": "XPTUSD",
-    "base_wr": 73.0,
-    "opt_wr": 73.5,
-    "opt_n": 68,
+    "ticker": "AUDNZD",
+    "base_wr": 79.7,
+    "opt_wr": 88.4,
+    "opt_n": 43,
     "cfg": {
       "gb": true,
       "gs": false,
-      "cloud": false,
-      "body": 0,
+      "cloud": true,
+      "body": 0.3,
       "glb": 15,
-      "tp": 0.003
+      "tp": 0.0008
     },
-    "delta_wr": 0.5
+    "delta_wr": 8.6,
+    "tf": "H1",
+    "tp": 0.0008
   },
   {
-    "ticker": "XPDUSD",
-    "base_wr": 63.7,
-    "opt_wr": 65.3,
+    "ticker": "AUDJPY",
+    "base_wr": 81.8,
+    "opt_wr": 88.2,
+    "opt_n": 51,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.001
+    },
+    "delta_wr": 6.4,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "AUDUSD",
+    "base_wr": 74.4,
+    "opt_wr": 87.5,
+    "opt_n": 32,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 13.1,
+    "tf": "M15",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "Wheat",
+    "base_wr": 84.6,
+    "opt_wr": 87.5,
     "opt_n": 72,
     "cfg": {
       "gb": true,
-      "gs": true,
-      "cloud": false,
-      "body": 0,
-      "glb": 15,
-      "tp": 0.003
-    },
-    "delta_wr": 1.6
-  },
-  {
-    "ticker": "SPOTCRUDE",
-    "base_wr": 80.8,
-    "opt_wr": 82.1,
-    "opt_n": 145,
-    "cfg": {
-      "gb": true,
       "gs": false,
       "cloud": false,
       "body": 0,
       "glb": 20,
-      "tp": 0.003
+      "tp": 0.002
     },
-    "delta_wr": 1.3
+    "delta_wr": 2.9,
+    "tf": "H1",
+    "tp": 0.002
   },
   {
-    "ticker": "SPOTBRENT",
-    "base_wr": 76.5,
-    "opt_wr": 80.7,
-    "opt_n": 57,
-    "cfg": {
-      "gb": true,
-      "gs": true,
-      "cloud": true,
-      "body": 0,
-      "glb": 15,
-      "tp": 0.003
-    },
-    "delta_wr": 4.2
-  },
-  {
-    "ticker": "NATGAS",
-    "base_wr": 68.5,
-    "opt_wr": 71.0,
+    "ticker": "NZDCAD",
+    "base_wr": 84.7,
+    "opt_wr": 87.1,
     "opt_n": 62,
     "cfg": {
       "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 2.4,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "NZDUSD",
+    "base_wr": 82.9,
+    "opt_wr": 86.5,
+    "opt_n": 37,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 3.6,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "USDCHF",
+    "base_wr": 80.0,
+    "opt_wr": 85.7,
+    "opt_n": 56,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 5.7,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "Corn",
+    "base_wr": 83.5,
+    "opt_wr": 84.3,
+    "opt_n": 70,
+    "cfg": {
+      "gb": true,
       "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.002
+    },
+    "delta_wr": 0.8,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "GBPNZD",
+    "base_wr": 77.1,
+    "opt_wr": 82.4,
+    "opt_n": 51,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.001
+    },
+    "delta_wr": 5.3,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "Soybeans",
+    "base_wr": 80.7,
+    "opt_wr": 82.4,
+    "opt_n": 68,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.002
+    },
+    "delta_wr": 1.6,
+    "tf": "H1",
+    "tp": 0.002
+  },
+  {
+    "ticker": "EURCHF",
+    "base_wr": 75.3,
+    "opt_wr": 82.2,
+    "opt_n": 45,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 6.9,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "USDX",
+    "base_wr": 81.1,
+    "opt_wr": 81.2,
+    "opt_n": 64,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 0.2,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "CHFJPY",
+    "base_wr": 75.6,
+    "opt_wr": 80.0,
+    "opt_n": 45,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.001
+    },
+    "delta_wr": 4.4,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "GBPAUD",
+    "base_wr": 63.4,
+    "opt_wr": 79.2,
+    "opt_n": 53,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.001
+    },
+    "delta_wr": 15.8,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "CADJPY",
+    "base_wr": 77.5,
+    "opt_wr": 78.1,
+    "opt_n": 64,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.001
+    },
+    "delta_wr": 0.7,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "USDCAD",
+    "base_wr": 75.0,
+    "opt_wr": 77.8,
+    "opt_n": 36,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 2.8,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "GBPCHF",
+    "base_wr": 73.6,
+    "opt_wr": 76.8,
+    "opt_n": 82,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.001
+    },
+    "delta_wr": 3.2,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "EURCAD",
+    "base_wr": 71.8,
+    "opt_wr": 74.2,
+    "opt_n": 62,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.0008
+    },
+    "delta_wr": 2.3,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "EURUSD",
+    "base_wr": 69.6,
+    "opt_wr": 71.2,
+    "opt_n": 59,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0.3,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 1.6,
+    "tf": "M15",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "GBPUSD",
+    "base_wr": 61.5,
+    "opt_wr": 69.4,
+    "opt_n": 49,
+    "cfg": {
+      "gb": true,
+      "gs": true,
       "cloud": true,
       "body": 0,
       "glb": 20,
-      "tp": 0.003
+      "tp": 0.001
     },
-    "delta_wr": 2.4
+    "delta_wr": 7.8,
+    "tf": "M15",
+    "tp": 0.001
+  },
+  {
+    "ticker": "EURX",
+    "base_wr": 63.2,
+    "opt_wr": 65.5,
+    "opt_n": 55,
+    "cfg": {
+      "gb": false,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.0008
+    },
+    "delta_wr": 2.3,
+    "tf": "H1",
+    "tp": 0.0008
+  },
+  {
+    "ticker": "EURGBP",
+    "base_wr": 54.1,
+    "opt_wr": 63.8,
+    "opt_n": 47,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0.3,
+      "glb": 15,
+      "tp": 0.001
+    },
+    "delta_wr": 9.7,
+    "tf": "H1",
+    "tp": 0.001
+  },
+  {
+    "ticker": "USDJPY",
+    "base_wr": 53.5,
+    "opt_wr": 55.8,
+    "opt_n": 77,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.001
+    },
+    "delta_wr": 2.4,
+    "tf": "M15",
+    "tp": 0.001
   }
 ]
