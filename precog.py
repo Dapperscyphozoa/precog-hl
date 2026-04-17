@@ -411,9 +411,10 @@ LEV = 10
 LOOP_SEC = 300
 USE_ISOLATED_MARGIN = True
 
-MAX_POSITIONS = 20
-MAX_SAME_SIDE = 15
-MAX_TOTAL_RISK = 0.95
+MAX_POSITIONS = 8        # was 20 — fewer positions = more margin for arb
+MAX_SAME_SIDE = 6        # was 15
+MAX_TOTAL_RISK = 0.80    # was 0.95 — reserve 20% margin for arb trades
+STOP_LOSS_PCT = 0.005    # 0.5% hard stop loss — cut losers fast
 BTC_VOL_THRESHOLD = 0.03
 
 # v8 safety params
@@ -843,6 +844,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
+            # HARD STOP LOSS: cut losers fast
+            if fav <= -STOP_LOSS_PCT:
+                pnl_pct = close(coin)
+                if pnl_pct is not None:
+                    state['consec_losses'] += 1
+                    state['last_pnl_close'] = pnl_pct
+                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{STOP_LOSS_PCT*100:.1f}%)")
+                state['positions'].pop(coin, None)
+                return
+
             # TRAILING STOP: 0.3% trail — let winners run, lock gains
             hwm = cur.get('hwm', fav)
             if fav > hwm:
@@ -1118,7 +1129,7 @@ def main():
                         live_positions = get_all_positions_live()
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(1.0)  # v8.10.1: increased from 0.6s to avoid HL 429 rate limits with 50 coins
+                time.sleep(1.5)  # 1.5s between coins to avoid HL 429 rate limits
 
             save_state(state)
             log(f"--- tick complete ---")
