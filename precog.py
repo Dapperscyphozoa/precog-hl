@@ -139,11 +139,30 @@ def webhook():
         return jsonify({'error':'bad secret'}), 403
 
     coin = tv_to_hl(data['ticker'])
-    action = data['action'].lower().replace(' ','_')  # buy, sell, exit_buy, exit_sell
+    action_raw = str(data.get('action','')).lower().replace(' ','_')
     price = data.get('price', 0)
 
-    if action not in ('buy','sell','exit_buy','exit_sell'):
-        return jsonify({'error':f'unknown action: {action}'}), 400
+    # Normalize action from DynaPro's various alert texts
+    if action_raw in ('buy','sell','exit_buy','exit_sell'):
+        action = action_raw
+    elif 'long_entry' in action_raw or 'long entry' in str(data.get('action','')).lower():
+        action = 'buy'
+    elif 'short_entry' in action_raw or 'short entry' in str(data.get('action','')).lower():
+        action = 'sell'
+    elif 'long_exit' in action_raw or 'exit_buy' in action_raw:
+        action = 'exit_buy'
+    elif 'short_exit' in action_raw or 'exit_sell' in action_raw:
+        action = 'exit_sell'
+    else:
+        # Check for pattern names in action field
+        act = str(data.get('action','')).lower()
+        bearish = any(b in act for b in ['double top','head and shoulders','rising wedge','descending triangle','evening star','shooting star','dark cloud','hanging man','three black'])
+        bullish = any(b in act for b in ['double bottom','inverted h&s','inverse head','falling wedge','ascending triangle','morning star','hammer','piercing','three white'])
+        if bearish: action = 'sell'
+        elif bullish: action = 'buy'
+        else:
+            log(f"WEBHOOK UNKNOWN ACTION: {data.get('action','')[:100]} — skipped")
+            return jsonify({'status':'received','unknown_action':True}), 200
 
     signal = {'coin': coin, 'action': action, 'price': price, 'ts': time.time(), 'source': 'dynapro'}
     
