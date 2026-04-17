@@ -27,11 +27,86 @@ from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
 from eth_account import Account
+import threading
+from queue import Queue
+from flask import Flask, request as flask_request, jsonify
 
 WALLET     = os.environ['HYPERLIQUID_ACCOUNT']
 PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
 KILL_FILE  = '/var/data/KILL'
+
+# ═══════════════════════════════════════════════════════
+# WEBHOOK — receives DynaPro signals from TradingView
+# ═══════════════════════════════════════════════════════
+WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026')
+WEBHOOK_QUEUE = Queue()
+
+# Map TradingView ticker → HL coin name
+def tv_to_hl(ticker):
+    """BTCUSD→BTC, SOLUSDT→SOL, BONKUSDT→kBONK, etc."""
+    t = ticker.upper().replace('USDT.P','').replace('.P','').replace('USDT','').replace('USD','').replace('PERP','')
+    # k-prefix for 1000x tokens
+    remap = {'BONK':'kBONK','PEPE':'kPEPE','SHIB':'kSHIB','MATIC':'POL',
+             '1000BONK':'kBONK','1000PEPE':'kPEPE','1000SHIB':'kSHIB'}
+    return remap.get(t, t)
+
+app = Flask(__name__)
+
+@app.route('/health', methods=['GET'])
+def health():
+    eq = 0
+    try: eq = get_balance()
+    except: pass
+    return jsonify({'status':'ok','version':'v8.10.2','equity':eq,
+                    'queue_size':WEBHOOK_QUEUE.qsize(),
+                    'coins':len(COINS)})
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Receive DynaPro signal from TradingView.
+    Expected JSON: {"ticker":"BTCUSD","action":"buy|sell|exit_buy|exit_sell","price":12345.67}
+    Optional: {"secret":"...","tf":"15"} 
+    Also accepts plain text: 'buy BTCUSD 12345.67' format.
+    """
+    # Auth check (optional — TradingView can include secret in payload)
+    try:
+        data = flask_request.get_json(force=True, silent=True)
+        if not data:
+            # Try plain text: "buy BTCUSD 12345.67"
+            text = flask_request.get_data(as_text=True).strip()
+            parts = text.split()
+            if len(parts) >= 2:
+                data = {'action': parts[0].lower(), 'ticker': parts[1]}
+                if len(parts) >= 3:
+                    try: data['price'] = float(parts[2])
+                    except: pass
+    except:
+        return jsonify({'error':'bad payload'}), 400
+
+    if not data or 'ticker' not in data or 'action' not in data:
+        return jsonify({'error':'need ticker + action'}), 400
+
+    # Optional secret check
+    if WEBHOOK_SECRET and data.get('secret') and data['secret'] != WEBHOOK_SECRET:
+        return jsonify({'error':'bad secret'}), 403
+
+    coin = tv_to_hl(data['ticker'])
+    action = data['action'].lower().replace(' ','_')  # buy, sell, exit_buy, exit_sell
+    price = data.get('price', 0)
+
+    if action not in ('buy','sell','exit_buy','exit_sell'):
+        return jsonify({'error':f'unknown action: {action}'}), 400
+
+    signal = {'coin': coin, 'action': action, 'price': price, 'ts': time.time(), 'source': 'dynapro'}
+    WEBHOOK_QUEUE.put(signal)
+    log(f"WEBHOOK: {action} {coin} @ {price} (queued, size={WEBHOOK_QUEUE.qsize()})")
+    return jsonify({'status':'queued','coin':coin,'action':action}), 200
+
+@app.route('/signal', methods=['POST'])
+def signal_alias():
+    """Alias for /webhook — backwards compatible with old cyber-psycho webhook URL."""
+    return webhook()
 
 # v8.10 coin list — 50 validated keepers (added 8 weak-but-positive tier)
 COINS = [
@@ -707,6 +782,54 @@ def main():
             cur_risk = current_risk_pct(equity)
             log(f"--- tick eq=${equity:.2f} risk={int(cur_risk*100)}% mult={risk_mult} positions={len(live_positions)} consec_L={state['consec_losses']} ---")
 
+            # WEBHOOK QUEUE — process DynaPro signals first (higher priority)
+            wh_count = 0
+            while not WEBHOOK_QUEUE.empty() and wh_count < 10:
+                try:
+                    sig = WEBHOOK_QUEUE.get_nowait()
+                    coin = sig['coin']; action = sig['action']
+                    live = live_positions.get(coin)
+                    risk_pct = current_risk_pct(equity)
+
+                    if action in ('exit_buy', 'exit_sell'):
+                        # Close existing position
+                        if live:
+                            pnl_pct = close(coin)
+                            if pnl_pct is not None:
+                                if pnl_pct < 0: state['consec_losses'] += 1
+                                else: state['consec_losses'] = 0
+                            state['positions'].pop(coin, None)
+                            log(f"WEBHOOK CLOSE {coin} ({action}) pnl={pnl_pct}")
+                    elif action in ('buy', 'sell'):
+                        # Close opposite position if exists, then open new
+                        if live:
+                            is_opposite = (action == 'buy' and live['size'] < 0) or (action == 'sell' and live['size'] > 0)
+                            if is_opposite:
+                                close(coin)
+                                state['positions'].pop(coin, None)
+                            elif (action == 'buy' and live['size'] > 0) or (action == 'sell' and live['size'] < 0):
+                                log(f"WEBHOOK {coin} {action} — already positioned, skip")
+                                wh_count += 1; continue
+                        if len(live_positions) < MAX_POSITIONS:
+                            px = get_mid(coin)
+                            if px:
+                                is_buy = (action == 'buy')
+                                sz = calc_size(equity, px, risk_pct, risk_mult)
+                                fill = place(coin, is_buy, sz)
+                                if fill:
+                                    state['positions'][coin] = {
+                                        'side': 'L' if is_buy else 'S',
+                                        'opened_at': time.time(),
+                                        'entry': fill,
+                                        'stage': 'initial', 'peak': fill,
+                                        'source': 'dynapro'
+                                    }
+                                    log(f"WEBHOOK OPEN {coin} {'BUY' if is_buy else 'SELL'} @ {fill}")
+                    wh_count += 1
+                except Exception as e:
+                    log(f"webhook process err: {e}"); break
+
+            # PRECOG SIGNALS — scan all coins (runs alongside webhook)
             for c in COINS:
                 try:
                     process(c, state, equity, live_positions, risk_mult)
@@ -724,4 +847,10 @@ def main():
         time.sleep(LOOP_SEC)
 
 if __name__ == '__main__':
-    main()
+    # Run precog signal loop in background thread
+    t = threading.Thread(target=main, daemon=True)
+    t.start()
+    # Run Flask webhook server in main thread (Render expects port 10000)
+    port = int(os.environ.get('PORT', 10000))
+    log(f"Webhook server starting on port {port}")
+    app.run(host='0.0.0.0', port=port, debug=False)
