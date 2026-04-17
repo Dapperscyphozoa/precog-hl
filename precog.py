@@ -319,7 +319,8 @@ RUNNER_BE_BUFF  = 0.0005
 # v8.11: PRECOG OWN SIGNALS — DISABLED (40% WR, bleeding capital)
 # DynaPro webhook signals are the real edge (77% WR in BT)
 # Keep process() running for position management (TP, cloud exit) on existing positions only
-PRECOG_SIGNALS_ENABLED = TrueTP_PCT = 0.008          # +0.8% underlying = +8% equity @ 10x → lock winner
+PRECOG_SIGNALS_ENABLED = True
+TRAIL_PCT = 0.003          # 0.3% trailing stop — let winners run, trail locks gains
 CLOUD_EXIT_ENABLED = True  # close if price crosses back through slow EMA (trend over)
 MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
 
@@ -723,13 +724,19 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
-            # TP: lock in winners at +0.8% underlying
-            if fav >= TP_PCT:
+            # TRAILING STOP: 0.3% trail — let winners run, lock gains
+            hwm = cur.get('hwm', fav)
+            if fav > hwm:
+                hwm = fav
+                cur['hwm'] = hwm
+            
+            # Only trail once in profit (hwm > 0) and retraced 0.3% from peak
+            if hwm > TRAIL_PCT and (hwm - fav) >= TRAIL_PCT:
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     state['consec_losses'] = 0
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} TP EXIT +{fav*100:.2f}% (threshold {TP_PCT*100:.1f}%)")
+                log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {TRAIL_PCT*100:.1f}%)")
                 state['positions'].pop(coin, None)
                 return
 
