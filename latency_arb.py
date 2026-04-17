@@ -11,8 +11,7 @@ from datetime import datetime
 # ═══════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════
-LA_COINS = ['BTC','ETH','SOL','BNB','XRP','DOGE','AVAX','SUI','APT','ARB',
-            'HYPE','WIF','PEPE','BONK','RENDER','INJ','NEAR','LINK']
+LA_COINS = ['BTC','ETH','SOL','XRP','DOGE','LINK']  # HIGH LIQUIDITY ONLY — HL lags reliably on these
 
 # Bybit symbol mapping (no geo-block from US servers unlike Binance)
 BYBIT_SYMBOLS = {c: c + 'USDT' for c in LA_COINS}
@@ -30,14 +29,14 @@ GATE_3_ZSCORE_MIN     = 1.5    # Lower z-score (was 2.0 — missing opportunitie
 GATE_4_FEAR_THRESHOLD = 0.2    # Lower fear bar (was 0.3)
 GATE_5_SPREAD_MAX     = 0.0008 # 0.08% max spread (was 0.05% — too tight)
 GATE_6_ODDA_MIN       = 2      # 2 trades/sec minimum (was 3)
-GATE_7_DISLOCATION    = 0.0015 # 0.15% minimum gap (was 0.1% — too small, fees ate it)
-GATE_8_COMPOSITE_MIN  = 0.55   # Lower composite (was 0.65 — too few signals)
+GATE_7_DISLOCATION    = 0.002  # 0.20% minimum gap (was 0.15% — too small, losing on noise)
+GATE_8_COMPOSITE_MIN  = 0.60   # Higher composite threshold (was 0.55)
 
 # Execution — TUNED for profit capture
 POSITION_RISK_PCT     = 0.20   # 20% equity per arb (low directional risk — convergence is near-certain)
 HOLD_MAX_SEC          = 45     # 45s timeout (was 30 — more time for convergence)
-CONVERGENCE_PCT       = 0.0005 # Exit at 0.05% remaining gap (was 0.03% — too tight)
-COOLDOWN_SEC          = 3      # 3s between arbs per coin (was 5)
+CONVERGENCE_PCT       = 0.0005 # Exit at 0.05% remaining gap
+COOLDOWN_SEC          = 10     # 10s between arbs per coin (was 3 — hammering NEAR)
 LEV                   = 10     # Leverage
 
 # Binance price buffer

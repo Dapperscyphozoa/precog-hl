@@ -206,24 +206,16 @@ def webhook():
         elif 'short' in lower or 'sell' in lower: data['action'] = 'sell'
     
     if not data.get('ticker') or not data.get('action'):
-        # Condition alerts ("long entry"/"short entry") — no ticker
-        # Broadcast to ALL Pepperstone tickers — EA confirms with EMA
+        # No ticker — log and skip (Trend Buy/Sell alerts include tickers)
         action_text = str(data.get('action','')).lower()
         direction = None
         if 'long' in action_text or 'buy' in action_text: direction = 'BUY'
         elif 'short' in action_text or 'sell' in action_text: direction = 'SELL'
-        
         if direction:
             MT4_BIAS['direction'] = direction
             MT4_BIAS['ts'] = time.time()
-            # Broadcast ALL Pepperstone tickers — EA confirms with EMA locally
-            mt4_count = 0
-            for tv_sym, mt4_sym in TV_TO_MT4.items():
-                MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': 0, 'ts': time.time()})
-                mt4_count += 1
-            if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
-            log(f"MT4 BROADCAST: {direction} → {mt4_count} Pepperstone tickers queued")
-        return jsonify({'status':'broadcast','direction':direction or '','count':mt4_count if direction else 0}), 200
+            log(f"MT4 BIAS: {direction} (condition alert, no ticker)")
+        return jsonify({'status':'bias_only','direction':direction or ''}), 200
 
     # Optional secret check
     if WEBHOOK_SECRET and data.get('secret') and data['secret'] != WEBHOOK_SECRET:
@@ -313,21 +305,16 @@ def mt4_status():
         'bias_age_sec': round(bias_age)
     })
 
-# v8.10 coin list — 50 validated keepers (added 8 weak-but-positive tier)
+# v8.11 coin list — 25 TOP PERFORMERS (cut from 50 to avoid 429 rate limits)
+# HL allows ~1 req/s sustained. 25 coins × 2s = 50s cycle. No 429s.
 COINS = [
-    # RAW TIER 1 (20) — 75%+ WR, high edge
-    'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
-    'AERO','LIT','SPX','kPEPE','kBONK','kSHIB','MORPHO','JUP','XRP',
-    'SUSHI',
-    # RAW TIER 2 (10) — 68-75% WR or extended
-    'ADA','WLD','PUMP','PENGU','FARTCOIN',
-    # RAW EXTENDED (5) — 60-68% WR but positive return
-    'AIXBT','AVAX','PENDLE','TAO','WIF',
-    # GATED (15) — chase-filter improves WR significantly
-    'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
-    'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
-    # GATED EXTENDED (3) — 60-68% WR but gated+positive
-    'AR','GALA','VIRTUAL',
+    # TIER 1 — 90%+ WR gated
+    'SOL','LINK','UNI','APT','COMP','kBONK','WIF','DOT',
+    'SAND','ENS','POL','AAVE','ATOM','SUI','INJ','LDO',
+    # TIER 2 — 85-90% WR gated
+    'BLUR','APE','OP','TON','XRP','ADA','WLD','NEAR',
+    # GOLD
+    'BTC',
 ]
 
 # v8.10 SELECTIVE GATE — 20 coins where chase-filter improved WR in BT
@@ -1000,7 +987,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.11 | wallet={WALLET} | DynaPro webhook ONLY | precog signals OFF | TP+CLOUD EXIT")
+    log(f"PreCog v8.11 | wallet={WALLET} | precog+webhook+LA | trail={TRAIL_PCT} | risk={INITIAL_RISK_PCT}")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
@@ -1129,7 +1116,7 @@ def main():
                         live_positions = get_all_positions_live()
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(1.5)  # 1.5s between coins to avoid HL 429 rate limits
+                time.sleep(2.0)  # 2s between coins — 25 coins × 2s = 50s cycle, no 429s
 
             save_state(state)
             log(f"--- tick complete ---")
