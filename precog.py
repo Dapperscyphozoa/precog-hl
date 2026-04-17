@@ -79,22 +79,37 @@ def webhook():
     except: pass
     
     if not data:
-        # Try plain text parsing: various formats TV might send
         text = raw_body.strip()
-        # Could be "long entry" or "short entry" or "buy BTCUSD 12345"
-        parts = text.replace('\n',' ').split()
-        if len(parts) >= 2:
-            # Check for "long entry" / "short entry" format
-            first = parts[0].lower()
-            if first in ('long','short'):
-                action = 'buy' if first == 'long' else 'sell'
-                ticker = parts[-1] if len(parts) > 2 else ''
-                data = {'action': action, 'ticker': ticker}
+        
+        # DynaPro pattern: "Double Top Pattern Detected | timeframe : 15 | ENSUSDT"
+        if '|' in text:
+            parts = [p.strip() for p in text.split('|')]
+            ticker_part = parts[-1] if len(parts) >= 2 else ''
+            pt = parts[0].lower()
+            bearish = any(b in pt for b in ['double top','head and shoulders','rising wedge','bearish','short'])
+            bullish = any(b in pt for b in ['double bottom','inverted h&s','falling wedge','bullish','long'])
+            if (bearish or bullish) and ticker_part:
+                data = {'action': 'sell' if bearish else 'buy', 'ticker': ticker_part}
             else:
-                data = {'action': parts[0].lower(), 'ticker': parts[1]}
-            if len(parts) >= 3:
-                try: data['price'] = float(parts[-1])
-                except: pass
+                log(f"WEBHOOK PATTERN SKIP: {text[:100]}")
+                return jsonify({'status':'received','type':'pattern'}), 200
+        
+        # "long entry" / "short entry" — no ticker
+        elif text.lower() in ('long entry','short entry','long exit','short exit'):
+            log(f"WEBHOOK CONDITION: {text} (no ticker)")
+            return jsonify({'status':'received','type':'condition'}), 200
+        
+        else:
+            parts = text.replace('\n',' ').split()
+            if len(parts) >= 2:
+                first = parts[0].lower()
+                if first in ('long','short'):
+                    data = {'action': 'buy' if first=='long' else 'sell', 'ticker': parts[-1]}
+                else:
+                    data = {'action': parts[0].lower(), 'ticker': parts[1]}
+                if len(parts) >= 3:
+                    try: data['price'] = float(parts[-1])
+                    except: pass
     
     if not data:
         # Last resort — just log and accept, don't 400
