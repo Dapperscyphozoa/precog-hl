@@ -128,12 +128,13 @@
     "tp": 0.0008
   },
   "EURX": {
-    "gb": true,
+    "gb": false,
     "gs": true,
-    "cloud": true,
+    "cloud": false,
     "body": 0,
-    "glb": 15,
-    "tp": 0.0008
+    "glb": 20,
+    "tp": null,
+    "mcl": 0
   },
   "GBPAUD": {
     "gb": true,
@@ -145,11 +146,12 @@
   },
   "GBPCHF": {
     "gb": true,
-    "gs": false,
-    "cloud": false,
+    "gs": true,
+    "cloud": true,
     "body": 0,
     "glb": 20,
-    "tp": 0.001
+    "tp": null,
+    "mcl": 0
   },
   "GBPNZD": {
     "gb": true,
@@ -164,8 +166,9 @@
     "gs": true,
     "cloud": false,
     "body": 0.3,
-    "glb": 20,
-    "tp": 0.001
+    "glb": 15,
+    "tp": null,
+    "mcl": 0
   },
   "GER40": {
     "gb": true,
@@ -320,12 +323,13 @@
     "tp": 0.0008
   },
   "USDJPY": {
-    "gb": true,
-    "gs": false,
+    "gb": false,
+    "gs": true,
     "cloud": true,
-    "body": 0.3,
-    "glb": 20,
-    "tp": 0.001
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "mcl": 0
   },
   "USDX": {
     "gb": true,
