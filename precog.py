@@ -69,26 +69,54 @@ def webhook():
     Optional: {"secret":"...","tf":"15"} 
     Also accepts plain text: 'buy BTCUSD 12345.67' format.
     """
-    # Auth check (optional — TradingView can include secret in payload)
+    # Parse flexibly — TV sends various formats
     raw_body = flask_request.get_data(as_text=True)
-    log(f"WEBHOOK RAW: content_type={flask_request.content_type} body={raw_body[:200]}")
+    log(f"WEBHOOK RAW: content_type={flask_request.content_type} body={raw_body[:300]}")
+    
+    data = None
     try:
         data = flask_request.get_json(force=True, silent=True)
-        if not data:
-            # Try plain text: "buy BTCUSD 12345.67"
-            text = flask_request.get_data(as_text=True).strip()
-            parts = text.split()
-            if len(parts) >= 2:
+    except: pass
+    
+    if not data:
+        # Try plain text parsing: various formats TV might send
+        text = raw_body.strip()
+        # Could be "long entry" or "short entry" or "buy BTCUSD 12345"
+        parts = text.replace('\n',' ').split()
+        if len(parts) >= 2:
+            # Check for "long entry" / "short entry" format
+            first = parts[0].lower()
+            if first in ('long','short'):
+                action = 'buy' if first == 'long' else 'sell'
+                ticker = parts[-1] if len(parts) > 2 else ''
+                data = {'action': action, 'ticker': ticker}
+            else:
                 data = {'action': parts[0].lower(), 'ticker': parts[1]}
-                if len(parts) >= 3:
-                    try: data['price'] = float(parts[2])
-                    except: pass
-    except:
-        return jsonify({'error':'bad payload'}), 400
-
-    if not data or 'ticker' not in data or 'action' not in data:
-        log(f"WEBHOOK 400: data={data}")
-        return jsonify({'error':'need ticker + action','received':str(data)[:200]}), 400
+            if len(parts) >= 3:
+                try: data['price'] = float(parts[-1])
+                except: pass
+    
+    if not data:
+        # Last resort — just log and accept, don't 400
+        log(f"WEBHOOK UNPARSEABLE: {raw_body[:200]}")
+        return jsonify({'status':'received','parsed':False}), 200
+    
+    # If no ticker, try to extract from raw body
+    if 'ticker' not in data or not data['ticker']:
+        # Search for anything that looks like a ticker symbol
+        import re as _re
+        m = _re.search(r'([A-Z]{2,}(?:USDT|USD)?(?:\.P)?)', raw_body)
+        if m: data['ticker'] = m.group(1)
+    
+    if 'action' not in data or not data.get('action'):
+        # Infer from body text
+        lower = raw_body.lower()
+        if 'long' in lower or 'buy' in lower: data['action'] = 'buy'
+        elif 'short' in lower or 'sell' in lower: data['action'] = 'sell'
+    
+    if not data.get('ticker') or not data.get('action'):
+        log(f"WEBHOOK PARTIAL: data={data}")
+        return jsonify({'status':'received','partial':True,'data':str(data)[:200]}), 200
 
     # Optional secret check
     if WEBHOOK_SECRET and data.get('secret') and data['secret'] != WEBHOOK_SECRET:
