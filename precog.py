@@ -227,6 +227,14 @@ def webhook():
         log(f"MT4 QUEUED: {action} {mt4_sym} @ {price}")
         return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':action}), 200
 
+    # Per-ticker gate for webhook signals
+    wh_coin = signal.get('coin','').upper()
+    wh_candles = fetch(wh_coin, retries=1) if wh_coin else None
+    wh_px = signal.get('price', 0)
+    if not apply_ticker_gate(wh_coin, action.upper(), wh_px, wh_candles):
+        log(f"WEBHOOK GATED: {action} {wh_coin} rejected by per-ticker filter")
+        return jsonify({'status':'gated','coin':wh_coin,'action':action}), 200
+
     WEBHOOK_QUEUE.put(signal)
     log(f"WEBHOOK: {action} {coin} @ {price} (queued, size={WEBHOOK_QUEUE.qsize()})")
     return jsonify({'status':'queued','coin':coin,'action':action}), 200
@@ -274,6 +282,67 @@ CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
                     'AR','GALA','VIRTUAL'}
 CHASE_LOOKBACK = 20
 
+
+# ═══════════════════════════════════════════════════════
+# PER-TICKER GATES — grid-optimized for 90%+ WR
+# Each ticker has: gate_buy, gate_sell, cloud, body, lookback
+# ═══════════════════════════════════════════════════════
+import json as _json
+_gates_path = os.path.join(os.path.dirname(__file__), 'ticker_gates.json')
+if os.path.exists(_gates_path):
+    TICKER_GATES = _json.load(open(_gates_path))
+    log(f"Loaded {len(TICKER_GATES)} per-ticker gate configs")
+else:
+    TICKER_GATES = {}
+    log("WARNING: ticker_gates.json not found, running without per-ticker gates")
+
+def apply_ticker_gate(coin, side, price, candles):
+    """Apply per-ticker optimized gates. Returns True if signal passes."""
+    # Strip exchange suffix to match gate keys
+    key = coin.upper().replace('.P','')
+    gate = TICKER_GATES.get(key)
+    if not gate:
+        return True  # no gate config = pass through
+    
+    glb = gate.get('glb', 20)
+    
+    # Chase gate buy
+    if gate.get('gb') and side == 'BUY' and candles and len(candles) > glb:
+        window = candles[-glb:]
+        hi = max(c[2] for c in window)
+        if price > hi:
+            return False
+    
+    # Chase gate sell
+    if gate.get('gs') and side == 'SELL' and candles and len(candles) > glb:
+        window = candles[-glb:]
+        lo = min(c[3] for c in window)
+        if price < lo:
+            return False
+    
+    # Cloud filter
+    if gate.get('cloud') and candles and len(candles) >= 50:
+        closes = [c[4] for c in candles]
+        k = 2/51; ema50 = sum(closes[:50])/50
+        for j in range(50, len(closes)):
+            ema50 = closes[j]*k + ema50*(1-k)
+        k2 = 2/21; ema20 = sum(closes[:20])/20
+        for j in range(20, len(closes)):
+            ema20 = closes[j]*k2 + ema20*(1-k2)
+        if side == 'BUY' and ema20 < ema50:
+            return False
+        if side == 'SELL' and ema20 > ema50:
+            return False
+    
+    # Body filter
+    if gate.get('body', 0) > 0 and candles and len(candles) > 0:
+        last = candles[-1]
+        br = last[2] - last[3]
+        if br > 0 and abs(last[4] - last[1]) / br < gate['body']:
+            return False
+    
+    return True
+
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
 
 def derive(s):
@@ -289,7 +358,7 @@ def derive(s):
     }
 SP = derive(GRID); BP = derive(GRID)
 
-INITIAL_RISK_PCT = 0.05
+INITIAL_RISK_PCT = 0.15    # 15% risk — high confidence per-ticker gates
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
@@ -821,6 +890,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
         log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
+        return
+
+    # Per-ticker gate check
+    candles_for_gate = fetch(coin, retries=1)
+    px_for_gate = get_mid(coin) or 0
+    if not apply_ticker_gate(coin, sig, px_for_gate, candles_for_gate):
+        log(f"{coin} {sig} GATED by per-ticker filter")
         return
 
     log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")

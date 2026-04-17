@@ -1,0 +1,622 @@
+{
+  "APEUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "BONKUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "DOTUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "MONUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "OPUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "UNIUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": null,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "VIRTUALUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "WIFUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "XPLUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ZECUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "TONUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "VVVUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "MANAUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "RPLUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "TAOUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "SUIUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "BLURUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "POLUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "BICOUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "WLDUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ENAUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "SANDUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "SPXUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "ENSUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "TIAUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ORDIUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "APTUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "NEARUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ATOMUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "COMPUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "FARTCOINUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "INJUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "RENDERUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "LDOUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "CHZUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "ADAUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "PUMPUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "GALAUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "PENGUUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "AIXBTUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "MOODENGUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "LITUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "ZRXUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "1INCHUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ARBUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "CTSIUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "SUSHIUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ALGOUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "YFIUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "LINKUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "BANDUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "GRTUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "BIOUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "ARUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "XRPUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "DOGEUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0.3,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "AAVEUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "BATUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "PENDLEUSDT": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  },
+  "MORPHOUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "AVAXUSDT": {
+    "gb": false,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "XAUUSD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 15
+  }
+}
