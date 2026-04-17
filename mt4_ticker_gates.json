@@ -112,12 +112,15 @@
     "tp": 0.0008
   },
   "EURGBP": {
-    "gb": true,
+    "gb": false,
     "gs": false,
     "cloud": true,
-    "body": 0.3,
-    "glb": 15,
-    "tp": 0.001
+    "body": 0,
+    "glb": 10,
+    "tp": null,
+    "mcl": 0,
+    "momo": 0,
+    "inverted": true
   },
   "EURUSD": {
     "gb": true,
