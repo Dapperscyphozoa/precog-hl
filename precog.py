@@ -430,7 +430,7 @@ USE_ISOLATED_MARGIN = True
 MAX_POSITIONS = 8        # was 20 — fewer positions = more margin for arb
 MAX_SAME_SIDE = 6        # was 15
 MAX_TOTAL_RISK = 0.80    # reserve 20% margin for arb trades
-# NO STOP LOSS — gates filter at 90% WR, trail locks winners, tight SL just gets hunted
+STOP_LOSS_PCT = 0.02     # 2% hard SL — wide enough to not get hunted, cuts real losers
 BTC_VOL_THRESHOLD = 0.03
 
 # v8 safety params
@@ -859,6 +859,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             entry = cur['entry']
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
+
+            # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
+            if fav <= -STOP_LOSS_PCT:
+                pnl_pct = close(coin)
+                if pnl_pct is not None:
+                    state['consec_losses'] += 1
+                    state['last_pnl_close'] = pnl_pct
+                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{STOP_LOSS_PCT*100:.0f}%)")
+                state['positions'].pop(coin, None)
+                return
 
             # TRAILING STOP: 0.3% trail — let winners run, lock gains
             hwm = cur.get('hwm', fav)
