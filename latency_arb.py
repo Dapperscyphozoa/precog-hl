@@ -14,10 +14,10 @@ from datetime import datetime
 LA_COINS = ['BTC','ETH','SOL','BNB','XRP','DOGE','AVAX','SUI','APT','ARB',
             'HYPE','WIF','PEPE','BONK','RENDER','INJ','NEAR','LINK']
 
-# Binance symbol mapping (LA_COIN -> binance stream name)
-BINANCE_SYMBOLS = {c: c.lower() + 'usdt' for c in LA_COINS}
-BINANCE_SYMBOLS['PEPE'] = '1000pepeusdt'
-BINANCE_SYMBOLS['BONK'] = '1000bonkusdt'
+# Bybit symbol mapping (no geo-block from US servers unlike Binance)
+BYBIT_SYMBOLS = {c: c + 'USDT' for c in LA_COINS}
+BYBIT_SYMBOLS['PEPE'] = '1000PEPEUSDT'
+BYBIT_SYMBOLS['BONK'] = '1000BONKUSDT'
 
 # HL symbol mapping
 HL_SYMBOLS = {'PEPE':'kPEPE','BONK':'kBONK'}
@@ -223,45 +223,53 @@ def gate_8_composite(coin, binance_px, detection_ts, get_funding_fn=None):
 # BINANCE WEBSOCKET — REAL-TIME TRADE STREAM
 # ═══════════════════════════════════════════════════════
 async def binance_ws_handler():
-    """Connect to Binance combined trade stream for all LA coins."""
-    streams = '/'.join(f"{s}@aggTrade" for s in BINANCE_SYMBOLS.values())
-    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
-    la_log(f"Connecting to Binance WS: {len(LA_COINS)} coins")
+    """Connect to Bybit public trade stream for all LA coins (no geo-block)."""
+    url = "wss://stream.bybit.com/v5/public/linear"
+    la_log(f"Connecting to Bybit WS: {len(LA_COINS)} coins")
 
     while True:
         try:
             async with websockets.connect(url, ping_interval=20) as ws:
-                la_log("Binance WS connected")
+                # Subscribe to all coin trade streams
+                topics = [f"publicTrade.{BYBIT_SYMBOLS[c]}" for c in LA_COINS]
+                # Bybit allows max 10 per subscribe, batch them
+                for i in range(0, len(topics), 10):
+                    batch = topics[i:i+10]
+                    sub = json.dumps({"op": "subscribe", "args": batch})
+                    await ws.send(sub)
+                la_log(f"Bybit WS connected, subscribed to {len(topics)} streams")
+
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
-                        data = msg.get('data', {})
-                        stream = msg.get('stream', '')
-                        symbol = stream.split('@')[0] if '@' in stream else ''
+                        topic = msg.get('topic', '')
+                        if not topic.startswith('publicTrade.'): continue
+                        symbol = topic.replace('publicTrade.', '')
 
                         # Map back to our coin name
                         coin = None
-                        for c, s in BINANCE_SYMBOLS.items():
+                        for c, s in BYBIT_SYMBOLS.items():
                             if s == symbol: coin = c; break
                         if not coin: continue
 
-                        px = float(data.get('p', 0))
-                        qty = float(data.get('q', 0))
-                        ts_ms = data.get('T', time.time() * 1000)
+                        for trade in msg.get('data', []):
+                            px = float(trade.get('p', 0))
+                            qty = float(trade.get('v', 0))
+                            ts_ms = trade.get('T', time.time() * 1000)
 
-                        if coin not in binance_prices:
-                            binance_prices[coin] = deque(maxlen=TICK_BUFFER_SIZE)
-                        binance_prices[coin].append((ts_ms, px, qty))
+                            if coin not in binance_prices:
+                                binance_prices[coin] = deque(maxlen=TICK_BUFFER_SIZE)
+                            binance_prices[coin].append((ts_ms, px, qty))
 
-                        # Prune old ticks
-                        now_ms = time.time() * 1000
-                        while binance_prices[coin] and now_ms - binance_prices[coin][0][0] > PRICE_WINDOW_MS:
-                            binance_prices[coin].popleft()
+                            # Prune old ticks
+                            now_ms = time.time() * 1000
+                            while binance_prices[coin] and now_ms - binance_prices[coin][0][0] > PRICE_WINDOW_MS:
+                                binance_prices[coin].popleft()
 
                     except Exception as e:
                         pass  # Silently skip bad messages
         except Exception as e:
-            la_log(f"Binance WS error: {e}, reconnecting in 5s")
+            la_log(f"Bybit WS error: {e}, reconnecting in 5s")
             await asyncio.sleep(5)
 
 # ═══════════════════════════════════════════════════════
