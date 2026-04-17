@@ -421,7 +421,7 @@ LOOP_SEC = 5  # continuous processing — no 5min sleep between cycles
 USE_ISOLATED_MARGIN = True
 
 MAX_POSITIONS = 20       # was 8 — LA dead, no margin reserve needed
-MAX_SAME_SIDE = 6        # was 15
+MAX_SAME_SIDE = 12       # was 6 — with MAX_POS 20, side cap was blocking 14 trades
 MAX_TOTAL_RISK = 0.80    # reserve 20% margin for arb trades
 STOP_LOSS_PCT = 0.02     # 2% hard SL — wide enough to not get hunted, cuts real losers
 BTC_VOL_THRESHOLD = 0.03
@@ -539,7 +539,7 @@ def rsi_calc(c,n=14):
         r[i]=100 if al[i]==0 else 100-100/(1+ag[i]/al[i])
     return r
 
-def fetch(coin, n_bars=300, retries=3):
+def fetch(coin, n_bars=100, retries=3):
     end=int(time.time()*1000); start=end-n_bars*5*60*1000
     for attempt in range(retries):
         try:
@@ -865,6 +865,18 @@ def manage_runner(coin, state, live, equity):
     state['positions'][coin] = cur
     return False
 
+def place_native_sl(coin, is_long, entry, size):
+    """Place HL native stop-loss order — executes server-side, no tick delay."""
+    try:
+        sl_px = round_price(coin, entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT))
+        sl_side = False if is_long else True  # close direction
+        exchange.order(coin, sl_side, round_size(coin, size), sl_px,
+                       {"trigger": {"triggerPx": str(sl_px), "isMarket": True, "tpsl": "sl"}},
+                       reduce_only=True)
+        log(f"{coin} NATIVE SL placed @ {sl_px} ({'buy' if sl_side else 'sell'} stop)")
+    except Exception as e:
+        log(f"{coin} native SL err: {e}")
+
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell', 0)
@@ -1018,6 +1030,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if px:
                 fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult))
                 if fill_px:
+                    sz = calc_size(equity, px, risk_pct, risk_mult)
+                    place_native_sl(coin, False, fill_px, sz)
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px}
     else:
@@ -1033,6 +1047,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if px:
                 fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult))
                 if fill_px:
+                    sz = calc_size(equity, px, risk_pct, risk_mult)
+                    place_native_sl(coin, True, fill_px, sz)
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px}
 
@@ -1153,6 +1169,7 @@ def main():
                                 sz = calc_size(equity, px, risk_pct, risk_mult)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
+                                    place_native_sl(coin, is_buy, fill, sz)
                                     state['positions'][coin] = {
                                         'side': 'L' if is_buy else 'S',
                                         'opened_at': time.time(),
