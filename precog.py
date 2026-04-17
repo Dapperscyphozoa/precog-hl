@@ -287,14 +287,14 @@ CHASE_LOOKBACK = 20
 # PER-TICKER GATES — grid-optimized for 90%+ WR
 # Each ticker has: gate_buy, gate_sell, cloud, body, lookback
 # ═══════════════════════════════════════════════════════
-import json as _json
+# json already imported at top
 _gates_path = os.path.join(os.path.dirname(__file__), 'ticker_gates.json')
 if os.path.exists(_gates_path):
-    TICKER_GATES = _json.load(open(_gates_path))
-    log(f"Loaded {len(TICKER_GATES)} per-ticker gate configs")
+    TICKER_GATES = json.load(open(_gates_path))
+    print(f"Loaded {len(TICKER_GATES)} per-ticker gate configs", flush=True)
 else:
     TICKER_GATES = {}
-    log("WARNING: ticker_gates.json not found, running without per-ticker gates")
+    print("WARNING: ticker_gates.json not found, running without per-ticker gates", flush=True)
 
 def apply_ticker_gate(coin, side, price, candles):
     """Apply per-ticker optimized gates. Returns True if signal passes."""
