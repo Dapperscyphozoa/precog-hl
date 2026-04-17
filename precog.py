@@ -114,6 +114,16 @@ def health():
 
 LOG_BUFFER = []  # ring buffer for last 100 log lines
 
+@app.route('/reset', methods=['GET'])
+def reset_cb():
+    """Reset circuit breaker and consecutive losses."""
+    state = load_state()
+    state['cb_pause_until'] = 0
+    state['consec_losses'] = 0
+    save_state(state)
+    log("CIRCUIT BREAKER RESET via /reset endpoint")
+    return jsonify({'status':'reset','cb_pause_until':0,'consec_losses':0})
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Receive DynaPro signal from TradingView.
@@ -381,7 +391,7 @@ BTC_VOL_THRESHOLD = 0.03
 # v8 safety params
 MAX_HOLD_SEC = 4 * 3600
 CB_CONSEC_LOSSES = 5
-CB_PAUSE_SEC = 3600
+CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.20
 
 # v8.3 RUNNER LOGIC — DISABLED in v8.4 (BT showed it hurt performance).
