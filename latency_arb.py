@@ -34,7 +34,7 @@ GATE_7_DISLOCATION    = 0.0015 # 0.15% minimum gap (was 0.1% — too small, fees
 GATE_8_COMPOSITE_MIN  = 0.55   # Lower composite (was 0.65 — too few signals)
 
 # Execution — TUNED for profit capture
-POSITION_RISK_PCT     = 0.05   # 5% equity per arb trade
+POSITION_RISK_PCT     = 0.20   # 20% equity per arb (low directional risk — convergence is near-certain)
 HOLD_MAX_SEC          = 45     # 45s timeout (was 30 — more time for convergence)
 CONVERGENCE_PCT       = 0.0005 # Exit at 0.05% remaining gap (was 0.03% — too tight)
 COOLDOWN_SEC          = 3      # 3s between arbs per coin (was 5)
