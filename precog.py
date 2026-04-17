@@ -103,9 +103,16 @@ def health():
     eq = 0
     try: eq = get_balance()
     except: pass
-    return jsonify({'status':'ok','version':'v8.10.2','equity':eq,
+    return jsonify({'status':'ok','version':'v8.11.0','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
-                    'coins':len(COINS)})
+                    'mt4_queue':len(MT4_QUEUE),
+                    'coins':len(COINS),
+                    'risk':INITIAL_RISK_PCT,
+                    'trail':TRAIL_PCT,
+                    'gates_loaded':len(TICKER_GATES),
+                    'recent_logs':LOG_BUFFER[-20:]})
+
+LOG_BUFFER = []  # ring buffer for last 100 log lines
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -427,7 +434,11 @@ def round_size(coin, sz):
     szD = _get_sz_decimals(coin)
     return round(sz, szD)
 
-def log(m): print(f"[{datetime.utcnow().isoformat()}] {m}", flush=True)
+def log(m):
+    msg = f"[{datetime.utcnow().isoformat()}] {m}"
+    print(msg, flush=True)
+    LOG_BUFFER.append(msg)
+    if len(LOG_BUFFER) > 100: LOG_BUFFER.pop(0)
 
 def current_risk_pct(equity):
     return SCALED_RISK_PCT if equity >= SCALE_DOWN_AT else INITIAL_RISK_PCT
