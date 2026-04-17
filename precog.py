@@ -267,13 +267,7 @@ def webhook():
 
     signal = {'coin': coin, 'action': action, 'price': price, 'ts': time.time(), 'source': 'dynapro'}
     
-    # DEDUP: ignore duplicate coin+action within 60s
-    dedup_key = f"{coin}_{action}"
-    now = time.time()
-    if dedup_key in WEBHOOK_DEDUP and now - WEBHOOK_DEDUP[dedup_key] < 60:
-        log(f"WEBHOOK DEDUP: {action} {coin} (duplicate within 60s, skipped)")
-        return jsonify({'status':'deduped','coin':coin,'action':action}), 200
-    WEBHOOK_DEDUP[dedup_key] = now
+    # DEDUP REMOVED — was blocking legitimate re-entries
     
     # Route: Pepperstone tickers → MT4, crypto tickers → HL
     raw_ticker = data.get('ticker','').upper().replace('PEPPERSTONE:','')
@@ -423,10 +417,10 @@ INITIAL_RISK_PCT = 0.10    # 10% risk — high confidence per-ticker gates
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
-LOOP_SEC = 300
+LOOP_SEC = 5  # continuous processing — no 5min sleep between cycles
 USE_ISOLATED_MARGIN = True
 
-MAX_POSITIONS = 8        # was 20 — fewer positions = more margin for arb
+MAX_POSITIONS = 20       # was 8 — LA dead, no margin reserve needed
 MAX_SAME_SIDE = 6        # was 15
 MAX_TOTAL_RISK = 0.80    # reserve 20% margin for arb trades
 STOP_LOSS_PCT = 0.02     # 2% hard SL — wide enough to not get hunted, cuts real losers
@@ -436,7 +430,7 @@ BTC_VOL_THRESHOLD = 0.03
 MAX_HOLD_SEC = 4 * 3600
 CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
-FUNDING_CUT_RATIO = 0.20
+FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
 
 # v8.3 RUNNER LOGIC — DISABLED in v8.4 (BT showed it hurt performance).
 # Kept code in place for future re-enable if validated on different data.
@@ -453,7 +447,7 @@ RUNNER_BE_BUFF  = 0.0005
 PRECOG_SIGNALS_ENABLED = True
 TRAIL_PCT = 0.003          # 0.3% trailing stop — let winners run, trail locks gains
 CLOUD_EXIT_ENABLED = False  # DISABLED — was closing at losses, overriding trail stop
-MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
+MAKER_FALLBACK_SEC = 5   # was 30 — price moves away during long wait
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -647,7 +641,13 @@ def get_mid(coin):
     try: return float(_cached_mids()[coin])
     except: return None
 
-def get_all_positions_live():
+_POSITIONS_CACHE = {'data': {}, 'ts': 0}
+
+def get_all_positions_live(force=False):
+    """Cached — refreshes once per tick (5s). Force=True for critical ops."""
+    now = time.time()
+    if not force and now - _POSITIONS_CACHE['ts'] < 4:
+        return _POSITIONS_CACHE['data']
     """Returns dict of coin -> {size, entry, pnl, mark} for all actual positions on HL."""
     out={}
     try:
@@ -663,6 +663,8 @@ def get_all_positions_live():
                 }
     except Exception as e:
         log(f"positions fetch err: {e}")
+    _POSITIONS_CACHE['data'] = out
+    _POSITIONS_CACHE['ts'] = time.time()
     return out
 
 def get_funding_rate(coin):
@@ -1096,17 +1098,22 @@ def main():
 
             # BTC vol throttle
             risk_mult = 1.0
-            try:
-                btc_c = fetch('BTC')
-                if len(btc_c) >= 12:
-                    recent = btc_c[-12:]
-                    hi = max(c[2] for c in recent); lo = min(c[3] for c in recent)
-                    btc_range = (hi-lo)/lo
-                    if btc_range > BTC_VOL_THRESHOLD:
-                        risk_mult = 0.5
-                        log(f"BTC vol {btc_range*100:.1f}% — risk halved")
-            except Exception as e:
-                log(f"btc vol err: {e}")
+            # BTC vol throttle — cached, fetch only every 15 min
+            btc_vol_age = now - getattr(main, '_btc_vol_ts', 0)
+            if btc_vol_age > 900:  # 15 min
+                try:
+                    btc_c = fetch('BTC')
+                    if len(btc_c) >= 12:
+                        recent = btc_c[-12:]
+                        hi = max(c[2] for c in recent); lo = min(c[3] for c in recent)
+                        main._btc_vol = (hi-lo)/lo
+                    main._btc_vol_ts = now
+                except Exception as e:
+                    log(f"btc vol err: {e}")
+            btc_range = getattr(main, '_btc_vol', 0)
+            if btc_range > BTC_VOL_THRESHOLD:
+                risk_mult = 0.5
+                log(f"BTC vol {btc_range*100:.1f}% — risk halved")
 
             cur_risk = current_risk_pct(equity)
             log(f"--- tick eq=${equity:.2f} risk={int(cur_risk*100)}% mult={risk_mult} positions={len(live_positions)} consec_L={state['consec_losses']} ---")
