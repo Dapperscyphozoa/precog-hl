@@ -132,7 +132,10 @@ void PollDynaPro() {
    }
 
    if (dir == "BUY" || dir == "buy") {
-      CloseBySymbol(sym, OP_SELL);  // close opposite
+      double fEMA = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
+      double sEMA = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
+      if (fEMA < sEMA) { Print("DYNAPRO BUY ", sym, " SKIP EMA bearish"); return; }
+      CloseBySymbol(sym, OP_SELL);
       if (!HasPosition(sym, OP_BUY)) {
          double ask = MarketInfo(sym, MODE_ASK);
          int t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0,
@@ -142,7 +145,10 @@ void PollDynaPro() {
       }
    }
    else if (dir == "SELL" || dir == "sell") {
-      CloseBySymbol(sym, OP_BUY);  // close opposite
+      double fEMA2 = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
+      double sEMA2 = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
+      if (fEMA2 > sEMA2) { Print("DYNAPRO SELL ", sym, " SKIP EMA bullish"); return; }
+      CloseBySymbol(sym, OP_BUY);
       if (!HasPosition(sym, OP_SELL)) {
          double bid = MarketInfo(sym, MODE_BID);
          int t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0,
