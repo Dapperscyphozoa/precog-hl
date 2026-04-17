@@ -208,17 +208,13 @@ def webhook():
         if direction:
             MT4_BIAS['direction'] = direction
             MT4_BIAS['ts'] = time.time()
-            # Only broadcast to HIGH-QUALITY Pepperstone tickers (not all 46)
-            MT4_BROADCAST_TICKERS = [
-                'XAUUSD.a', 'EURUSD.a', 'GBPUSD.a', 'USDJPY.a', 'US30.a',
-                'AUDUSD.a', 'NZDUSD.a', 'USDCAD.a', 'SpotBrent.a', 'GBPJPY.a'
-            ]
+            # Broadcast ALL Pepperstone tickers — EA confirms with EMA locally
             mt4_count = 0
-            for sym in MT4_BROADCAST_TICKERS:
-                MT4_QUEUE.append({'symbol': sym, 'direction': direction, 'price': 0, 'ts': time.time()})
+            for tv_sym, mt4_sym in TV_TO_MT4.items():
+                MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': 0, 'ts': time.time()})
                 mt4_count += 1
-            if len(MT4_QUEUE) > 50: MT4_QUEUE[:] = MT4_QUEUE[-50:]
-            log(f"MT4 BROADCAST: {direction} → {mt4_count} top tickers queued")
+            if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
+            log(f"MT4 BROADCAST: {direction} → {mt4_count} Pepperstone tickers queued")
         return jsonify({'status':'broadcast','direction':direction or '','count':mt4_count if direction else 0}), 200
 
     # Optional secret check
