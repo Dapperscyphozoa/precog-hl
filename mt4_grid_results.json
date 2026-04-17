@@ -1,0 +1,107 @@
+[
+  {
+    "ticker": "XAUUSD",
+    "base_wr": 61.9,
+    "opt_wr": 64.4,
+    "opt_n": 59,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003
+    },
+    "delta_wr": 2.5
+  },
+  {
+    "ticker": "XAGUSD",
+    "base_wr": 78.6,
+    "opt_wr": 79.4,
+    "opt_n": 63,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003
+    },
+    "delta_wr": 0.8
+  },
+  {
+    "ticker": "XPTUSD",
+    "base_wr": 73.0,
+    "opt_wr": 73.5,
+    "opt_n": 68,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003
+    },
+    "delta_wr": 0.5
+  },
+  {
+    "ticker": "XPDUSD",
+    "base_wr": 63.7,
+    "opt_wr": 65.3,
+    "opt_n": 72,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": false,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003
+    },
+    "delta_wr": 1.6
+  },
+  {
+    "ticker": "SPOTCRUDE",
+    "base_wr": 80.8,
+    "opt_wr": 82.1,
+    "opt_n": 145,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": false,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003
+    },
+    "delta_wr": 1.3
+  },
+  {
+    "ticker": "SPOTBRENT",
+    "base_wr": 76.5,
+    "opt_wr": 80.7,
+    "opt_n": 57,
+    "cfg": {
+      "gb": true,
+      "gs": true,
+      "cloud": true,
+      "body": 0,
+      "glb": 15,
+      "tp": 0.003
+    },
+    "delta_wr": 4.2
+  },
+  {
+    "ticker": "NATGAS",
+    "base_wr": 68.5,
+    "opt_wr": 71.0,
+    "opt_n": 62,
+    "cfg": {
+      "gb": true,
+      "gs": false,
+      "cloud": true,
+      "body": 0,
+      "glb": 20,
+      "tp": 0.003
+    },
+    "delta_wr": 2.4
+  }
+]

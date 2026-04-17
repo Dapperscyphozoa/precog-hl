@@ -1,0 +1,58 @@
+{
+  "XAUUSD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003
+  },
+  "XAGUSD": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003
+  },
+  "XPTUSD": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003
+  },
+  "XPDUSD": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003
+  },
+  "SPOTCRUDE": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003
+  },
+  "SPOTBRENT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003
+  },
+  "NATGAS": {
+    "gb": true,
+    "gs": false,
+    "cloud": true,
+    "body": 0,
+    "glb": 20,
+    "tp": 0.003
+  }
+}

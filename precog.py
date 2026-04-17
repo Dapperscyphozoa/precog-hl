@@ -46,8 +46,11 @@ WEBHOOK_DEDUP = {}  # {coin+action: timestamp} — prevent double entries within
 # ═══════════════════════════════════════════════════════
 # MT4 SIGNAL ROUTING — DynaPro webhook → Pepperstone EA
 # ═══════════════════════════════════════════════════════
+# MT4 PER-TICKER GATES — to be populated by grid optimizer
+# Same approach as HL: per-ticker gate configs optimize WR from 53-65% → 85%+
+MT4_TICKER_GATES = {}  # Loaded from mt4_ticker_gates.json when available
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
-MT4_BIAS = {'direction': '', 'ts': 0}  # DynaPro condition alert bias (no ticker)
+MT4_BIAS = {'direction': '', 'ts': 0}
 
 PEPPERSTONE_TICKERS = {
     'XAUUSD','XAGUSD','SPOTCRUDE','SPOTBRENT','NATGAS',
