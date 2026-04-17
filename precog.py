@@ -248,8 +248,10 @@ RUNNER_TP2_PCT  = 0.010
 RUNNER_TRAIL    = 0.007
 RUNNER_BE_BUFF  = 0.0005
 
-# v8.10 EXIT IMPROVEMENTS — TP + cloud-break exit (doesn't affect entry count)
-TP_PCT = 0.008          # +0.8% underlying = +8% equity @ 10x → lock winner
+# v8.11: PRECOG OWN SIGNALS — DISABLED (40% WR, bleeding capital)
+# DynaPro webhook signals are the real edge (77% WR in BT)
+# Keep process() running for position management (TP, cloud exit) on existing positions only
+PRECOG_SIGNALS_ENABLED = FalseTP_PCT = 0.008          # +0.8% underlying = +8% equity @ 10x → lock winner
 CLOUD_EXIT_ENABLED = True  # close if price crosses back through slow EMA (trend over)
 MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
 
@@ -729,6 +731,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
     if not sig: return
 
+    # v8.11: Skip precog's own signal entries — DynaPro webhook only
+    if not PRECOG_SIGNALS_ENABLED:
+        return
+
     # Enforce position caps (reconciled via live_positions)
     open_count = len(live_positions)
     if not live and open_count >= MAX_POSITIONS:
@@ -784,7 +790,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.10.1 | wallet={WALLET} | coins={len(COINS)} | 5m | {LEV}x ISOLATED | TP+CLOUD EXIT")
+    log(f"PreCog v8.11 | wallet={WALLET} | DynaPro webhook ONLY | precog signals OFF | TP+CLOUD EXIT")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
@@ -904,8 +910,10 @@ def main():
                 except Exception as e:
                     log(f"webhook process err: {e}"); break
 
-            # PRECOG SIGNALS — scan all coins (runs alongside webhook)
-            for c in COINS:
+            # POSITION MANAGEMENT — scan only coins with open positions (TP, cloud exit)
+            # Precog signals disabled — DynaPro webhook handles entries
+            active_coins = list(live_positions.keys()) if not PRECOG_SIGNALS_ENABLED else COINS
+            for c in active_coins:
                 try:
                     process(c, state, equity, live_positions, risk_mult)
                     # Refresh live_positions snapshot periodically (every 10 coins)
