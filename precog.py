@@ -162,10 +162,18 @@ def webhook():
                 log(f"WEBHOOK PATTERN SKIP: {text[:100]}")
                 return jsonify({'status':'received','type':'pattern'}), 200
         
-        # "long entry" / "short entry" — no ticker
+        # "long entry" / "short entry" — broadcast to ALL Pepperstone tickers
         elif text.lower() in ('long entry','short entry','long exit','short exit'):
-            log(f"WEBHOOK CONDITION: {text} (no ticker)")
-            return jsonify({'status':'received','type':'condition'}), 200
+            direction = 'BUY' if 'long' in text.lower() else 'SELL'
+            MT4_BIAS['direction'] = direction
+            MT4_BIAS['ts'] = time.time()
+            mt4_count = 0
+            for tv_sym, mt4_sym in TV_TO_MT4.items():
+                MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': 0, 'ts': time.time()})
+                mt4_count += 1
+            if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
+            log(f"MT4 BROADCAST: {direction} → {mt4_count} tickers (from '{text}')")
+            return jsonify({'status':'broadcast','direction':direction,'count':mt4_count}), 200
         
         else:
             parts = text.replace('\n',' ').split()
