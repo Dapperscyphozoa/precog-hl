@@ -43,6 +43,49 @@ KILL_FILE  = '/var/data/KILL'
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026')
 WEBHOOK_QUEUE = Queue()
 WEBHOOK_DEDUP = {}  # {coin+action: timestamp} — prevent double entries within 60s
+# ═══════════════════════════════════════════════════════
+# MT4 SIGNAL ROUTING — DynaPro webhook → Pepperstone EA
+# ═══════════════════════════════════════════════════════
+MT4_QUEUE = []  # EA polls /mt4/signals every 10s
+
+PEPPERSTONE_TICKERS = {
+    'XAUUSD','XAGUSD','SPOTCRUDE','SPOTBRENT','NATGAS',
+    'EURUSD','GBPUSD','USDJPY','EURGBP','GBPNZD',
+    'AUDCAD','AUDUSD','USDCAD','USDCHF','AUDCHF',
+    'AUDNZD','AUDJPY','CADCHF','CADJPY','CHFJPY',
+    'EURAUD','EURCAD','EURCHF','GBPAUD','GBPCHF',
+    'NZDUSD','NZDCAD','NAS100','US30','US500','US2000',
+    'GER40','UK100','JPN225','HK50','XPTUSD','XPDUSD',
+    'COPPER','CORN','WHEAT','SOYBEANS','COFFEE','SUGAR',
+    'VIX','USDX','EURX'
+}
+
+TV_TO_MT4 = {
+    'XAUUSD':'XAUUSD.a','XAGUSD':'XAGUSD.a','XPTUSD':'XPTUSD.a','XPDUSD':'XPDUSD.a',
+    'SPOTCRUDE':'SpotCrude.a','SPOTBRENT':'SpotBrent.a','NATGAS':'NatGas.a',
+    'EURUSD':'EURUSD.a','GBPUSD':'GBPUSD.a','USDJPY':'USDJPY.a',
+    'EURGBP':'EURGBP.a','GBPNZD':'GBPNZD.a','AUDCAD':'AUDCAD.a',
+    'AUDUSD':'AUDUSD.a','USDCAD':'USDCAD.a','USDCHF':'USDCHF.a',
+    'AUDCHF':'AUDCHF.a','AUDNZD':'AUDNZD.a','AUDJPY':'AUDJPY.a',
+    'CADCHF':'CADCHF.a','CADJPY':'CADJPY.a','CHFJPY':'CHFJPY.a',
+    'EURAUD':'EURAUD.a','EURCAD':'EURCAD.a','EURCHF':'EURCHF.a',
+    'GBPAUD':'GBPAUD.a','GBPCHF':'GBPCHF.a','NZDUSD':'NZDUSD.a',
+    'NZDCAD':'NZDCAD.a','NAS100':'NAS100.a','US30':'US30.a',
+    'US500':'US500.a','US2000':'US2000.a','GER40':'GER40.a',
+    'UK100':'UK100.a','JPN225':'JPN225.a','HK50':'HK50.a',
+    'COPPER':'Copper.a','CORN':'Corn.a','WHEAT':'Wheat.a',
+    'SOYBEANS':'Soybeans.a','COFFEE':'Coffee.a','SUGAR':'Sugar.a',
+    'VIX':'VIX.a','USDX':'USDX.a','EURX':'EURX.a'
+}
+
+def is_pepperstone(ticker):
+    clean = ticker.upper().replace('PEPPERSTONE:','').replace('USDT','').replace('.P','')
+    return clean in PEPPERSTONE_TICKERS
+
+def get_mt4_symbol(ticker):
+    clean = ticker.upper().replace('PEPPERSTONE:','').replace('USDT','').replace('.P','')
+    return TV_TO_MT4.get(clean, clean + '.a')
+
 
 # Map TradingView ticker → HL coin name
 def tv_to_hl(ticker):
@@ -175,6 +218,15 @@ def webhook():
         return jsonify({'status':'deduped','coin':coin,'action':action}), 200
     WEBHOOK_DEDUP[dedup_key] = now
     
+    # Route: Pepperstone tickers → MT4, crypto tickers → HL
+    raw_ticker = data.get('ticker','').upper().replace('PEPPERSTONE:','')
+    if is_pepperstone(raw_ticker):
+        mt4_sym = get_mt4_symbol(raw_ticker)
+        MT4_QUEUE.append({'symbol': mt4_sym, 'direction': action.upper(), 'price': price, 'ts': time.time()})
+        if len(MT4_QUEUE) > 20: MT4_QUEUE.pop(0)
+        log(f"MT4 QUEUED: {action} {mt4_sym} @ {price}")
+        return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':action}), 200
+
     WEBHOOK_QUEUE.put(signal)
     log(f"WEBHOOK: {action} {coin} @ {price} (queued, size={WEBHOOK_QUEUE.qsize()})")
     return jsonify({'status':'queued','coin':coin,'action':action}), 200
@@ -183,6 +235,21 @@ def webhook():
 def signal_alias():
     """Alias for /webhook — backwards compatible with old cyber-psycho webhook URL."""
     return webhook()
+
+
+@app.route('/mt4/signals', methods=['GET'])
+def mt4_signals():
+    """EA polls this every 10s. Returns one signal, removes from queue."""
+    global MT4_QUEUE
+    if MT4_QUEUE:
+        sig = MT4_QUEUE.pop(0)
+        log(f"MT4 SERVED: {sig['direction']} {sig['symbol']}")
+        return jsonify(sig)
+    return jsonify({'symbol':'','direction':'','price':0})
+
+@app.route('/mt4/status', methods=['GET'])
+def mt4_status():
+    return jsonify({'queue_size':len(MT4_QUEUE),'queue':MT4_QUEUE[:5]})
 
 # v8.10 coin list — 50 validated keepers (added 8 weak-but-positive tier)
 COINS = [
