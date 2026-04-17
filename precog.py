@@ -945,15 +945,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
         return
 
-    # Per-ticker gate check (safe — never crashes the loop)
+    # Per-ticker gate check — uses candles already fetched above (no extra API call)
     try:
-        candles_for_gate = fetch(coin, retries=1)
         px_for_gate = get_mid(coin) or 0
-        if not apply_ticker_gate(coin, sig, px_for_gate, candles_for_gate):
+        if not apply_ticker_gate(coin, sig, px_for_gate, candles):
             log(f"{coin} {sig} GATED by per-ticker filter")
             return
     except Exception as e:
-        log(f"{coin} gate check err: {e}")  # pass through on error
+        log(f"{coin} gate check err: {e}")
 
     log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
 
