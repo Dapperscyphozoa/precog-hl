@@ -3,31 +3,31 @@
     "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0.3,
+    "body": 0,
     "glb": 15,
     "tp": 0.0008
   },
   "AUDCHF": {
-    "gb": false,
-    "gs": true,
-    "cloud": true,
-    "body": 0,
-    "glb": 20,
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
+    "glb": 15,
     "tp": 0.0008
   },
   "AUDJPY": {
     "gb": true,
     "gs": true,
-    "cloud": true,
+    "cloud": false,
     "body": 0,
     "glb": 15,
     "tp": 0.001
   },
   "AUDNZD": {
     "gb": true,
-    "gs": false,
-    "cloud": true,
-    "body": 0.3,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
     "glb": 15,
     "tp": 0.0008
   },
@@ -35,53 +35,53 @@
     "gb": true,
     "gs": true,
     "cloud": true,
-    "body": 0.3,
+    "body": 0,
     "glb": 15,
     "tp": 0.0008
   },
   "CADCHF": {
     "gb": true,
-    "gs": false,
+    "gs": true,
     "cloud": false,
-    "body": 0.3,
+    "body": 0,
     "glb": 15,
     "tp": 0.0008
   },
   "CADJPY": {
-    "gb": true,
-    "gs": false,
-    "cloud": false,
-    "body": 0,
-    "glb": 15,
-    "tp": 0.001
-  },
-  "CHFJPY": {
-    "gb": true,
+    "gb": false,
     "gs": true,
     "cloud": false,
     "body": 0.3,
     "glb": 15,
     "tp": 0.001
   },
-  "Coffee": {
-    "gb": false,
-    "gs": false,
+  "CHFJPY": {
+    "gb": true,
+    "gs": true,
     "cloud": true,
-    "body": 0,
+    "body": 0.3,
     "glb": 15,
+    "tp": 0.001
+  },
+  "Coffee": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
     "tp": 0.002
   },
   "Copper": {
     "gb": true,
-    "gs": false,
+    "gs": true,
     "cloud": false,
-    "body": 0.3,
+    "body": 0,
     "glb": 15,
     "tp": 0.002
   },
   "Corn": {
     "gb": true,
-    "gs": false,
+    "gs": true,
     "cloud": false,
     "body": 0,
     "glb": 15,
@@ -98,22 +98,22 @@
   "EURCAD": {
     "gb": true,
     "gs": true,
-    "cloud": true,
-    "body": 0,
+    "cloud": false,
+    "body": 0.3,
     "glb": 15,
     "tp": 0.0008
   },
   "EURCHF": {
     "gb": true,
     "gs": true,
-    "cloud": true,
+    "cloud": false,
     "body": 0.3,
     "glb": 20,
     "tp": 0.0008
   },
   "EURGBP": {
     "gb": true,
-    "gs": true,
+    "gs": false,
     "cloud": true,
     "body": 0.3,
     "glb": 15,
@@ -121,23 +121,23 @@
   },
   "EURUSD": {
     "gb": true,
-    "gs": false,
-    "cloud": false,
-    "body": 0.3,
-    "glb": 20,
-    "tp": 0.0008
-  },
-  "EURX": {
-    "gb": false,
     "gs": true,
     "cloud": true,
     "body": 0,
-    "glb": 20,
+    "glb": 15,
+    "tp": 0.0008
+  },
+  "EURX": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
     "tp": 0.0008
   },
   "GBPAUD": {
     "gb": true,
-    "gs": true,
+    "gs": false,
     "cloud": true,
     "body": 0.3,
     "glb": 20,
@@ -145,7 +145,7 @@
   },
   "GBPCHF": {
     "gb": true,
-    "gs": true,
+    "gs": false,
     "cloud": false,
     "body": 0,
     "glb": 20,
@@ -155,22 +155,22 @@
     "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0.3,
-    "glb": 15,
+    "body": 0,
+    "glb": 20,
     "tp": 0.001
   },
   "GBPUSD": {
     "gb": true,
     "gs": true,
-    "cloud": true,
-    "body": 0,
+    "cloud": false,
+    "body": 0.3,
     "glb": 20,
     "tp": 0.001
   },
   "GER40": {
-    "gb": false,
-    "gs": true,
-    "cloud": true,
+    "gb": true,
+    "gs": false,
+    "cloud": false,
     "body": 0.3,
     "glb": 15,
     "tp": 0.0015
@@ -178,17 +178,17 @@
   "HK50": {
     "gb": true,
     "gs": false,
-    "cloud": true,
+    "cloud": false,
     "body": 0,
     "glb": 20,
     "tp": 0.0015
   },
   "JPN225": {
-    "gb": false,
+    "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0.3,
-    "glb": 20,
+    "body": 0,
+    "glb": 15,
     "tp": 0.0015
   },
   "NAS100": {
@@ -203,15 +203,15 @@
     "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0,
+    "body": 0.3,
     "glb": 20,
     "tp": 0.0008
   },
   "NZDUSD": {
-    "gb": false,
+    "gb": true,
     "gs": true,
     "cloud": true,
-    "body": 0.3,
+    "body": 0,
     "glb": 20,
     "tp": 0.0008
   },
@@ -219,23 +219,23 @@
     "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0.3,
+    "body": 0,
     "glb": 20,
     "tp": 0.002
   },
   "Oats": {
     "gb": false,
     "gs": true,
-    "cloud": true,
-    "body": 0,
+    "cloud": false,
+    "body": 0.3,
     "glb": 15,
-    "tp": 0.0008
+    "tp": 0.002
   },
   "SoyOil": {
     "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0.3,
+    "body": 0,
     "glb": 15,
     "tp": 0.002
   },
@@ -243,22 +243,22 @@
     "gb": false,
     "gs": true,
     "cloud": false,
-    "body": 0,
+    "body": 0.3,
     "glb": 15,
     "tp": 0.002
   },
   "SpotBrent": {
-    "gb": true,
+    "gb": false,
     "gs": true,
     "cloud": true,
-    "body": 0.3,
+    "body": 0,
     "glb": 15,
     "tp": 0.002
   },
   "SpotCrude": {
     "gb": true,
-    "gs": true,
-    "cloud": true,
+    "gs": false,
+    "cloud": false,
     "body": 0,
     "glb": 20,
     "tp": 0.002
@@ -266,16 +266,16 @@
   "Sugar": {
     "gb": true,
     "gs": false,
-    "cloud": true,
-    "body": 0.3,
+    "cloud": false,
+    "body": 0,
     "glb": 20,
     "tp": 0.002
   },
   "UK100": {
     "gb": false,
     "gs": true,
-    "cloud": true,
-    "body": 0,
+    "cloud": false,
+    "body": 0.3,
     "glb": 15,
     "tp": 0.0015
   },
@@ -288,19 +288,19 @@
     "tp": 0.0015
   },
   "US30": {
-    "gb": false,
+    "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0.3,
-    "glb": 15,
+    "body": 0,
+    "glb": 20,
     "tp": 0.0015
   },
   "US500": {
-    "gb": false,
-    "gs": false,
-    "cloud": true,
-    "body": 0.3,
-    "glb": 15,
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 20,
     "tp": 0.0015
   },
   "USDCAD": {
@@ -314,7 +314,7 @@
   "USDCHF": {
     "gb": true,
     "gs": true,
-    "cloud": true,
+    "cloud": false,
     "body": 0,
     "glb": 15,
     "tp": 0.0008
@@ -322,56 +322,64 @@
   "USDJPY": {
     "gb": true,
     "gs": false,
-    "cloud": false,
-    "body": 0,
+    "cloud": true,
+    "body": 0.3,
     "glb": 20,
     "tp": 0.001
   },
   "USDX": {
     "gb": true,
-    "gs": false,
-    "cloud": false,
+    "gs": true,
+    "cloud": true,
     "body": 0,
-    "glb": 15,
+    "glb": 20,
     "tp": 0.0008
   },
   "VIX": {
     "gb": false,
     "gs": true,
-    "cloud": false,
-    "body": 0.3,
-    "glb": 20,
+    "cloud": true,
+    "body": 0,
+    "glb": 15,
     "tp": 0.0008
   },
   "Wheat": {
     "gb": true,
-    "gs": false,
+    "gs": true,
     "cloud": false,
     "body": 0,
     "glb": 20,
     "tp": 0.002
   },
-  "XPDUSD": {
-    "gb": false,
+  "XAGUSD": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": 0.003
+  },
+  "XAUUSD": {
+    "gb": true,
     "gs": false,
     "cloud": true,
-    "body": 0,
+    "body": 0.3,
+    "glb": 15,
+    "tp": 0.003
+  },
+  "XPDUSD": {
+    "gb": true,
+    "gs": false,
+    "cloud": false,
+    "body": 0.3,
     "glb": 15,
     "tp": 0.003
   },
   "XPTUSD": {
     "gb": true,
-    "gs": false,
-    "cloud": false,
-    "body": 0.3,
-    "glb": 20,
-    "tp": 0.003
-  },
-  "XAUUSD": {
-    "gb": true,
     "gs": true,
     "cloud": false,
-    "body": 0,
+    "body": 0.3,
     "glb": 15,
     "tp": 0.003
   }
