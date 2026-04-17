@@ -199,17 +199,23 @@ def webhook():
     
     if not data.get('ticker') or not data.get('action'):
         # Condition alerts ("long entry"/"short entry") — no ticker
-        # Use as DynaPro confirmation bias for MT4 EA
+        # Broadcast to ALL Pepperstone tickers — EA confirms with EMA
         action_text = str(data.get('action','')).lower()
-        if 'long' in action_text or 'buy' in action_text:
-            MT4_BIAS['direction'] = 'BUY'
+        direction = None
+        if 'long' in action_text or 'buy' in action_text: direction = 'BUY'
+        elif 'short' in action_text or 'sell' in action_text: direction = 'SELL'
+        
+        if direction:
+            MT4_BIAS['direction'] = direction
             MT4_BIAS['ts'] = time.time()
-            log(f"MT4 BIAS SET: BUY (from DynaPro condition alert)")
-        elif 'short' in action_text or 'sell' in action_text:
-            MT4_BIAS['direction'] = 'SELL'
-            MT4_BIAS['ts'] = time.time()
-            log(f"MT4 BIAS SET: SELL (from DynaPro condition alert)")
-        return jsonify({'status':'bias_set','direction':MT4_BIAS.get('direction','')}), 200
+            # Queue for all Pepperstone tickers
+            mt4_count = 0
+            for tv_sym, mt4_sym in TV_TO_MT4.items():
+                MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': 0, 'ts': time.time()})
+                mt4_count += 1
+            if len(MT4_QUEUE) > 100: MT4_QUEUE[:] = MT4_QUEUE[-100:]
+            log(f"MT4 BROADCAST: {direction} → {mt4_count} Pepperstone tickers queued")
+        return jsonify({'status':'broadcast','direction':direction or '','count':mt4_count if direction else 0}), 200
 
     # Optional secret check
     if WEBHOOK_SECRET and data.get('secret') and data['secret'] != WEBHOOK_SECRET:
