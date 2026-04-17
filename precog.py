@@ -395,13 +395,12 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
         sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (bar_ts - last_sell_ts) > CD_MS
         buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (bar_ts - last_buy_ts)  > CD_MS
-        # v8.5: chase gate for gated coins on sells
-        # v8.11: chase gate for ALL buys (100% of losses were buys)
+        # v8.5: chase gate for gated coins
         if apply_gate:
             if sell_ok and not chase_gate_ok('SELL', cl[i], candles, i):
                 sell_ok = False
-        if buy_ok and not chase_gate_ok('BUY', cl[i], candles, i):
-            buy_ok = False
+            if buy_ok and not chase_gate_ok('BUY', cl[i], candles, i):
+                buy_ok = False
         if sell_ok: return 'SELL', bar_ts
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
