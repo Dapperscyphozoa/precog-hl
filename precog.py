@@ -398,7 +398,7 @@ RUNNER_BE_BUFF  = 0.0005
 # Keep process() running for position management (TP, cloud exit) on existing positions only
 PRECOG_SIGNALS_ENABLED = True
 TRAIL_PCT = 0.003          # 0.3% trailing stop — let winners run, trail locks gains
-CLOUD_EXIT_ENABLED = True  # close if price crosses back through slow EMA (trend over)
+CLOUD_EXIT_ENABLED = False  # DISABLED — was closing at losses, overriding trail stop
 MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
