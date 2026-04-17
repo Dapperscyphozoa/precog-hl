@@ -30,6 +30,7 @@ from eth_account import Account
 import threading
 from queue import Queue
 from flask import Flask, request as flask_request, jsonify
+from gates import run_gates
 
 WALLET     = os.environ['HYPERLIQUID_ACCOUNT']
 PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
@@ -251,7 +252,7 @@ RUNNER_BE_BUFF  = 0.0005
 # v8.11: PRECOG OWN SIGNALS — DISABLED (40% WR, bleeding capital)
 # DynaPro webhook signals are the real edge (77% WR in BT)
 # Keep process() running for position management (TP, cloud exit) on existing positions only
-PRECOG_SIGNALS_ENABLED = FalseTP_PCT = 0.008          # +0.8% underlying = +8% equity @ 10x → lock winner
+PRECOG_SIGNALS_ENABLED = TrueTP_PCT = 0.008          # +0.8% underlying = +8% equity @ 10x → lock winner
 CLOUD_EXIT_ENABLED = True  # close if price crosses back through slow EMA (trend over)
 MAKER_FALLBACK_SEC = 30  # if Alo doesn't fill in 30s, fallback to Ioc taker
 
@@ -394,12 +395,13 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
         sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (bar_ts - last_sell_ts) > CD_MS
         buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (bar_ts - last_buy_ts)  > CD_MS
-        # v8.5: chase gate for gated coins
+        # v8.5: chase gate for gated coins on sells
+        # v8.11: chase gate for ALL buys (100% of losses were buys)
         if apply_gate:
             if sell_ok and not chase_gate_ok('SELL', cl[i], candles, i):
                 sell_ok = False
-            if buy_ok and not chase_gate_ok('BUY', cl[i], candles, i):
-                buy_ok = False
+        if buy_ok and not chase_gate_ok('BUY', cl[i], candles, i):
+            buy_ok = False
         if sell_ok: return 'SELL', bar_ts
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
@@ -731,10 +733,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
     if not sig: return
 
-    # v8.11: Skip precog's own signal entries — DynaPro webhook only
-    if not PRECOG_SIGNALS_ENABLED:
-        return
-
     # Enforce position caps (reconciled via live_positions)
     open_count = len(live_positions)
     if not live and open_count >= MAX_POSITIONS:
@@ -910,10 +908,8 @@ def main():
                 except Exception as e:
                     log(f"webhook process err: {e}"); break
 
-            # POSITION MANAGEMENT — scan only coins with open positions (TP, cloud exit)
-            # Precog signals disabled — DynaPro webhook handles entries
-            active_coins = list(live_positions.keys()) if not PRECOG_SIGNALS_ENABLED else COINS
-            for c in active_coins:
+            # PRECOG + WEBHOOK SIGNALS — scan all coins
+            for c in COINS:
                 try:
                     process(c, state, equity, live_positions, risk_mult)
                     # Refresh live_positions snapshot periodically (every 10 coins)
