@@ -22,27 +22,27 @@ BYBIT_SYMBOLS['BONK'] = '1000BONKUSDT'
 # HL symbol mapping
 HL_SYMBOLS = {'PEPE':'kPEPE','BONK':'kBONK'}
 
-# Gate thresholds
-GATE_0_STALENESS_MS   = 300    # HL price must be >300ms stale
-GATE_1_WINDOW_MS      = 2000   # Entry must happen within 2s of detection
-GATE_2_VOL_SIGMA      = 2.7    # Minimum volatility regime (σ)
-GATE_3_ZSCORE_MIN     = 2.0    # Minimum Z-score for divergence
-GATE_4_FEAR_THRESHOLD = 0.3    # Fear index threshold (0-1)
-GATE_5_SPREAD_MAX     = 0.0005 # 0.05% max HL spread
-GATE_6_ODDA_MIN       = 3      # Minimum trades/sec on Binance (institutional flow)
-GATE_7_DISLOCATION    = 0.001  # 0.1% minimum price gap
-GATE_8_COMPOSITE_MIN  = 0.65   # Minimum composite score to fire (0-1)
+# Gate thresholds — TUNED for profit
+GATE_0_STALENESS_MS   = 200    # HL price must be >200ms stale (was 300)
+GATE_1_WINDOW_MS      = 3000   # 3s entry window (was 2s — more time to validate)
+GATE_2_VOL_SIGMA      = 1.5    # Lower vol threshold (was 2.7 — too restrictive)
+GATE_3_ZSCORE_MIN     = 1.5    # Lower z-score (was 2.0 — missing opportunities)
+GATE_4_FEAR_THRESHOLD = 0.2    # Lower fear bar (was 0.3)
+GATE_5_SPREAD_MAX     = 0.0008 # 0.08% max spread (was 0.05% — too tight)
+GATE_6_ODDA_MIN       = 2      # 2 trades/sec minimum (was 3)
+GATE_7_DISLOCATION    = 0.0015 # 0.15% minimum gap (was 0.1% — too small, fees ate it)
+GATE_8_COMPOSITE_MIN  = 0.55   # Lower composite (was 0.65 — too few signals)
 
-# Execution
+# Execution — TUNED for profit capture
 POSITION_RISK_PCT     = 0.05   # 5% equity per arb trade
-HOLD_MAX_SEC          = 30     # Force exit after 30s
-CONVERGENCE_PCT       = 0.0003 # Exit when gap narrows to 0.03%
-COOLDOWN_SEC          = 5      # Min seconds between arb trades on same coin
+HOLD_MAX_SEC          = 45     # 45s timeout (was 30 — more time for convergence)
+CONVERGENCE_PCT       = 0.0005 # Exit at 0.05% remaining gap (was 0.03% — too tight)
+COOLDOWN_SEC          = 3      # 3s between arbs per coin (was 5)
 LEV                   = 10     # Leverage
 
 # Binance price buffer
-PRICE_WINDOW_MS       = 2000   # Rolling 2s window for Binance prices
-TICK_BUFFER_SIZE      = 500    # Max ticks per coin in buffer
+PRICE_WINDOW_MS       = 3000   # 3s window (was 2s — more history for stats)
+TICK_BUFFER_SIZE      = 1000   # More ticks (was 500)
 
 # ═══════════════════════════════════════════════════════
 # STATE
@@ -295,13 +295,20 @@ def scan_arb_opportunities(get_mid_fn, place_fn, close_fn, get_balance_fn, get_f
         side = pos['side']
         pnl_pct = (hl_px - entry) / entry if side == 'BUY' else (entry - hl_px) / entry
 
-        # Convergence exit: gap has closed
+        # Convergence exit: gap has closed AND we're in profit
         bn_ticks = binance_prices.get(coin)
         bn_px = bn_ticks[-1][1] if bn_ticks else hl_px
         current_gap = abs(bn_px - hl_px) / hl_px
 
-        if current_gap < CONVERGENCE_PCT or age > HOLD_MAX_SEC:
-            reason = f"converged ({current_gap*100:.3f}%)" if current_gap < CONVERGENCE_PCT else f"timeout ({age:.0f}s)"
+        # Must be at least +0.05% profit to exit on convergence (covers fees)
+        min_profit = 0.0005
+        profitable = pnl_pct > min_profit
+
+        if (current_gap < CONVERGENCE_PCT and profitable) or age > HOLD_MAX_SEC:
+            if age > HOLD_MAX_SEC:
+                reason = f"timeout ({age:.0f}s) pnl={pnl_pct*100:+.3f}%"
+            else:
+                reason = f"converged ({current_gap*100:.3f}%) pnl={pnl_pct*100:+.3f}%"
             pnl = close_fn(HL_SYMBOLS.get(coin, coin))
             if pnl is not None:
                 la_stats['pnl'] += pnl_pct
