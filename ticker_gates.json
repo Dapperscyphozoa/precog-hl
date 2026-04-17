@@ -618,5 +618,115 @@
     "momo": 0,
     "mcl": 0,
     "glb": 15
+  },
+  "BTCUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "ETHUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "SOLUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "BNBUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "PEPEUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "SHIBUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "LTCUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "UMAUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "JUPUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "AEROUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
+  },
+  "HYPEUSDT": {
+    "gb": true,
+    "gs": true,
+    "cloud": true,
+    "tp": 0.003,
+    "body": 0,
+    "momo": 0,
+    "mcl": 0,
+    "glb": 20
   }
 }
