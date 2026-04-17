@@ -103,6 +103,10 @@ def health():
     eq = 0
     try: eq = get_balance()
     except: pass
+    try:
+        from latency_arb import get_la_status
+        la = get_la_status()
+    except: la = {'la_active': False}
     return jsonify({'status':'ok','version':'v8.11.0','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -110,6 +114,7 @@ def health():
                     'risk':INITIAL_RISK_PCT,
                     'trail':TRAIL_PCT,
                     'gates_loaded':len(TICKER_GATES),
+                    'la':la,
                     'recent_logs':LOG_BUFFER[-20:]})
 
 LOG_BUFFER = []  # ring buffer for last 100 log lines
@@ -1102,6 +1107,16 @@ if __name__ == '__main__':
     # Run precog signal loop in background thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
+    # Run latency arbitrage module in background thread
+    try:
+        from latency_arb import start_la_module
+        la_thread = threading.Thread(target=start_la_module,
+            args=(get_mid, place, close, get_balance, get_funding_rate, log),
+            daemon=True)
+        la_thread.start()
+        log("Latency Arb module started")
+    except Exception as e:
+        log(f"LA module failed to start: {e}")
     # Run Flask webhook server in main thread (Render expects port 10000)
     port = int(os.environ.get('PORT', 10000))
     log(f"Webhook server starting on port {port}")
