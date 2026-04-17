@@ -1110,12 +1110,9 @@ def main():
             for c in COINS:
                 try:
                     process(c, state, equity, live_positions, risk_mult)
-                    # Refresh live_positions snapshot periodically (every 10 coins)
-                    if COINS.index(c) % 10 == 9:
-                        live_positions = get_all_positions_live()
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(2.0)  # 2s between coins — 25 coins × 2s = 50s cycle, no 429s
+                time.sleep(2.0)  # 2s between coins — 50 coins × 2s = 100s cycle
 
             save_state(state)
             log(f"--- tick complete ---")
