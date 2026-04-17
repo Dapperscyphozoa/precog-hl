@@ -344,11 +344,14 @@ else:
 
 def apply_ticker_gate(coin, side, price, candles):
     """Apply per-ticker optimized gates. Returns True if signal passes."""
-    # Strip exchange suffix to match gate keys
     key = coin.upper().replace('.P','')
-    gate = TICKER_GATES.get(key)
+    # Try: exact, +USDT, strip k prefix +USDT (kBONK→BONKUSDT, kPEPE→PEPEUSDT)
+    gate = TICKER_GATES.get(key) or TICKER_GATES.get(key + 'USDT')
+    if not gate and key.startswith('K'):
+        gate = TICKER_GATES.get(key[1:] + 'USDT')
     if not gate:
-        return True  # no gate config = pass through
+        log(f"{coin} NO GATE CONFIG — signal passes ungated")
+        return True
     
     glb = gate.get('glb', 20)
     
