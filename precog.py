@@ -70,6 +70,8 @@ def webhook():
     Also accepts plain text: 'buy BTCUSD 12345.67' format.
     """
     # Auth check (optional — TradingView can include secret in payload)
+    raw_body = flask_request.get_data(as_text=True)
+    log(f"WEBHOOK RAW: content_type={flask_request.content_type} body={raw_body[:200]}")
     try:
         data = flask_request.get_json(force=True, silent=True)
         if not data:
@@ -85,7 +87,8 @@ def webhook():
         return jsonify({'error':'bad payload'}), 400
 
     if not data or 'ticker' not in data or 'action' not in data:
-        return jsonify({'error':'need ticker + action'}), 400
+        log(f"WEBHOOK 400: data={data}")
+        return jsonify({'error':'need ticker + action','received':str(data)[:200]}), 400
 
     # Optional secret check
     if WEBHOOK_SECRET and data.get('secret') and data['secret'] != WEBHOOK_SECRET:
