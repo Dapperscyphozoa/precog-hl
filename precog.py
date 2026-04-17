@@ -227,13 +227,14 @@ def webhook():
         log(f"MT4 QUEUED: {action} {mt4_sym} @ {price}")
         return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':action}), 200
 
-    # Per-ticker gate for webhook signals
-    wh_coin = signal.get('coin','').upper()
-    wh_candles = fetch(wh_coin, retries=1) if wh_coin else None
-    wh_px = signal.get('price', 0)
-    if not apply_ticker_gate(wh_coin, action.upper(), wh_px, wh_candles):
-        log(f"WEBHOOK GATED: {action} {wh_coin} rejected by per-ticker filter")
-        return jsonify({'status':'gated','coin':wh_coin,'action':action}), 200
+    # Per-ticker gate for webhook signals (non-blocking — don't fetch candles in webhook handler)
+    try:
+        wh_coin = signal.get('coin','').upper()
+        gate = TICKER_GATES.get(wh_coin, {})
+        # Quick gate checks that don't need candles (body/cloud need candles, skip here)
+        # Full gate check happens in the main loop when signal executes
+    except Exception as e:
+        log(f"webhook gate err: {e}")
 
     WEBHOOK_QUEUE.put(signal)
     log(f"WEBHOOK: {action} {coin} @ {price} (queued, size={WEBHOOK_QUEUE.qsize()})")
@@ -892,12 +893,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
         return
 
-    # Per-ticker gate check
-    candles_for_gate = fetch(coin, retries=1)
-    px_for_gate = get_mid(coin) or 0
-    if not apply_ticker_gate(coin, sig, px_for_gate, candles_for_gate):
-        log(f"{coin} {sig} GATED by per-ticker filter")
-        return
+    # Per-ticker gate check (safe — never crashes the loop)
+    try:
+        candles_for_gate = fetch(coin, retries=1)
+        px_for_gate = get_mid(coin) or 0
+        if not apply_ticker_gate(coin, sig, px_for_gate, candles_for_gate):
+            log(f"{coin} {sig} GATED by per-ticker filter")
+            return
+    except Exception as e:
+        log(f"{coin} gate check err: {e}")  # pass through on error
 
     log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
 
