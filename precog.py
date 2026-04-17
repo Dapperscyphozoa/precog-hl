@@ -47,6 +47,7 @@ WEBHOOK_DEDUP = {}  # {coin+action: timestamp} — prevent double entries within
 # MT4 SIGNAL ROUTING — DynaPro webhook → Pepperstone EA
 # ═══════════════════════════════════════════════════════
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
+MT4_BIAS = {'direction': '', 'ts': 0}  # DynaPro condition alert bias (no ticker)
 
 PEPPERSTONE_TICKERS = {
     'XAUUSD','XAGUSD','SPOTCRUDE','SPOTBRENT','NATGAS',
@@ -197,8 +198,18 @@ def webhook():
         elif 'short' in lower or 'sell' in lower: data['action'] = 'sell'
     
     if not data.get('ticker') or not data.get('action'):
-        log(f"WEBHOOK PARTIAL: data={data}")
-        return jsonify({'status':'received','partial':True,'data':str(data)[:200]}), 200
+        # Condition alerts ("long entry"/"short entry") — no ticker
+        # Use as DynaPro confirmation bias for MT4 EA
+        action_text = str(data.get('action','')).lower()
+        if 'long' in action_text or 'buy' in action_text:
+            MT4_BIAS['direction'] = 'BUY'
+            MT4_BIAS['ts'] = time.time()
+            log(f"MT4 BIAS SET: BUY (from DynaPro condition alert)")
+        elif 'short' in action_text or 'sell' in action_text:
+            MT4_BIAS['direction'] = 'SELL'
+            MT4_BIAS['ts'] = time.time()
+            log(f"MT4 BIAS SET: SELL (from DynaPro condition alert)")
+        return jsonify({'status':'bias_set','direction':MT4_BIAS.get('direction','')}), 200
 
     # Optional secret check
     if WEBHOOK_SECRET and data.get('secret') and data['secret'] != WEBHOOK_SECRET:
@@ -280,7 +291,13 @@ def mt4_signals():
 
 @app.route('/mt4/status', methods=['GET'])
 def mt4_status():
-    return jsonify({'queue_size':len(MT4_QUEUE),'queue':MT4_QUEUE[:5]})
+    bias_age = time.time() - MT4_BIAS.get('ts', 0)
+    bias_active = bias_age < 300  # 5min validity
+    return jsonify({
+        'queue_size':len(MT4_QUEUE),'queue':MT4_QUEUE[:5],
+        'bias': MT4_BIAS.get('direction','') if bias_active else '',
+        'bias_age_sec': round(bias_age)
+    })
 
 # v8.10 coin list — 50 validated keepers (added 8 weak-but-positive tier)
 COINS = [
