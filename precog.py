@@ -863,11 +863,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if cur and cur.get('opened_at'):
         age = time.time() - cur['opened_at']
         if age > MAX_HOLD_SEC:
-            log(f"{coin} MAX HOLD exceeded ({age/3600:.1f}h) — force close")
+            log(f"{coin} MAX HOLD exceeded ({age/3600:.1f}h) — force close (does NOT count as loss)")
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1
-                else: state['consec_losses'] = 0
+                # MAX HOLD closes never trigger circuit breaker
                 state['last_pnl_close'] = pnl_pct
             state['positions'].pop(coin, None)
             return
