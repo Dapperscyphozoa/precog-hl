@@ -41,6 +41,7 @@ KILL_FILE  = '/var/data/KILL'
 # ═══════════════════════════════════════════════════════
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026')
 WEBHOOK_QUEUE = Queue()
+WEBHOOK_DEDUP = {}  # {coin+action: timestamp} — prevent double entries within 60s
 
 # Map TradingView ticker → HL coin name
 def tv_to_hl(ticker):
@@ -86,8 +87,8 @@ def webhook():
             parts = [p.strip() for p in text.split('|')]
             ticker_part = parts[-1] if len(parts) >= 2 else ''
             pt = parts[0].lower()
-            bearish = any(b in pt for b in ['double top','head and shoulders','rising wedge','bearish','short'])
-            bullish = any(b in pt for b in ['double bottom','inverted h&s','falling wedge','bullish','long'])
+            bearish = any(b in pt for b in ['double top','head and shoulders','rising wedge','descending triangle','bearish','evening star','shooting star','dark cloud','hanging man','three black'])
+            bullish = any(b in pt for b in ['double bottom','inverted h&s','inverse head','falling wedge','ascending triangle','bullish','morning star','hammer','piercing','three white'])
             if (bearish or bullish) and ticker_part:
                 data = {'action': 'sell' if bearish else 'buy', 'ticker': ticker_part}
             else:
@@ -145,6 +146,15 @@ def webhook():
         return jsonify({'error':f'unknown action: {action}'}), 400
 
     signal = {'coin': coin, 'action': action, 'price': price, 'ts': time.time(), 'source': 'dynapro'}
+    
+    # DEDUP: ignore duplicate coin+action within 60s
+    dedup_key = f"{coin}_{action}"
+    now = time.time()
+    if dedup_key in WEBHOOK_DEDUP and now - WEBHOOK_DEDUP[dedup_key] < 60:
+        log(f"WEBHOOK DEDUP: {action} {coin} (duplicate within 60s, skipped)")
+        return jsonify({'status':'deduped','coin':coin,'action':action}), 200
+    WEBHOOK_DEDUP[dedup_key] = now
+    
     WEBHOOK_QUEUE.put(signal)
     log(f"WEBHOOK: {action} {coin} @ {price} (queued, size={WEBHOOK_QUEUE.qsize()})")
     return jsonify({'status':'queued','coin':coin,'action':action}), 200
