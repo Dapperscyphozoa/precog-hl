@@ -305,16 +305,15 @@ def mt4_status():
         'bias_age_sec': round(bias_age)
     })
 
-# v8.11 coin list — 25 TOP PERFORMERS (cut from 50 to avoid 429 rate limits)
-# HL allows ~1 req/s sustained. 25 coins × 2s = 50s cycle. No 429s.
+# v8.11 coin list — 50 coins, 2s between each = 100s cycle. No 429s with Trend Buy/Sell (no broadcast)
 COINS = [
-    # TIER 1 — 90%+ WR gated
-    'SOL','LINK','UNI','APT','COMP','kBONK','WIF','DOT',
-    'SAND','ENS','POL','AAVE','ATOM','SUI','INJ','LDO',
-    # TIER 2 — 85-90% WR gated
-    'BLUR','APE','OP','TON','XRP','ADA','WLD','NEAR',
-    # GOLD
-    'BTC',
+    'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
+    'AERO','LIT','SPX','kPEPE','kBONK','kSHIB','MORPHO','JUP','XRP',
+    'SUSHI','ADA','WLD','PUMP','PENGU','FARTCOIN',
+    'AIXBT','AVAX','PENDLE','TAO','WIF',
+    'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
+    'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
+    'AR','GALA','VIRTUAL',
 ]
 
 # v8.10 SELECTIVE GATE — 20 coins where chase-filter improved WR in BT
