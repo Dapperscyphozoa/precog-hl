@@ -150,8 +150,7 @@
     "cloud": true,
     "body": 0,
     "glb": 20,
-    "tp": null,
-    "mcl": 0
+    "tp": 0.001
   },
   "GBPNZD": {
     "gb": true,
