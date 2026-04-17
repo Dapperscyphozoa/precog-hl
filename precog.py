@@ -130,6 +130,25 @@ def reset_cb():
     log("CIRCUIT BREAKER RESET via /reset endpoint")
     return jsonify({'status':'reset','cb_pause_until':0,'consec_losses':0})
 
+@app.route('/closeall', methods=['GET'])
+def close_all_positions():
+    """Force close ALL open positions and clear state."""
+    state = load_state()
+    positions = get_all_positions_live()
+    closed = []
+    for coin, pos in positions.items():
+        try:
+            pnl = close(coin)
+            closed.append({'coin':coin,'pnl':pnl})
+            state['positions'].pop(coin, None)
+        except Exception as e:
+            closed.append({'coin':coin,'error':str(e)})
+    state['consec_losses'] = 0
+    state['cb_pause_until'] = 0
+    save_state(state)
+    log(f"FORCE CLOSE ALL: {len(closed)} positions closed")
+    return jsonify({'status':'closed_all','positions':closed})
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Receive DynaPro signal from TradingView.
