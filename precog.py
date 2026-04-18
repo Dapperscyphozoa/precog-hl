@@ -868,29 +868,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
     # Position management: SL, trail, funding checks
     if cur and live:
-        # MR SCALP EXIT — fixed TP, different from BOS trail
-        if cur.get('stage') == 'mr':
-            mark = get_mid(coin)
-            if mark and cur.get('entry'):
-                entry = cur['entry']
-                side = cur['side']
-                fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
-                mr_tp = cur.get('mr_tp', MR_TP)
-                if fav >= mr_tp:
-                    pnl_pct = close(coin)
-                    if pnl_pct is not None:
-                        state['consec_losses'] = 0
-                    log(f"{coin} MR TP +{fav*100:.2f}% (scalp target {mr_tp*100:.1f}%)")
-                    state['positions'].pop(coin, None)
-                    return
-                # MR max hold timeout
-                age = time.time() - cur.get('opened_at', time.time())
-                if age > cur.get('mr_max_bars', MR_MAX_HOLD) * 5 * 60:
-                    pnl_pct = close(coin)
-                    log(f"{coin} MR TIMEOUT ({age/60:.0f}min)")
-                    state['positions'].pop(coin, None)
-                    return
-            return  # MR positions skip BOS trail logic
+
         mark = get_mid(coin)
         if mark and cur.get('entry'):
             entry = cur['entry']
@@ -1027,93 +1005,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'stage':'initial', 'peak':fill_px}
 
 # ═══════════════════════════════════════════════════════
-
-# ═══════════════════════════════════════════════════════
-# MEAN REVERSION ENGINE — prints in ranging/quiet markets
-# RSI extremes + Bollinger Band bounce → scalp TP/SL
-# ═══════════════════════════════════════════════════════
-MR_RSI_PERIOD = 14
-MR_BB_PERIOD = 20
-MR_TP = 0.003      # 0.3% quick grab
-MR_SL = 0.003      # 0.3% tight cut
-MR_MAX_HOLD = 30   # 30 bars = 2.5h max
-
-def mr_signal(candles):
-    """Mean-reversion signal: RSI extreme + Bollinger bounce."""
-    if not candles or len(candles) < MR_BB_PERIOD + 5:
-        return None
-    closes = [c[4] for c in candles]
-    # RSI
-    rsi_vals = rsi_calc(closes, MR_RSI_PERIOD)
-    cur_rsi = rsi_vals[-1]
-    if cur_rsi is None: return None
-    # Bollinger Bands
-    window = closes[-MR_BB_PERIOD:]
-    ma = sum(window) / MR_BB_PERIOD
-    std = (sum((x - ma) ** 2 for x in window) / MR_BB_PERIOD) ** 0.5
-    if std == 0: return None
-    upper = ma + 2 * std
-    lower = ma - 2 * std
-    px = closes[-1]
-    if cur_rsi < 30 and px <= lower * 1.005: return 'BUY'
-    if cur_rsi > 70 and px >= upper * 0.995: return 'SELL'
-    return None
-
-def process_mr(coin, state, equity, live_positions, risk_mult=1.0):
-    """Mean-reversion trade: scalp with fixed TP/SL."""
-    candles = fetch(coin)
-    if not candles: return
-    sig = mr_signal(candles)
-    if not sig: return
-    # Cooldown: don't MR if BOS just fired on this coin
-    mr_cd_key = coin + '_mr'
-    now_ms = int(time.time() * 1000)
-    last_mr = state['cooldowns'].get(mr_cd_key, 0)
-    if now_ms - last_mr < CD_MS: return
-    live = live_positions.get(coin)
-    # Don't MR if already in a position on this coin
-    if live: return
-    open_count = len(live_positions)
-    if open_count >= MAX_POSITIONS: return
-    risk_pct = current_risk_pct(equity)
-    total_locked = get_total_margin()
-    proposed = equity * risk_pct * risk_mult
-    if (total_locked + proposed) / equity > MAX_TOTAL_RISK: return
-    # Per-ticker gate check
-    try:
-        px = get_mid(coin) or 0
-        if not apply_ticker_gate(coin, sig, px, candles): return
-    except: pass
-    log(f"{coin} MR SIGNAL: {sig} (RSI bounce, scalp mode)")
-    state['cooldowns'][mr_cd_key] = now_ms
-    px = get_mid(coin)
-    if not px: return
-    is_buy = (sig == 'BUY')
-    sz = calc_size(equity, px, risk_pct, risk_mult)
-    fill_px = place(coin, is_buy, sz)
-    if fill_px:
-        # MR uses its own SL (tighter than BOS)
-        try:
-            entry = float(fill_px)
-            trigger_px = entry * (1 - MR_SL) if is_buy else entry * (1 + MR_SL)
-            trigger_px = float(round_price(coin, trigger_px))
-            limit_px = float(round_price(coin, trigger_px * (0.98 if not is_buy else 1.02)))
-            sl_size = float(round_size(coin, sz))
-            r = exchange.order(coin, not is_buy, sl_size, limit_px,
-                           {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
-                           reduce_only=True)
-            log(f"{coin} MR SL placed @ {trigger_px}")
-        except Exception as e:
-            log(f"{coin} MR SL err: {e}")
-        log_trade('HL', coin, sig, fill_px, 0, 'mr_signal')
-        state['positions'][coin] = {
-            'side': 'L' if is_buy else 'S',
-            'opened_at': time.time(),
-            'entry': fill_px,
-            'stage': 'mr',  # tagged as MR trade for different exit logic
-            'peak': fill_px,
-            'mr_tp': MR_TP, 'mr_sl': MR_SL, 'mr_max_bars': MR_MAX_HOLD
-        }
 
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
@@ -1252,14 +1143,6 @@ def main():
                 except Exception as e:
                     log(f"err {c}: {e}")
                 time.sleep(2.3)  # 2.3s between coins — prevents 429 at tail end of 50-coin cycle
-
-            # MEAN REVERSION — scalp engine for ranging markets
-            for c in COINS:
-                try:
-                    process_mr(c, state, equity, live_positions, risk_mult)
-                except Exception as e:
-                    log(f"mr err {c}: {e}")
-                time.sleep(0.3)  # candles cached, minimal API calls
 
             save_state(state)
             log(f"--- tick complete ---")
