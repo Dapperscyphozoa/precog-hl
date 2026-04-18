@@ -592,6 +592,54 @@ def fetch(coin, n_bars=100, retries=3):
     return []
 
 # ═══════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════
+# ATR-BASED DYNAMIC PARAMETERS — adapts SL/trail to current volatility
+# ═══════════════════════════════════════════════════════
+_ATR_CACHE = {}  # {coin: {'atr': float, 'ts': float}}
+ATR_CACHE_SEC = 300  # refresh every 5 min
+
+def get_atr(coin, candles=None, period=14):
+    """Calculate ATR as % of price. Cached 5 min."""
+    import time as _time
+    now = _time.time()
+    cached = _ATR_CACHE.get(coin)
+    if cached and now - cached['ts'] < ATR_CACHE_SEC:
+        return cached['atr']
+    
+    if not candles or len(candles) < period + 1:
+        return 0.005  # default 0.5% if no data
+    
+    trs = []
+    for i in range(1, len(candles)):
+        h, l, pc = candles[i][2], candles[i][3], candles[i-1][4]
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        trs.append(tr)
+    
+    if len(trs) < period:
+        return 0.005
+    
+    atr = sum(trs[-period:]) / period
+    atr_pct = atr / candles[-1][4]  # as % of current price
+    
+    # Clamp: min 0.2%, max 3%
+    atr_pct = max(0.002, min(0.03, atr_pct))
+    
+    _ATR_CACHE[coin] = {'atr': atr_pct, 'ts': now}
+    return atr_pct
+
+def dynamic_sl(coin, candles=None):
+    """SL = 1.5 × ATR — adapts to each coin's volatility."""
+    atr = get_atr(coin, candles)
+    sl = atr * 1.5
+    return max(0.003, min(0.02, sl))  # clamp 0.3% - 2.0%
+
+def dynamic_trail(coin, candles=None):
+    """Trail = 1.0 × ATR — tighter in quiet markets, wider in volatile."""
+    atr = get_atr(coin, candles)
+    trail = atr * 1.0
+    return max(0.002, min(0.015, trail))  # clamp 0.2% - 1.5%
+
 # SIGNAL — cooldown by timestamp, scan last K bars
 # ═══════════════════════════════════════════════════════
 SCAN_BARS = 3  # check last SCAN_BARS closed bars each tick
@@ -831,7 +879,8 @@ def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay."""
     try:
         entry = float(entry); size = float(size)
-        trigger_px = entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT)
+        coin_sl = dynamic_sl(coin)
+        trigger_px = entry * (1 - coin_sl) if is_long else entry * (1 + coin_sl)
         trigger_px = float(round_price(coin, trigger_px))
         # Limit price: aggressive to ensure fill (2% past trigger for slippage room)
         limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
@@ -865,12 +914,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
             # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
-            if fav <= -STOP_LOSS_PCT:
+            coin_sl = dynamic_sl(coin, candles)
+            if fav <= -coin_sl:
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     state['consec_losses'] += 1
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{STOP_LOSS_PCT*100:.0f}%)")
+                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{coin_sl*100:.1f}% ATR-based)")
                 state['positions'].pop(coin, None)
                 return
 
@@ -881,13 +931,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 cur['hwm'] = hwm
             
             # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
-            TRAIL_FLOOR = 0.002  # minimum 0.2% profit to exit — prevents breakeven exits
-            if hwm > TRAIL_PCT and (hwm - fav) >= TRAIL_PCT and fav >= TRAIL_FLOOR:
+            coin_trail = dynamic_trail(coin, candles)
+            trail_floor = coin_trail * 0.5  # floor = half the trail width
+            if hwm > coin_trail and (hwm - fav) >= coin_trail and fav >= trail_floor:
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     state['consec_losses'] = 0
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {TRAIL_PCT*100:.1f}%)")
+                log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {coin_trail*100:.1f}% ATR-based)")
                 state['positions'].pop(coin, None)
                 return
 
