@@ -417,7 +417,8 @@ CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering i
 FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
 
 TRAIL_PCT = 0.003
-MAKER_FALLBACK_SEC = 5
+MAKER_FALLBACK_SEC = 10
+MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -673,8 +674,8 @@ def place(coin, is_buy, size):
     if size <= 0:
         log(f"{coin} size rounded to 0 — skip"); return None
 
-    # MAKER attempt (Alo post-only) at inside-book price
-    maker_px = round_price(coin, px * (0.9998 if is_buy else 1.0002))
+    # SMART LIMIT — offset price in our favor for better entry
+    maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
     try:
         r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
