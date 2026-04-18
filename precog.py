@@ -422,7 +422,7 @@ USE_ISOLATED_MARGIN = True
 
 MAX_POSITIONS = 20       # was 8 — LA dead, no margin reserve needed
 MAX_SAME_SIDE = 12       # was 6 — with MAX_POS 20, side cap was blocking 14 trades
-MAX_TOTAL_RISK = 0.80    # reserve 20% margin for arb trades
+MAX_TOTAL_RISK = 0.80    # reserve 20% margin
 STOP_LOSS_PCT = 0.02     # 2% hard SL — wide enough to not get hunted, cuts real losers
 BTC_VOL_THRESHOLD = 0.03
 
@@ -742,9 +742,22 @@ def place(coin, is_buy, size):
     except Exception as e:
         log(f"taker err {coin}: {e}"); return None
 
+def cancel_trigger_orders(coin):
+    """Cancel any native SL/TP trigger orders for a coin — prevents orphaned stops."""
+    try:
+        open_orders = info.open_orders(WALLET)
+        for o in open_orders:
+            if o.get('coin') == coin:
+                oid = o.get('oid')
+                if oid:
+                    exchange.cancel(coin, oid)
+                    log(f"{coin} cancelled orphaned order {oid}")
+    except Exception as e:
+        log(f"{coin} cancel triggers err: {e}")
+
 def close(coin):
     """Returns realized pnl_pct for logging (FIX #11)."""
-    live = get_all_positions_live().get(coin)
+    live = get_all_positions_live(force=True).get(coin)
     if not live: return None
     is_buy=live['size']<0; size=abs(live['size']); px=get_mid(coin)
     if not px: return None
@@ -756,6 +769,7 @@ def close(coin):
         pct = ((px-entry)/entry*100) if live['size']>0 else ((entry-px)/entry*100)
         pnl_usd = live['pnl']
         log(f"CLOSE {coin} {size}@{slip} | entry={entry} exit={px} | {pct:+.2f}% | ${pnl_usd:+.3f}")
+        cancel_trigger_orders(coin)  # Kill orphaned SL orders
         return pct
     except Exception as e:
         log(f"close err {coin}: {e}")
