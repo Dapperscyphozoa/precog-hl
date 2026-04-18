@@ -577,12 +577,21 @@ def rsi_calc(c,n=14):
         r[i]=100 if al[i]==0 else 100-100/(1+ag[i]/al[i])
     return r
 
+_CANDLE_CACHE = {}  # {coin: {'data': [...], 'ts': float}}
+CANDLE_CACHE_SEC = 120  # 2 min cache — covers both BOS and MR scans in same cycle
+
 def fetch(coin, n_bars=100, retries=3):
+    now = time.time()
+    cached = _CANDLE_CACHE.get(coin)
+    if cached and now - cached['ts'] < CANDLE_CACHE_SEC:
+        return cached['data']
     end=int(time.time()*1000); start=end-n_bars*5*60*1000
     for attempt in range(retries):
         try:
             d=info.candles_snapshot(coin,'5m',start,end)
-            return [(int(c['t']),float(c['o']),float(c['h']),float(c['l']),float(c['c']),float(c['v'])) for c in d]
+            result = [(int(c['t']),float(c['o']),float(c['h']),float(c['l']),float(c['c']),float(c['v'])) for c in d]
+            _CANDLE_CACHE[coin] = {'data': result, 'ts': time.time()}
+            return result
         except Exception as e:
             es = str(e)
             if '429' in es and attempt < retries-1:
@@ -1250,7 +1259,7 @@ def main():
                     process_mr(c, state, equity, live_positions, risk_mult)
                 except Exception as e:
                     log(f"mr err {c}: {e}")
-                time.sleep(0.5)  # lighter delay for MR scan
+                time.sleep(0.3)  # candles cached, minimal API calls
 
             save_state(state)
             log(f"--- tick complete ---")
