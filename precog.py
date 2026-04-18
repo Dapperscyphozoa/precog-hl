@@ -1047,7 +1047,7 @@ def main():
                     process(c, state, equity, live_positions, risk_mult)
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(2.0)  # 2s between coins — 50 coins × 2s = 100s cycle
+                time.sleep(2.3)  # 2.3s between coins — prevents 429 at tail end of 50-coin cycle
 
             save_state(state)
             log(f"--- tick complete ---")
