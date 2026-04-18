@@ -126,6 +126,24 @@ def health():
 
 LOG_BUFFER = []  # ring buffer for last 100 log lines
 
+
+@app.route('/trades', methods=['GET'])
+def get_trades():
+    """Return trade log CSV as JSON for analysis."""
+    try:
+        import csv
+        trades = []
+        with open(TRADE_LOG) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                trades.append(row)
+        wins = sum(1 for t in trades if t.get('pnl','0') not in ('0','') and float(t['pnl']) > 0)
+        losses = sum(1 for t in trades if t.get('pnl','0') not in ('0','') and float(t['pnl']) < 0)
+        total_pnl = sum(float(t['pnl']) for t in trades if t.get('pnl','0') not in ('0',''))
+        return jsonify({'trades': trades[-50:], 'total': len(trades), 'wins': wins, 'losses': losses, 'total_pnl': round(total_pnl, 4)})
+    except Exception as e:
+        return jsonify({'error': str(e), 'trades': []})
+
 @app.route('/reset', methods=['GET'])
 def reset_cb():
     """Reset circuit breaker and consecutive losses."""
@@ -501,7 +519,7 @@ def log(m):
     msg = f"[{datetime.utcnow().isoformat()}] {m}"
     print(msg, flush=True)
     LOG_BUFFER.append(msg)
-    if len(LOG_BUFFER) > 100: LOG_BUFFER.pop(0)
+    if len(LOG_BUFFER) > 200: LOG_BUFFER.pop(0)
 
 def current_risk_pct(equity):
     return SCALED_RISK_PCT if equity >= SCALE_DOWN_AT else INITIAL_RISK_PCT
