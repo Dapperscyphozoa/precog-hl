@@ -18,6 +18,23 @@ from queue import Queue
 from flask import Flask, request as flask_request, jsonify
 from gates import run_gates
 
+# ═══════════════════════════════════════════════════════
+# TRADE LOG — persistent CSV for real WR tracking
+# ═══════════════════════════════════════════════════════
+TRADE_LOG = '/var/data/trades.csv'
+def log_trade(engine, coin, direction, entry, pnl, source, sl_pct=None):
+    import csv
+    try:
+        os.makedirs('/var/data', exist_ok=True)
+        exists = os.path.exists(TRADE_LOG)
+        with open(TRADE_LOG, 'a', newline='') as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(['timestamp','engine','coin','direction','entry','pnl','source','sl_pct'])
+            w.writerow([datetime.utcnow().isoformat(), engine, coin, direction, entry, pnl, source, sl_pct or ''])
+    except Exception as e:
+        pass  # don't crash on log failure
+
 WALLET     = os.environ['HYPERLIQUID_ACCOUNT']
 PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
@@ -33,7 +50,13 @@ WEBHOOK_QUEUE = Queue()
 # ═══════════════════════════════════════════════════════
 # MT4 PER-TICKER GATES — to be populated by grid optimizer
 # Same approach as HL: per-ticker gate configs optimize WR from 53-65% → 85%+
-MT4_TICKER_GATES = {}  # Loaded from mt4_ticker_gates.json when available
+# Load MT4 per-ticker gates from grid optimizer results
+try:
+    import json as _json
+    with open(os.path.join(os.path.dirname(__file__), 'mt4_ticker_gates.json')) as _f:
+        MT4_TICKER_GATES = _json.load(_f)
+except:
+    MT4_TICKER_GATES = {}
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
 MT4_BIAS = {'direction': '', 'ts': 0}
 
@@ -257,10 +280,18 @@ def webhook():
     raw_ticker = data.get('ticker','').upper().replace('PEPPERSTONE:','')
     if is_pepperstone(raw_ticker):
         mt4_sym = get_mt4_symbol(raw_ticker)
-        MT4_QUEUE.append({'symbol': mt4_sym, 'direction': action.upper(), 'price': price, 'ts': time.time()})
+        clean = raw_ticker.upper().replace('PEPPERSTONE:','').replace('.A','')
+        gate = MT4_TICKER_GATES.get(clean, {})
+        direction = action.upper()
+        # EURGBP inversion — mean-reverting pair, flip signal
+        if gate.get('inverted'):
+            direction = 'SELL' if direction == 'BUY' else 'BUY'
+            log(f"MT4 INVERTED {clean}: {action.upper()} → {direction}")
+        MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': price, 'ts': time.time()})
         if len(MT4_QUEUE) > 20: MT4_QUEUE.pop(0)
-        log(f"MT4 QUEUED: {action} {mt4_sym} @ {price}")
-        return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':action}), 200
+        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price}")
+        log_trade('MT4', clean, direction, price, 0, 'webhook')
+        return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':direction}), 200
 
     # Per-ticker gate for webhook signals (non-blocking — don't fetch candles in webhook handler)
     try:
@@ -416,7 +447,7 @@ CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
 
-TRAIL_PCT = 0.003
+TRAIL_PCT = 0.007          # 0.7% price trail — backtested optimal (381% vs -20% at 0.3%)
 MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
 
@@ -468,7 +499,9 @@ def current_risk_pct(equity):
 def load_state():
     default = {'positions':{}, 'cooldowns':{}, 'consec_losses':0, 'cb_pause_until':0, 'last_pnl_close':None, 'cd_format':'ts'}
     try:
-        with open(STATE_PATH) as f:
+        # Try primary path, fall back to backup
+        path = STATE_PATH if os.path.exists(STATE_PATH) else STATE_PATH + '.bak'
+        with open(path) as f:
             loaded = json.load(f)
         # v8.1 migration: wipe old bar-index cooldowns (values were small ints, new format is ms timestamps ~1.7e12)
         if loaded.get('cd_format') != 'ts':
@@ -480,11 +513,15 @@ def load_state():
     except: return default
 
 def save_state(s):
-    """Atomic write: write to .tmp then rename."""
+    """Atomic write with backup for deploy resilience."""
     os.makedirs('/var/data', exist_ok=True)
     tmp = STATE_PATH + '.tmp'
     with open(tmp,'w') as f: json.dump(s,f)
     os.replace(tmp, STATE_PATH)
+    # Backup copy survives if primary is lost on deploy
+    try:
+        import shutil; shutil.copy2(STATE_PATH, STATE_PATH + '.bak')
+    except: pass
 
 def kill_switch_active():
     return os.path.exists(KILL_FILE)
@@ -740,6 +777,7 @@ def close(coin):
         pct = ((px-entry)/entry*100) if live['size']>0 else ((entry-px)/entry*100)
         pnl_usd = live['pnl']
         log(f"CLOSE {coin} {size}@{slip} | entry={entry} exit={px} | {pct:+.2f}% | ${pnl_usd:+.3f}")
+        log_trade('HL', coin, 'CLOSE', px, pnl_usd, 'close')
         cancel_trigger_orders(coin)  # Kill orphaned SL orders
         return pct
     except Exception as e:
@@ -894,6 +932,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult)
                     place_native_sl(coin, False, fill_px, sz)
+                    log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px}
     else:
@@ -911,6 +950,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult)
                     place_native_sl(coin, True, fill_px, sz)
+                    log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px}
 
@@ -1040,6 +1080,7 @@ def main():
                                         'source': 'dynapro'
                                     }
                                     log(f"WEBHOOK OPEN {coin} {'BUY' if is_buy else 'SELL'} @ {fill}")
+                                    log_trade('HL', coin, 'BUY' if is_buy else 'SELL', fill, 0, 'webhook')
                     wh_count += 1
                 except Exception as e:
                     log(f"webhook process err: {e}"); break
