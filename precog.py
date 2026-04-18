@@ -831,14 +831,20 @@ def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay."""
     try:
         entry = float(entry); size = float(size)
-        sl_px = entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT)
-        sl_px = float(round_price(coin, sl_px))
+        trigger_px = entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT)
+        trigger_px = float(round_price(coin, trigger_px))
+        # Limit price: aggressive to ensure fill (2% past trigger for slippage room)
+        limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
         sl_size = float(round_size(coin, size))
         sl_side = not is_long
-        exchange.order(coin, sl_side, sl_size, sl_px,
-                       {"trigger": {"triggerPx": sl_px, "isMarket": True, "tpsl": "sl"}},
+        r = exchange.order(coin, sl_side, sl_size, limit_px,
+                       {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
                        reduce_only=True)
-        log(f"{coin} NATIVE SL placed @ {sl_px}")
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"{coin} NATIVE SL REJECTED: {status['error']}")
+        else:
+            log(f"{coin} NATIVE SL placed @ {trigger_px} (limit {limit_px})")
     except Exception as e:
         log(f"{coin} native SL err: {e}")
 
@@ -868,14 +874,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 state['positions'].pop(coin, None)
                 return
 
-            # TRAILING STOP: 0.3% trail — let winners run, lock gains
+            # TRAILING STOP — lock gains, but only exit if still in meaningful profit
             hwm = cur.get('hwm', fav)
             if fav > hwm:
                 hwm = fav
                 cur['hwm'] = hwm
             
-            # Only trail once in profit (hwm > 0) and retraced 0.3% from peak
-            if hwm > TRAIL_PCT and (hwm - fav) >= TRAIL_PCT:
+            # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
+            TRAIL_FLOOR = 0.002  # minimum 0.2% profit to exit — prevents breakeven exits
+            if hwm > TRAIL_PCT and (hwm - fav) >= TRAIL_PCT and fav >= TRAIL_FLOOR:
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     state['consec_losses'] = 0
