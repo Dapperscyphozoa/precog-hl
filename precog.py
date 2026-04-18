@@ -407,7 +407,7 @@ USE_ISOLATED_MARGIN = True
 MAX_POSITIONS = 20       # was 8 — LA dead, no margin reserve needed
 MAX_SAME_SIDE = 12       # was 6 — with MAX_POS 20, side cap was blocking 14 trades
 MAX_TOTAL_RISK = 0.80    # reserve 20% margin
-STOP_LOSS_PCT = 0.002     # 0.2% price move × 10x leverage = 2% of trade notional
+STOP_LOSS_PCT = 0.01      # 1.0% price × 10x = 10% of trade. Keeps 92% of winners (MAE backtested)
 BTC_VOL_THRESHOLD = 0.03
 
 # v8 safety params
