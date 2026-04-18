@@ -5,7 +5,7 @@ Dual signal engine:
   1. Internal BOS/pivot/RSI → per-ticker gated (73 configs)
   2. TV Trend Buy/Sell webhooks → per-ticker gated + EMA confirm (EA)
 
-10% risk | 10x lev | 0.3% trail | 2% SL | native HL stop orders
+10% risk | 10x lev | 0.7% trail | 1% SL | native HL stop orders
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -816,6 +816,9 @@ def close(coin):
     slip = round_price(coin, px * (1.005 if is_buy else 0.995))
     try:
         r=exchange.order(coin,is_buy,size,slip,{'limit':{'tif':'Ioc'}},reduce_only=True)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"CLOSE {coin} FAILED: {status['error']}"); return None
         entry = live['entry']
         pct = ((px-entry)/entry*100) if live['size']>0 else ((entry-px)/entry*100)
         pnl_usd = live['pnl']
@@ -1032,6 +1035,20 @@ def main():
 
             state = load_state()
             equity = get_balance()
+            # ACCOUNT DRAWDOWN BREAKER — flatten if equity drops 15% from session high
+            session_hwm = state.get('session_hwm', equity)
+            if equity > session_hwm:
+                state['session_hwm'] = equity
+                session_hwm = equity
+            dd = (session_hwm - equity) / session_hwm if session_hwm > 0 else 0
+            if dd >= 0.15:
+                log(f"!!! ACCOUNT DRAWDOWN {dd*100:.1f}% (hwm=${session_hwm:.2f} now=${equity:.2f}) — FLATTENING ALL")
+                flatten_all('DRAWDOWN')
+                state['cb_pause_until'] = time.time() + CB_PAUSE_SEC
+                state['session_hwm'] = equity  # reset hwm after flatten
+                save_state(state)
+                time.sleep(30)
+                continue
             now = time.time()
 
             # FIX #5: Circuit breaker check
@@ -1054,7 +1071,7 @@ def main():
             # Drop phantoms (state has it, HL doesn't)
             for k in list(state['positions'].keys()):
                 if state['positions'][k] and k not in live_positions:
-                    log(f"RECONCILE: phantom {k} cleared")
+                    log(f"RECONCILE: phantom {k} cleared (may be liquidation or native SL)")
                     state['positions'].pop(k)
             # Track live-only positions (HL has it, state doesn't)
             for k in live_positions:
