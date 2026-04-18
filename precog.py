@@ -155,6 +155,23 @@ def close_all_positions():
     log(f"FORCE CLOSE ALL: {len(closed)} positions closed")
     return jsonify({'status':'closed_all','positions':closed})
 
+@app.route('/transfer', methods=['POST'])
+def transfer_funds():
+    """Transfer USDC internally on HL. POST {amount, to_wallet}"""
+    try:
+        data = flask_request.get_json(force=True, silent=True)
+        if not data or 'amount' not in data:
+            return jsonify({'error': 'POST {amount, to_wallet} required'}), 400
+        amount = float(data['amount'])
+        to_wallet = data.get('to_wallet', WALLET)
+        log(f"TRANSFER REQUEST: {amount} USDC to {to_wallet}")
+        result = exchange.usd_transfer(amount, to_wallet)
+        log(f"TRANSFER RESULT: {result}")
+        return jsonify({'status': 'transferred', 'amount': amount, 'to': to_wallet, 'result': str(result)}), 200
+    except Exception as e:
+        log(f"TRANSFER ERROR: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Receive DynaPro signal from TradingView.
