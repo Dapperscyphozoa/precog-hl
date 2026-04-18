@@ -479,7 +479,7 @@ CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
 
-TRAIL_PCT = 0.007          # 0.7% price trail — backtested optimal (381% vs -20% at 0.3%)
+TRAIL_PCT = 0.004          # 0.4% trail — triggers in current market, BT +96% total PnL
 MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
 
