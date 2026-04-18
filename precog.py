@@ -759,12 +759,14 @@ def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay."""
     try:
         entry = float(entry); size = float(size)
-        sl_px = round_price(coin, entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT))
-        sl_side = False if is_long else True  # close direction
-        exchange.order(coin, sl_side, round_size(coin, size), sl_px,
-                       {"trigger": {"triggerPx": str(round(float(sl_px), 6)), "isMarket": True, "tpsl": "sl"}},
+        sl_px = entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT)
+        sl_px = float(round_price(coin, sl_px))
+        sl_size = float(round_size(coin, size))
+        sl_side = not is_long
+        exchange.order(coin, sl_side, sl_size, sl_px,
+                       {"trigger": {"triggerPx": f"{sl_px}", "isMarket": True, "tpsl": "sl"}},
                        reduce_only=True)
-        log(f"{coin} NATIVE SL placed @ {sl_px} ({'buy' if sl_side else 'sell'} stop)")
+        log(f"{coin} NATIVE SL placed @ {sl_px}")
     except Exception as e:
         log(f"{coin} native SL err: {e}")
 
