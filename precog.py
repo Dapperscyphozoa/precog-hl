@@ -675,7 +675,11 @@ def get_all_positions_live(force=False):
     _POSITIONS_CACHE['ts'] = time.time()
     return out
 
+_FUNDING_CACHE = {'data': {}, 'ts': 0}
 def get_funding_rate(coin):
+    now = __import__('time').time()
+    if now - _FUNDING_CACHE['ts'] < 900:  # cache 15 min
+        return _FUNDING_CACHE['data'].get(coin, 0)
     """Fetch current funding rate for a coin (per hour). Negative = shorts pay, positive = longs pay."""
     try:
         meta = info.meta_and_asset_ctxs()
@@ -1010,9 +1014,9 @@ def main():
                 if k not in state['positions']:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
-                    state['positions'][k] = {'side':side, 'opened_at':now, 'entry':entry_px,
+                    state['positions'][k] = {'side':side, 'opened_at':now - 3600, 'entry':entry_px,
                                              'stage':'initial', 'peak':entry_px}
-                    log(f"RECONCILE: adopting existing {k} {side}")
+                    log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
 
             # BTC vol throttle
             risk_mult = 1.0
