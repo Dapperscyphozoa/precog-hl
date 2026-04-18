@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
-"""PreCog v8.8 — 34-COIN UNIVERSE (doubled portfolio)
+"""PreCog v8.12 — 50-coin universe + 48 MT4 tickers
 
-v8.8 changes:
-- Universe expanded: 24 → 34 coins (validated from 82-CSV mass BT)
-- New RAW keepers: MON (+29.3%/30d), COMP (+9.0%), WLD (+9.1%), LIT (+4.6%), PUMP (+6.5%)
-- New GATED keepers: BLUR (+30.3% gated), VVV (+23.1%), APE (+6.1%), OP (+8.0%), TON (+2.0%)
+Dual signal engine:
+  1. Internal BOS/pivot/RSI → per-ticker gated (73 configs)
+  2. TV Trend Buy/Sell webhooks → per-ticker gated + EMA confirm (EA)
 
-Portfolio BT (30d, maker fees, 10x, 5% risk, selective gating):
-  34 coins | 19.4 trades/day | 998 trades/30d | 77.6% avg WR
-  Daily compound: +11.82% (BT extrapolation — real drift will reduce)
-  Real-world expectation: 6-8% daily after slippage/drift
-  Trajectory @ 6%/day: $229 → $1,314 (30d) → $42K (90d) → $7.7M (180d)
-
-Top performers:
-  BLUR  77.3% GATED +30.3%/30d
-  MON   81.6% RAW   +29.3%
-  VVV   87.0% GATED +23.1%
-  APT   76.9% RAW   +18.8%
-  kPEPE 78.4% RAW   +15.1%
-  UNI   81.1% RAW   +12.8%
+10% risk | 10x lev | 0.3% trail | 2% SL | native HL stop orders
 """
 import os, json, time, random, traceback
 from datetime import datetime
@@ -42,7 +28,6 @@ KILL_FILE  = '/var/data/KILL'
 # ═══════════════════════════════════════════════════════
 WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026')
 WEBHOOK_QUEUE = Queue()
-WEBHOOK_DEDUP = {}  # {coin+action: timestamp} — prevent double entries within 60s
 # ═══════════════════════════════════════════════════════
 # MT4 SIGNAL ROUTING — DynaPro webhook → Pepperstone EA
 # ═══════════════════════════════════════════════════════
@@ -107,7 +92,6 @@ def health():
     eq = 0
     try: eq = get_balance()
     except: pass
-    la = {'la_active': False}
     return jsonify({'status':'ok','version':'v8.12.0','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -432,22 +416,8 @@ CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
 
-# v8.3 RUNNER LOGIC — DISABLED in v8.4 (BT showed it hurt performance).
-# Kept code in place for future re-enable if validated on different data.
-RUNNER_ENABLED  = False
-RUNNER_SL_PCT   = 0.004
-RUNNER_TP1_PCT  = 0.005
-RUNNER_TP2_PCT  = 0.010
-RUNNER_TRAIL    = 0.007
-RUNNER_BE_BUFF  = 0.0005
-
-# v8.11: PRECOG OWN SIGNALS — DISABLED (40% WR, bleeding capital)
-# DynaPro webhook signals are the real edge (77% WR in BT)
-# Keep process() running for position management (TP, cloud exit) on existing positions only
-PRECOG_SIGNALS_ENABLED = True
-TRAIL_PCT = 0.003          # 0.3% trailing stop — let winners run, trail locks gains
-CLOUD_EXIT_ENABLED = False  # DISABLED — was closing at losses, overriding trail stop
-MAKER_FALLBACK_SEC = 5   # was 30 — price moves away during long wait
+TRAIL_PCT = 0.003
+MAKER_FALLBACK_SEC = 5
 
 info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
@@ -785,100 +755,6 @@ def flatten_all(reason='KILL'):
 # ═══════════════════════════════════════════════════════
 # PROCESS — one coin per tick
 # ═══════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════
-# v8.3 RUNNER MANAGEMENT — called BEFORE signal check each tick
-# ═══════════════════════════════════════════════════════
-def manage_runner(coin, state, live, equity):
-    """Returns True if position was closed (signal processing should skip).
-    Manages: hard SL, breakeven stop, TP1 partial, TP2 trail.
-
-    Stages per position:
-      'initial'    — fresh entry, hard SL active
-      'breakeven'  — +1R hit, SL moved to entry+buffer
-      'tp1_taken'  — +2R hit, half closed, remainder trailing
-    """
-    cur = state['positions'].get(coin)
-    if not cur or not live: return False
-
-    entry = cur.get('entry', live['entry'])
-    side  = cur.get('side')  # 'L' or 'S'
-    stage = cur.get('stage', 'initial')
-    peak  = cur.get('peak', entry)  # peak favorable price
-    mark  = live.get('mark', get_mid(coin))
-    if not mark: return False
-
-    # Compute favorable/adverse % move from entry
-    if side == 'L':
-        fav = (mark - entry) / entry
-        # update peak (highest mark for long)
-        if mark > peak: cur['peak'] = mark; peak = mark
-        trail_trigger = peak * (1 - RUNNER_TRAIL)
-        be_stop = entry * (1 + RUNNER_BE_BUFF)
-    else:  # 'S'
-        fav = (entry - mark) / entry
-        if mark < peak or peak == entry: cur['peak'] = mark; peak = mark
-        trail_trigger = peak * (1 + RUNNER_TRAIL)
-        be_stop = entry * (1 - RUNNER_BE_BUFF)
-
-    # STAGE TRANSITIONS
-    if stage == 'initial' and fav >= RUNNER_TP1_PCT:
-        cur['stage'] = 'breakeven'
-        log(f"{coin} TP1 hit ({fav*100:+.2f}%) — stage=breakeven, SL@{be_stop:.4f}")
-        stage = 'breakeven'
-
-    if stage == 'breakeven' and fav >= RUNNER_TP2_PCT:
-        # Close 50% of position
-        size = abs(live['size']) * 0.5
-        is_buy_close = (side == 'S')  # opposite direction to close
-        slip_px = round_price(coin, mark * (1.005 if is_buy_close else 0.995))
-        size = round_size(coin, size)
-        try:
-            exchange.order(coin, is_buy_close, size, slip_px,
-                          {'limit':{'tif':'Ioc'}}, reduce_only=True)
-            log(f"{coin} TP2 hit ({fav*100:+.2f}%) — closed 50% ({size}), runner active")
-            cur['stage'] = 'tp1_taken'
-            stage = 'tp1_taken'
-        except Exception as e:
-            log(f"{coin} TP2 close err: {e}")
-
-    # EXIT CHECKS (in order of priority)
-    exit_reason = None; exit_px_target = None
-
-    # 1. Hard SL (only in 'initial' stage)
-    if stage == 'initial':
-        if side == 'L' and mark <= entry * (1 - RUNNER_SL_PCT):
-            exit_reason = 'SL'; exit_px_target = mark
-        elif side == 'S' and mark >= entry * (1 + RUNNER_SL_PCT):
-            exit_reason = 'SL'; exit_px_target = mark
-
-    # 2. Breakeven stop (in 'breakeven' stage — price pulled back to entry+buffer)
-    elif stage == 'breakeven':
-        if side == 'L' and mark <= be_stop:
-            exit_reason = 'BE'; exit_px_target = mark
-        elif side == 'S' and mark >= be_stop:
-            exit_reason = 'BE'; exit_px_target = mark
-
-    # 3. Trail stop (in 'tp1_taken' stage — runner half)
-    elif stage == 'tp1_taken':
-        if side == 'L' and mark <= trail_trigger:
-            exit_reason = 'TRAIL'; exit_px_target = mark
-        elif side == 'S' and mark >= trail_trigger:
-            exit_reason = 'TRAIL'; exit_px_target = mark
-
-    if exit_reason:
-        pnl_pct = close(coin)
-        if pnl_pct is not None:
-            if pnl_pct < 0: state['consec_losses'] += 1
-            else: state['consec_losses'] = 0
-            state['last_pnl_close'] = pnl_pct
-        log(f"{coin} RUNNER EXIT [{exit_reason}] @ {mark:.4f} | stage was {stage} | peak={peak:.4f}")
-        state['positions'].pop(coin, None)
-        return True
-
-    # Save updated peak
-    state['positions'][coin] = cur
-    return False
-
 def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay."""
     try:
@@ -900,11 +776,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
-    # v8.3: RUNNER LOGIC — check stops/trails before signal processing (v8.4: disabled by default)
-    if RUNNER_ENABLED and manage_runner(coin, state, live, equity):
-        return  # position was closed by runner logic
-
-    # v8.10: TP + CLOUD-BREAK EXIT — improves WR without reducing trade count
+    # Position management: SL, trail, funding checks
     if cur and live:
         mark = get_mid(coin)
         if mark and cur.get('entry'):
@@ -938,35 +810,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 state['positions'].pop(coin, None)
                 return
 
-            # CLOUD BREAK: trend over — price crossed back through slow EMA by significant margin
-            if CLOUD_EXIT_ENABLED and fav < -0.003:  # only if position is losing >0.3% (not marginal)
-                candles = fetch(coin, retries=1)
-                if candles and len(candles) >= 60:
-                    closes = [c[4] for c in candles]
-                    k = 2/51; ema50 = sum(closes[:50])/50
-                    for j in range(50, len(closes)):
-                        ema50 = closes[j]*k + ema50*(1-k)
-                    # Require price to be >0.2% through EMA (not just touching)
-                    if side == 'L' and mark < ema50 * 0.998:
-                        pnl_pct = close(coin)
-                        if pnl_pct is not None:
-                            if pnl_pct < 0: state['consec_losses'] += 1
-                            else: state['consec_losses'] = 0
-                            state['last_pnl_close'] = pnl_pct
-                        log(f"{coin} CLOUD EXIT: price {mark:.4f} < ema50 {ema50:.4f}")
-                        state['positions'].pop(coin, None)
-                        return
-                    elif side == 'S' and mark > ema50 * 1.002:
-                        pnl_pct = close(coin)
-                        if pnl_pct is not None:
-                            if pnl_pct < 0: state['consec_losses'] += 1
-                            else: state['consec_losses'] = 0
-                            state['last_pnl_close'] = pnl_pct
-                        log(f"{coin} CLOUD EXIT: price {mark:.4f} > ema50 {ema50:.4f}")
-                        state['positions'].pop(coin, None)
-                        return
-
-    # FIX #3: 4h max hold check BEFORE signal logic
+    # 4h max hold check
     if cur and cur.get('opened_at'):
         age = time.time() - cur['opened_at']
         if age > MAX_HOLD_SEC:
@@ -1071,7 +915,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.11 | wallet={WALLET} | precog+webhook+LA | trail={TRAIL_PCT} | risk={INITIAL_RISK_PCT}")
+    log(f"PreCog v8.12 | wallet={WALLET} | precog+webhook | trail={TRAIL_PCT} | risk={INITIAL_RISK_PCT}")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
