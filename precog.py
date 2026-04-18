@@ -332,7 +332,6 @@ def mt4_status():
         'bias_age_sec': round(bias_age)
     })
 
-# v8.11 coin list — 50 coins, 2s between each = 100s cycle. No 429s with Trend Buy/Sell (no broadcast)
 COINS = [
     'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
     'AERO','LIT','SPX','kPEPE','kBONK','kSHIB','MORPHO','JUP','XRP',
@@ -343,7 +342,6 @@ COINS = [
     'AR','GALA','VIRTUAL',
 ]
 
-# v8.10 SELECTIVE GATE — 20 coins where chase-filter improved WR in BT
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
                     'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
                     'AR','GALA','VIRTUAL'}
@@ -441,7 +439,6 @@ MAX_TOTAL_RISK = 0.80    # reserve 20% margin
 STOP_LOSS_PCT = 0.01      # 1.0% price × 10x = 10% of trade. Keeps 92% of winners (MAE backtested)
 BTC_VOL_THRESHOLD = 0.03
 
-# v8 safety params
 MAX_HOLD_SEC = 4 * 3600
 CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
@@ -455,7 +452,6 @@ info = Info(constants.MAINNET_API_URL, skip_ws=True)
 account = Account.from_key(PRIV_KEY)
 exchange = Exchange(account, constants.MAINNET_API_URL, account_address=WALLET)
 
-# v8.8 HL price rounding — cache per-coin szDecimals from meta
 _META_CACHE = None
 def _get_sz_decimals(coin):
     """Perps: price <= 5 sig figs AND <= (MAX_DECIMALS - szDecimals) decimals. MAX_DECIMALS=6 for perps."""
@@ -503,7 +499,6 @@ def load_state():
         path = STATE_PATH if os.path.exists(STATE_PATH) else STATE_PATH + '.bak'
         with open(path) as f:
             loaded = json.load(f)
-        # v8.1 migration: wipe old bar-index cooldowns (values were small ints, new format is ms timestamps ~1.7e12)
         if loaded.get('cd_format') != 'ts':
             loaded['cooldowns'] = {}
             loaded['cd_format'] = 'ts'
@@ -562,13 +557,13 @@ def fetch(coin, n_bars=100, retries=3):
     return []
 
 # ═══════════════════════════════════════════════════════
-# SIGNAL — v8.1: cooldown by TIMESTAMP (ms), scan last K bars
+# SIGNAL — cooldown by timestamp, scan last K bars
 # ═══════════════════════════════════════════════════════
 SCAN_BARS = 3  # check last SCAN_BARS closed bars each tick
 CD_MS = 3 * 5 * 60 * 1000  # cd=3 bars of 5m = 15 min
 
 def chase_gate_ok(side, price, candles, i):
-    """v8.5: Reject entries chasing extended moves.
+    """Reject entries chasing extended moves.
     Returns True if entry is allowed, False if it should be skipped.
     Only called for coins in CHASE_GATE_COINS."""
     if i < CHASE_LOOKBACK: return True  # not enough history yet
@@ -585,7 +580,7 @@ def chase_gate_ok(side, price, candles, i):
 
 def signal(candles, last_sell_ts, last_buy_ts, coin=None):
     """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp.
-    v8.5: Applies chase_gate for coins in CHASE_GATE_COINS."""
+    Applies chase_gate for coins in CHASE_GATE_COINS."""
     if len(candles)<100: return None, None
     h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
     N=len(cl); r14=rsi_calc(cl,14)
@@ -600,7 +595,6 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
         sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (bar_ts - last_sell_ts) > CD_MS
         buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (bar_ts - last_buy_ts)  > CD_MS
-        # v8.5: chase gate for gated coins
         if apply_gate:
             if sell_ok and not chase_gate_ok('SELL', cl[i], candles, i):
                 sell_ok = False
@@ -707,7 +701,7 @@ def set_isolated_leverage(coin):
         log(f"lev set err {coin}: {e}")
 
 def place(coin, is_buy, size):
-    """v8.8: HL-compliant price rounding + proper maker/taker error handling."""
+    """HL-compliant price rounding + maker/taker handling."""
     px = get_mid(coin)
     if not px: return None
     set_isolated_leverage(coin)
