@@ -764,7 +764,7 @@ def place_native_sl(coin, is_long, entry, size):
         sl_size = float(round_size(coin, size))
         sl_side = not is_long
         exchange.order(coin, sl_side, sl_size, sl_px,
-                       {"trigger": {"triggerPx": f"{sl_px}", "isMarket": True, "tpsl": "sl"}},
+                       {"trigger": {"triggerPx": sl_px, "isMarket": True, "tpsl": "sl"}},
                        reduce_only=True)
         log(f"{coin} NATIVE SL placed @ {sl_px}")
     except Exception as e:
