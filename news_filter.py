@@ -119,13 +119,24 @@ def _poll():
             if item['guid'] in _SEEN: continue
             _SEEN.add(item['guid'])
             sc = _score(item['title'])
+            # Store ALL items for landing feed (not just scored ones)
+            with _LOCK:
+                _ITEMS.append({
+                    'title': item['title'][:140],
+                    'source': src,
+                    'magnitude': sc['magnitude'] if sc else 1,
+                    'direction': sc['direction'] if sc else 0,
+                    'ts': time.time()
+                })
+                if len(_ITEMS) > 200:
+                    del _ITEMS[:len(_ITEMS)-200]
             if sc:
                 item['score'] = sc; item['src'] = src
                 events.append(item)
     if len(_SEEN) > 10000: _SEEN.clear()
     _update(events)
     if events:
-        print(f"[news] {len(events)} events | mult={_STATE['risk_mult']} blackout={_STATE['blackout']}", flush=True)
+        print(f"[news] {len(events)} scored | mult={_STATE['risk_mult']}", flush=True)
 
 def _runner():
     while _RUN:
@@ -137,8 +148,9 @@ def start():
     global _RUN
     if _RUN: return
     _RUN = True
-    threading.Thread(target=_runner, daemon=True, name='news').start()
-    print("[news] started (10m poll)", flush=True)
+    # Initial fetch immediately, then 10m loop
+    threading.Thread(target=lambda: (_poll(), _runner()), daemon=True, name='news').start()
+    print("[news] started (immediate + 10m poll)", flush=True)
 
 def get_risk_mult():
     with _LOCK: return _STATE['risk_mult']
