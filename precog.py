@@ -18,6 +18,7 @@ from queue import Queue
 from flask import Flask, request as flask_request, jsonify
 from gates import run_gates
 import bybit_ws
+import orderbook_ws
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -1174,6 +1175,8 @@ def main():
     log(f"PreCog v8.14 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
     try: bybit_ws.start()
     except Exception as e: log(f"bybit_ws err: {e}")
+    try: orderbook_ws.start()
+    except Exception as e: log(f"orderbook_ws err: {e}")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
