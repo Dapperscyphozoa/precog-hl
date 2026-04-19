@@ -3,7 +3,7 @@
 //| v4.0 — Polls precog-hl-web for DynaPro signals + own EMA logic   |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "4.00"
+#property version   "4.10"
 #property strict
 
 extern double LotSize    = 0.01;
@@ -18,6 +18,7 @@ extern double TP_Pct     = 0.8;
 extern bool   EMA_Exit   = false;
 extern string SignalURL  = "https://precog-hl-web.onrender.com/mt4/signals";
 extern int    PollSec    = 10;
+extern bool   UseLocalEMAFilter = false;  // 2nd-gate webhook signals with local EMA (was always-on in v4.0)
 
 datetime lastBarTime[256];
 string   syms[256];
@@ -132,9 +133,11 @@ void PollDynaPro() {
    }
 
    if (dir == "BUY" || dir == "buy") {
-      double fEMA = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
-      double sEMA = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
-      if (fEMA < sEMA) { Print("DYNAPRO BUY ", sym, " SKIP EMA bearish"); return; }
+      if (UseLocalEMAFilter) {
+         double fEMA = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
+         double sEMA = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
+         if (fEMA < sEMA) { Print("DYNAPRO BUY ", sym, " SKIP EMA bearish"); return; }
+      }
       CloseBySymbol(sym, OP_SELL);
       if (!HasPosition(sym, OP_BUY)) {
          double ask = MarketInfo(sym, MODE_ASK);
@@ -145,9 +148,11 @@ void PollDynaPro() {
       }
    }
    else if (dir == "SELL" || dir == "sell") {
-      double fEMA2 = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
-      double sEMA2 = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
-      if (fEMA2 > sEMA2) { Print("DYNAPRO SELL ", sym, " SKIP EMA bullish"); return; }
+      if (UseLocalEMAFilter) {
+         double fEMA2 = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
+         double sEMA2 = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
+         if (fEMA2 > sEMA2) { Print("DYNAPRO SELL ", sym, " SKIP EMA bullish"); return; }
+      }
       CloseBySymbol(sym, OP_BUY);
       if (!HasPosition(sym, OP_SELL)) {
          double bid = MarketInfo(sym, MODE_BID);
@@ -258,11 +263,31 @@ void ProcessSymbol(string sym, int idx) {
 //+------------------------------------------------------------------+
 int OnInit() {
    LoadSymbols();
-   Print("Portfolio_Manager v4.0 EMA ", EMAFast, "/", EMASlow,
+   Print("Portfolio_Manager v4.1 EMA ", EMAFast, "/", EMASlow,
          " TF=", Timeframe, " TP=", TP_Pct, "% EMA_Exit=", EMA_Exit,
+         " LocalEMAFilter=", UseLocalEMAFilter,
          " DynaPro=", SignalURL,
          " filter='", SymFilter, "' symbols=", symCount);
    for (int i = 0; i < symCount; i++) Print("  [", i, "] ", syms[i]);
+
+   // --- FAIL-FAST: probe WebRequest once before entering OnTick loop ---
+   string _cookie = "", _headers = "";
+   char   _post[], _result[];
+   int _probe = WebRequest("GET", SignalURL, _cookie, NULL, 3000, _post, 0, _result, _headers);
+   if (_probe < 0) {
+      int _err = GetLastError();
+      string _msg = "";
+      if (_err == 4060) _msg = "URL NOT WHITELISTED — add '" + SignalURL + "' in Tools>Options>Expert Advisors>WebRequest";
+      else if (_err == 4014) _msg = "WebRequest function not allowed — check Tools>Options>Expert Advisors";
+      else if (_err == 5203) _msg = "HTTP request failed — no internet or server down";
+      else _msg = "WebRequest probe failed err=" + IntegerToString(_err);
+      Print("FATAL: ", _msg);
+      Alert("Portfolio_Manager: ", _msg);
+      Comment("ABORT: ", _msg);
+      return INIT_FAILED;
+   }
+   Print("WebRequest probe OK (", _probe, " bytes) — EA live");
+   Comment("Portfolio_Manager v4.1 — EA live, polling every ", PollSec, "s");
    return INIT_SUCCEEDED;
 }
 
