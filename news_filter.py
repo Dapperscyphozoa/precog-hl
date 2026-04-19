@@ -38,6 +38,7 @@ KEYWORDS = {
 _STATE = {'blackout': False, 'blackout_until': 0, 'direction_bias': 0,
           'risk_mult': 1.0, 'last_events': [], 'last_poll': 0}
 _LOCK = threading.Lock()
+_ITEMS = []  # list of {title, source, magnitude, direction, ts}
 _SEEN = set()
 _RUN = False
 
@@ -147,3 +148,10 @@ def get_state():
 
 def is_blackout():
     with _LOCK: return _STATE['blackout']
+
+
+def get_recent_items(limit=10):
+    """Return recent parsed news items with magnitude + direction."""
+    with _LOCK:
+        items = list(_ITEMS) if '_ITEMS' in globals() else []
+    return items[-limit:][::-1] if items else []
