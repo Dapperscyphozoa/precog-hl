@@ -523,7 +523,7 @@ V3_ENABLED = True
 V3_HTF = '4h'
 V3_EMA = 9
 
-V3_BUFFER = 0.02  # 2% — only block extreme trend — only block when clearly in opposite trend
+V3_BUFFER = 0.01  # 2% — only block extreme trend — only block when clearly in opposite trend
 
 def trend_gate(coin, side):
     """V3: block BUY if 4H close < 4H EMA9 * (1-buffer), SELL if above EMA * (1+buffer)."""
@@ -556,7 +556,7 @@ def apply_ticker_gate(coin, side, price, candles):
         if trs:
             atr_val = sum(trs)/len(trs)
             last_c = candles[-1][4]
-            if last_c>0 and atr_val/last_c < 0.002:
+            if last_c>0 and atr_val/last_c < 0.001:
                 log(f"{coin} {side} BLOCKED by ATR-min ({atr_val/last_c*100:.2f}%)")
                 return False
     # Funding filter — block expensive-carry trades
