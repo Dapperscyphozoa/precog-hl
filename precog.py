@@ -425,8 +425,10 @@ V3_ENABLED = True
 V3_HTF = '4h'
 V3_EMA = 9
 
+V3_BUFFER = 0.005  # 0.5% — only block when clearly in opposite trend
+
 def trend_gate(coin, side):
-    """V3: block BUY if 4H close < 4H EMA9, SELL if above. Returns True if passes."""
+    """V3: block BUY if 4H close < 4H EMA9 * (1-buffer), SELL if above EMA * (1+buffer)."""
     if not V3_ENABLED: return True
     htf = fetch_htf(coin, V3_HTF, V3_EMA * 3 + 5)
     if len(htf) < V3_EMA + 2: return True
@@ -436,8 +438,8 @@ def trend_gate(coin, side):
     for c in closes[V3_EMA:]:
         ema = c*k + ema*(1-k)
     last = closes[-1]
-    if side == 'BUY' and last < ema: return False
-    if side == 'SELL' and last > ema: return False
+    if side == 'BUY' and last < ema * (1 - V3_BUFFER): return False
+    if side == 'SELL' and last > ema * (1 + V3_BUFFER): return False
     return True
 
 USE_GRID_GATE = False  # overfit layer disabled; V3 + ATR-min do the filtering
@@ -1045,7 +1047,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     try:
         px_for_gate = get_mid(coin) or 0
         if not apply_ticker_gate(coin, sig, px_for_gate, candles):
-            log(f"{coin} {sig} GATED by per-ticker filter")
+            log(f"{coin} {sig} GATED")
             return
     except Exception as e:
         log(f"{coin} gate check err: {e}")
