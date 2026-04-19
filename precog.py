@@ -584,6 +584,18 @@ USE_GRID_GATE = False  # overfit layer disabled; V3 + ATR-min do the filtering
 
 def apply_ticker_gate(coin, side, price, candles):
     """V3 trend + ATR-min filter. Returns True if passes."""
+    # EMERGENCY: directional imbalance check — if 10+ shorts already open and BTC up, block new shorts
+    try:
+        if side == 'SELL':
+            lp = get_all_positions_live()
+            shorts = sum(1 for k,v in lp.items() if v.get('size',0) < 0)
+            if shorts >= 10:
+                # Check BTC 15min move
+                btc_state = btc_correlation.get_state()
+                if btc_state.get('btc_move', 0) > 0.002 or btc_state.get('btc_dir', 0) > 0:
+                    log(f"{coin} SELL BLOCKED: {shorts} shorts open + BTC up")
+                    return False
+    except Exception: pass
     if not trend_gate(coin, side):
         log(f"{coin} {side} BLOCKED by V3 trend")
         return False
