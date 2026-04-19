@@ -33,7 +33,7 @@ def L(msg):
     print(line, flush=True)
     try:
         with open(LOG,'a') as f: f.write(line+'\n')
-    except: pass
+    except Exception: pass
 
 def fetch(coin, tf, days):
     NOW=int(time.time()*1000); ST=NOW-days*86400*1000

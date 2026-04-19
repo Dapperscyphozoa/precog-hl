@@ -29,7 +29,6 @@ import liquidation_ws
 import bybit_lead
 import funding_filter
 import btc_correlation
-import vacuum_zone
 import spoof_detection
 import session_scaler
 import whale_filter
