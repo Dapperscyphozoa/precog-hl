@@ -1389,8 +1389,8 @@ def main():
                 except Exception as e:
                     log(f"wall-break check err {wcoin}: {e}")
 
-            # Profit-lock DISABLED — OOS showed every config loses vs trail-only (no_plock +40%, any plock -20 to +15%)
-            for k, lp in live_positions.items() if False else []:
+            # Profit-lock @ 3.0%/2.0% (user override — OOS -25% vs no_plock, but best plock config)
+            for k, lp in live_positions.items():
                 try:
                     side = 'BUY' if lp['size']>0 else 'SELL'
                     entry = lp['entry']

@@ -2,8 +2,8 @@
 Called each tick for open positions. Returns new SL price or None.
 """
 
-PROFIT_TRIGGER = 0.020  # +2.0% unrealized (raised from 1.5%)
-LOCK_LEVEL = 0.010      # lock at +1.0% (raised from 0.7%)
+PROFIT_TRIGGER = 0.030  # +3.0%
+LOCK_LEVEL = 0.020      # +2.0%
 
 def compute_new_sl(entry_price, current_price, side, current_sl):
     """Returns new SL price if profit-lock should engage, else None."""
