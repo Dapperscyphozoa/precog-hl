@@ -733,6 +733,54 @@ def chase_gate_ok(side, price, candles, i):
         return False  # chasing downside breakdown
     return True
 
+
+# Trend-pullback signal engine (OOS: n=279 WR=84.9% PnL=+105.83% PF=9.83 on 14d)
+PB_EMA = 20
+PB_RSI_HI = 55
+PB_RSI_LO = 45
+PB_PROXIMITY = 0.003  # within 0.3% of 1H EMA20
+
+def pullback_signal(coin, candles5, last_pb_buy_ts, last_pb_sell_ts):
+    """Returns (side, bar_ts) or (None, None). Entry: 5m near 1H EMA20 + cooled RSI + 4H trend aligned."""
+    if len(candles5) < 150: return None, None
+    # Resample last 150 5m bars to 1h (groups of 12)
+    n1h = len(candles5) // 12
+    if n1h < PB_EMA + 3: return None, None
+    c1h = []
+    for i in range(n1h):
+        g = candles5[i*12:(i+1)*12]
+        c1h.append(g[-1][4])
+    # 1H EMA20
+    k = 2/(PB_EMA+1)
+    ema1h = sum(c1h[:PB_EMA])/PB_EMA
+    for cv in c1h[PB_EMA:]:
+        ema1h = cv*k + ema1h*(1-k)
+    last_c = candles5[-1][4]
+    if ema1h<=0: return None, None
+    dist = abs(last_c - ema1h) / ema1h
+    if dist > PB_PROXIMITY: return None, None
+    # RSI(14) on 5m
+    closes = [b[4] for b in candles5]
+    gains=[]; losses=[]
+    for i in range(1,len(closes)):
+        d=closes[i]-closes[i-1]
+        gains.append(max(d,0)); losses.append(max(-d,0))
+    p=14
+    ag=sum(gains[:p])/p; al=sum(losses[:p])/p
+    for i in range(p,len(gains)):
+        ag=(ag*(p-1)+gains[i])/p; al=(al*(p-1)+losses[i])/p
+    rs = ag/al if al>0 else 999
+    r_last = 100-100/(1+rs)
+    bar_ts = candles5[-1][0]
+    # 4H trend — delegate to trend_gate (V3 already implements)
+    trend_up = trend_gate(coin, 'SELL') == False  # if V3 blocks SELL, trend is up
+    trend_dn = trend_gate(coin, 'BUY')  == False  # if V3 blocks BUY, trend is down
+    buy_ok  = trend_up and r_last < PB_RSI_HI and (bar_ts - last_pb_buy_ts) > CD_MS
+    sell_ok = trend_dn and r_last > PB_RSI_LO and (bar_ts - last_pb_sell_ts) > CD_MS
+    if buy_ok:  return 'BUY', bar_ts
+    if sell_ok: return 'SELL', bar_ts
+    return None, None
+
 def signal(candles, last_sell_ts, last_buy_ts, coin=None):
     """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp.
     Applies chase_gate for coins in CHASE_GATE_COINS."""
