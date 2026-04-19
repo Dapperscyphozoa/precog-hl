@@ -678,7 +678,7 @@ LOOP_SEC = 2  # tight outer loop (Bybit WS push)
 USE_ISOLATED_MARGIN = True
 
 MAX_POSITIONS = 40  # OOS: ~27 avg concurrent, peak 40+
-MAX_SAME_SIDE = 20
+MAX_SAME_SIDE = 15  # tighter — imbalanced books bleed
 MAX_TOTAL_RISK = 0.92    # 8% reserve
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
