@@ -32,6 +32,7 @@ import btc_correlation
 import vacuum_zone
 import spoof_detection
 import session_scaler
+import whale_filter
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -152,7 +153,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.18','equity':eq,
+    return jsonify({'status':'ok','version':'v8.19','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -925,6 +926,9 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     try: session_mult = session_scaler.get_mult()
     except Exception: session_mult = 1.0
     confluence *= session_mult
+    try: whale_mult = whale_filter.confluence_boost(coin, side) if coin else 1.0
+    except Exception: whale_mult = 1.0
+    confluence *= whale_mult
     # Risk ladder override
     try: tier_risk = risk_ladder.get_risk()
     except Exception: tier_risk = risk_pct
@@ -1275,6 +1279,8 @@ def main():
     except Exception as e: log(f"orderbook_ws err: {e}")
     try: liquidation_ws.start()
     except Exception as e: log(f"liq_ws err: {e}")
+    try: whale_filter.start()
+    except Exception as e: log(f"whale_filter err: {e}")
     # Funding refresh deferred — first tick runs it after 30s delay
     threading.Timer(30.0, lambda: funding_filter.refresh_all(COINS)).start()
     try: news_filter.start()
@@ -1620,7 +1626,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.18',
+        'equity': eq, 'version': 'v8.19',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
@@ -1630,6 +1636,7 @@ def dash_json():
         'funding_cached': len(funding_filter._CACHE) if hasattr(funding_filter, '_CACHE') else 0,
         'spoof': spoof_detection.status(),
         'session': {'name': session_scaler.session_name(), 'mult': session_scaler.get_mult()},
+        'whale': whale_filter.status(),
         'coin_wr': coin_wr, 'killed_coins': killed,
         'consec_losses': state.get('consec_losses', 0),
     })
