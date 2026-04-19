@@ -679,8 +679,8 @@ SP = derive(GRID); BP = derive(GRID)
 # TUNER WINNER OVERRIDE — plb=36 rsi=70/35
 SP['pivot_lb'] = 15  # OOS: plb=15 lifts PnL +5%, matches trail 0.8% winner
 BP['pivot_lb'] = 15
-SP['rsi_hi'] = 65
-BP['rsi_lo'] = 40
+SP['rsi_hi'] = 70  # tight: quality over quantity in chop
+BP['rsi_lo'] = 35
 
 
 INITIAL_RISK_PCT = 0.02  # halved: 2x position slots      # 4% — aggressive (tuner-validated 68% WR)
@@ -703,7 +703,7 @@ FUNDING_CUT_RATIO = 0.50
 
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 MAKER_FALLBACK_SEC = 10
-MAKER_OFFSET = 0.002  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
+MAKER_OFFSET = 0.0015  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
 def _init_hl_with_retry(max_attempts=8):
     """Retry Info() init with exponential backoff — Hyperliquid 429s on cold deploys."""
