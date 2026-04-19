@@ -1376,17 +1376,15 @@ def main():
                     cur_sl = state.get('sl_overrides', {}).get(k)
                     new_sl = profit_lock.compute_new_sl(entry, cur_px, side, cur_sl)
                     if new_sl is not None and not state.get('scaled_out', {}).get(k):
-                        # Scale out 50% on profit trigger (+1.5%), leave half to run
                         try:
-                            half_sz = abs(lp['size']) / 2
-                            half_sz = round_size(k, half_sz)
+                            half_sz = round_size(k, abs(lp['size']) / 2)
                             if half_sz > 0:
-                                is_closing_buy = not side_long  # SELL to close long
                                 side_long = lp['size']>0
-                                exchange.order(k, not side_long, half_sz, cur_px * (1.005 if not side_long else 0.995),
+                                exchange.order(k, not side_long, half_sz,
+                                               cur_px * (1.005 if not side_long else 0.995),
                                                {'limit':{'tif':'Ioc'}}, reduce_only=True)
                                 state.setdefault('scaled_out', {})[k] = True
-                                log(f"SCALE-OUT 50% {k} {side} @ {cur_px:.6f} — letting rest run")
+                                log(f"SCALE-OUT 50% {k} {side} @ {cur_px:.6f}")
                         except Exception as e:
                             log(f"scale-out err {k}: {e}")
                         state.setdefault('sl_overrides', {})[k] = new_sl
