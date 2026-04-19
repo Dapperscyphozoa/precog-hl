@@ -510,7 +510,7 @@ def derive(s):
     }
 SP = derive(GRID); BP = derive(GRID)
 
-INITIAL_RISK_PCT = 0.00025   # 0.025% — ultra-defensive
+INITIAL_RISK_PCT = 0.0015    # 0.15% risk
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
