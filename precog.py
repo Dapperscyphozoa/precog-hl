@@ -30,6 +30,8 @@ import bybit_lead
 import funding_filter
 import btc_correlation
 import vacuum_zone
+import spoof_detection
+import session_scaler
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -150,7 +152,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.17','equity':eq,
+    return jsonify({'status':'ok','version':'v8.18','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -919,6 +921,10 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     # News + orderbook composite boost
     try: confluence = wall_confluence.composite_boost(coin, side, px, news_dir) if coin else 1.0
     except Exception: confluence = 1.0
+    # Session scaler (London/NY 1.0x, Asia 0.7x)
+    try: session_mult = session_scaler.get_mult()
+    except Exception: session_mult = 1.0
+    confluence *= session_mult
     # Risk ladder override
     try: tier_risk = risk_ladder.get_risk()
     except Exception: tier_risk = risk_pct
@@ -1100,6 +1106,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 log(f"LIQ-CASCADE {coin} fade {sig} (${casc['total_usd']/1e6:.1f}M liqs)")
         except Exception as e:
             log(f"liq cascade err {coin}: {e}")
+    # Quinary: spoof detection fade
+    if not sig:
+        try:
+            sp = spoof_detection.get_spoof_signal(coin)
+            if sp:
+                sig = sp['direction']; bar_ts = int(time.time()*1000)
+                spoof_detection.mark_fired(coin)
+                log(f"SPOOF-FADE {coin} {sig} (wall ${sp['original_wall']/1000:.0f}k→${sp['remaining']/1000:.0f}k)")
+        except Exception as e:
+            log(f"spoof err {coin}: {e}")
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
@@ -1392,6 +1408,11 @@ def main():
                 except Exception as e:
                     log(f"profit-lock err {k}: {e}")
 
+            # Spoof scan per open position + near-wall coins
+            for k in list(live_positions.keys()):
+                try: spoof_detection.scan_walls(k, get_mid(k))
+                except Exception: pass
+
             # Hourly funding refresh
             fund_age = time.time() - getattr(main, '_funding_ts', 0)
             if fund_age > 3600:
@@ -1599,7 +1620,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.17',
+        'equity': eq, 'version': 'v8.18',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
@@ -1607,6 +1628,8 @@ def dash_json():
         'liquidation': liq_stat, 'wall_entries': len(wall_entries),
         'btc_corr': btc_correlation.get_state(),
         'funding_cached': len(funding_filter._CACHE) if hasattr(funding_filter, '_CACHE') else 0,
+        'spoof': spoof_detection.status(),
+        'session': {'name': session_scaler.session_name(), 'mult': session_scaler.get_mult()},
         'coin_wr': coin_wr, 'killed_coins': killed,
         'consec_losses': state.get('consec_losses', 0),
     })

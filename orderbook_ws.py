@@ -181,6 +181,96 @@ def status():
             'verified_coins': len([c for c, w in _VERIFIED_WALLS.items() if w]),
         }
 
+
+# OKX symbol map (HL coin -> OKX instId)
+HL_TO_OKX = {
+    'BTC':'BTC-USDT-SWAP','ETH':'ETH-USDT-SWAP','SOL':'SOL-USDT-SWAP','XRP':'XRP-USDT-SWAP',
+    'ADA':'ADA-USDT-SWAP','AVAX':'AVAX-USDT-SWAP','LINK':'LINK-USDT-SWAP','DOT':'DOT-USDT-SWAP',
+    'ATOM':'ATOM-USDT-SWAP','SUI':'SUI-USDT-SWAP','DOGE':'DOGE-USDT-SWAP','LTC':'LTC-USDT-SWAP',
+    'BNB':'BNB-USDT-SWAP','APT':'APT-USDT-SWAP','NEAR':'NEAR-USDT-SWAP','TIA':'TIA-USDT-SWAP',
+    'INJ':'INJ-USDT-SWAP','FIL':'FIL-USDT-SWAP','ARB':'ARB-USDT-SWAP','OP':'OP-USDT-SWAP',
+    'AAVE':'AAVE-USDT-SWAP','LDO':'LDO-USDT-SWAP','WIF':'WIF-USDT-SWAP','ORDI':'ORDI-USDT-SWAP',
+    'TON':'TON-USDT-SWAP','JUP':'JUP-USDT-SWAP','PYTH':'PYTH-USDT-SWAP',
+}
+
+HL_TO_COINBASE = {
+    'BTC':'BTC-USD','ETH':'ETH-USD','SOL':'SOL-USD','XRP':'XRP-USD','ADA':'ADA-USD',
+    'AVAX':'AVAX-USD','LINK':'LINK-USD','DOT':'DOT-USD','ATOM':'ATOM-USD','SUI':'SUI-USD',
+    'DOGE':'DOGE-USD','LTC':'LTC-USD','APT':'APT-USD','NEAR':'NEAR-USD','AAVE':'AAVE-USD',
+    'FIL':'FIL-USD','ARB':'ARB-USD','OP':'OP-USD','INJ':'INJ-USD','LDO':'LDO-USD',
+}
+
+def _okx_msg(ws, msg):
+    try:
+        m = json.loads(msg)
+        if 'data' not in m: return
+        arg = m.get('arg', {}); inst = arg.get('instId','')
+        hl = None
+        for h,o in HL_TO_OKX.items():
+            if o == inst: hl = h; break
+        if not hl: return
+        for snap in m['data']:
+            bids = {float(b[0]):float(b[1]) for b in snap.get('bids',[])[:50]}
+            asks = {float(a[0]):float(a[1]) for a in snap.get('asks',[])[:50]}
+            with _LOCK:
+                d = _DEPTH.setdefault(hl, {'bids':{}, 'asks':{}, 'mid':0, 'ts':0})
+                for p,s in bids.items(): d['bids'][p] = d['bids'].get(p,0) + s
+                for p,s in asks.items(): d['asks'][p] = d['asks'].get(p,0) + s
+                d['ts'] = time.time()
+                if bids and asks: d['mid'] = (max(bids.keys()) + min(asks.keys())) / 2
+    except Exception: pass
+
+def _okx_open(ws):
+    args = [{'channel':'books','instId':v} for v in HL_TO_OKX.values()]
+    ws.send(json.dumps({'op':'subscribe','args':args}))
+
+def _runner_okx():
+    url = 'wss://ws.okx.com:8443/ws/v5/public'
+    while _RUN:
+        try:
+            ws = websocket.WebSocketApp(url, on_message=_okx_msg, on_open=_okx_open,
+                on_error=lambda ws,e:None, on_close=lambda ws,c,m:None)
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e: print(f"[ob okx] {e}", flush=True)
+        if _RUN: time.sleep(5)
+
+def _coinbase_msg(ws, msg):
+    try:
+        m = json.loads(msg)
+        if m.get('type') != 'snapshot' and m.get('type') != 'l2update': return
+        prod = m.get('product_id','')
+        hl = None
+        for h,c in HL_TO_COINBASE.items():
+            if c == prod: hl = h; break
+        if not hl: return
+        with _LOCK:
+            d = _DEPTH.setdefault(hl, {'bids':{}, 'asks':{}, 'mid':0, 'ts':0})
+            if m.get('type') == 'snapshot':
+                for b in m.get('bids',[])[:50]: d['bids'][float(b[0])] = d['bids'].get(float(b[0]),0) + float(b[1])
+                for a in m.get('asks',[])[:50]: d['asks'][float(a[0])] = d['asks'].get(float(a[0]),0) + float(a[1])
+            else:
+                for side,p,s in m.get('changes',[]):
+                    book = d['bids'] if side=='buy' else d['asks']
+                    sz = float(s)
+                    if sz == 0: book.pop(float(p), None)
+                    else: book[float(p)] = book.get(float(p),0) + sz
+            d['ts'] = time.time()
+            if d['bids'] and d['asks']: d['mid'] = (max(d['bids'].keys()) + min(d['asks'].keys())) / 2
+    except Exception: pass
+
+def _coinbase_open(ws):
+    ws.send(json.dumps({'type':'subscribe','product_ids':list(HL_TO_COINBASE.values()),'channels':['level2']}))
+
+def _runner_coinbase():
+    url = 'wss://ws-feed.exchange.coinbase.com'
+    while _RUN:
+        try:
+            ws = websocket.WebSocketApp(url, on_message=_coinbase_msg, on_open=_coinbase_open,
+                on_error=lambda ws,e:None, on_close=lambda ws,c,m:None)
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e: print(f"[ob coinbase] {e}", flush=True)
+        if _RUN: time.sleep(5)
+
 def start():
     global _RUN
     if _RUN: return
@@ -189,5 +279,7 @@ def start():
         print("[ob_ws] websocket-client missing", flush=True); return
     threading.Thread(target=_runner_bybit, daemon=True, name='ob_bybit').start()
     threading.Thread(target=_runner_binance, daemon=True, name='ob_binance').start()
+    threading.Thread(target=_runner_okx, daemon=True, name='ob_okx').start()
+    threading.Thread(target=_runner_coinbase, daemon=True, name='ob_coinbase').start()
     threading.Thread(target=_wall_scanner, daemon=True, name='ob_scan').start()
     print("[ob_ws] started Bybit+Binance depth + wall scanner", flush=True)
