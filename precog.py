@@ -377,6 +377,7 @@ COINS = [
     'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
     'AR','GALA','VIRTUAL',
     # Tuner-passed candidates (14d OOS with V3+ATR, WR>=65%, PnL>1%):
+    'RESOLV', 'HEMI', 'STABLE', 'BABY', 'TST', 'YZY', 'PROMPT', 'DOOD', 'FOGO', 'NXPC', 'INIT', 'APEX', 'WLFI',  # batch 2
     'MAVIA', 'HMSTR', 'ZEREBRO', 'BLAST', 'BOME', 'MANTA', 'CHILLGUY', 'RSR', 'MELANIA', 'SCR', 'BIO', 'TNSR', 'MINA', 'NOT', 'BRETT', 'ME', 'IOTA', 'DYM', 'ORDI', 'POPCAT', 'SAGA', 'FIL', 'REZ', 'BANANA', 'kNEIRO', 'GMT', 'NEO', 'MAV',
 ]
 
@@ -526,21 +527,21 @@ SP['rsi_hi'] = 70
 BP['rsi_lo'] = 35
 
 
-INITIAL_RISK_PCT = 0.0015    # 0.15% risk
+INITIAL_RISK_PCT = 0.01      # 1% — tuner-validated 68% WR
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
 LOOP_SEC = 2  # tight outer loop (Bybit WS push)
 USE_ISOLATED_MARGIN = True
 
-MAX_POSITIONS = 20
-MAX_SAME_SIDE = 12
-MAX_TOTAL_RISK = 0.80    # reserve 20% margin
+MAX_POSITIONS = 30
+MAX_SAME_SIDE = 20
+MAX_TOTAL_RISK = 0.92    # 8% reserve
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
 MAX_HOLD_SEC = 4 * 3600
-CB_CONSEC_LOSSES = 5
+CB_CONSEC_LOSSES = 999  # disabled per user principle
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50
 

@@ -52,6 +52,19 @@ HL_TO_BYBIT = {
     'XAI':'XAIUSDT',
     'NEO':'NEOUSDT',
     'MAV':'MAVUSDT',
+    'RESOLV':'RESOLVUSDT',
+    'HEMI':'HEMIUSDT',
+    'STABLE':'STABLEUSDT',
+    'BABY':'BABYUSDT',
+    'TST':'TSTUSDT',
+    'YZY':'YZYUSDT',
+    'PROMPT':'PROMPTUSDT',
+    'DOOD':'DOODUSDT',
+    'FOGO':'FOGOUSDT',
+    'NXPC':'NXPCUSDT',
+    'INIT':'INITUSDT',
+    'APEX':'APEXUSDT',
+    'WLFI':'WLFIUSDT',
 }
 # Inverse map
 BYBIT_TO_HL = {v:k for k,v in HL_TO_BYBIT.items()}
