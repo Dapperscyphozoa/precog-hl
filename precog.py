@@ -1311,8 +1311,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     except Exception as e:
         log(f"{coin} gate check err: {e}")
 
-    # Signal persistence: re-enabled at 3-bar window (OOS: +15% PnL boost)
-    if not signal_persistence.check(coin, sig, bar_ts): return
+    # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
+    # if not signal_persistence.check(coin, sig, bar_ts): return
 
     log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
 
