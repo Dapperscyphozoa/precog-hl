@@ -457,6 +457,15 @@ body::after {
 <!-- COIN WR HEATMAP -->
 <div class="panel" style="margin-bottom: 32px;">
     <div class="panel-head">
+        <div class="panel-title">BTC Orderbook Heatmap · 6 Venues Aggregated</div>
+        <div class="panel-meta" id="ob-meta">—</div>
+    </div>
+    <div id="ob-heatmap" style="height: 340px; position: relative;"></div>
+</div>
+
+<!-- COIN WR HEATMAP -->
+<div class="panel" style="margin-bottom: 32px;">
+    <div class="panel-head">
         <div class="panel-title">Per-Coin Win Rate Heatmap</div>
         <div class="panel-meta" id="heat-meta">—</div>
     </div>
@@ -601,6 +610,83 @@ function updateClock() {
     document.getElementById('utc-clock').textContent = n.toISOString().substr(11,8);
 }
 
+async function loadOrderbook() {
+    try {
+        const r = await fetch('/orderbook/BTC');
+        const d = await r.json();
+        if (!d.mid) {
+            document.getElementById('ob-heatmap').innerHTML = '<div style="opacity:0.5;padding:40px;text-align:center">// BTC orderbook feeds warming up...</div>';
+            return;
+        }
+        const bids = d.bids || [];
+        const asks = d.asks || [];
+        const mid = d.mid;
+        const maxUsd = Math.max(...bids.map(b=>b.usd), ...asks.map(a=>a.usd), 1);
+
+        const H = 340;
+        const midY = H / 2;
+        // Price range: ±1% of mid
+        const priceMin = mid * 0.99;
+        const priceMax = mid * 1.01;
+        const priceToY = p => H - ((p - priceMin) / (priceMax - priceMin)) * H;
+
+        let svg = `<svg viewBox="0 0 1000 ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block">`;
+        // Background gradient
+        svg += `<defs>
+            <linearGradient id="bidGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="rgba(184,255,47,0)" />
+                <stop offset="100%" stop-color="rgba(184,255,47,0.8)" />
+            </linearGradient>
+            <linearGradient id="askGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="rgba(193,39,45,0)" />
+                <stop offset="100%" stop-color="rgba(193,39,45,0.8)" />
+            </linearGradient>
+        </defs>`;
+
+        // Bid bars (below mid, green, from right)
+        bids.forEach(b => {
+            const y = priceToY(b.price);
+            if (y < 0 || y > H) return;
+            const w = (b.usd / maxUsd) * 800;
+            const intensity = Math.min(1, b.usd / maxUsd);
+            svg += `<rect x="${1000-w}" y="${y-2}" width="${w}" height="4" fill="rgba(184,255,47,${intensity*0.85})" />`;
+        });
+        // Ask bars (above mid, red)
+        asks.forEach(a => {
+            const y = priceToY(a.price);
+            if (y < 0 || y > H) return;
+            const w = (a.usd / maxUsd) * 800;
+            const intensity = Math.min(1, a.usd / maxUsd);
+            svg += `<rect x="${1000-w}" y="${y-2}" width="${w}" height="4" fill="rgba(193,39,45,${intensity*0.85})" />`;
+        });
+        // Mid price line
+        const midYLine = priceToY(mid);
+        svg += `<line x1="0" y1="${midYLine}" x2="1000" y2="${midYLine}" stroke="rgba(200,204,212,0.5)" stroke-width="1" stroke-dasharray="4 4" />`;
+        svg += `<text x="10" y="${midYLine-6}" fill="#c8ccd4" font-family="JetBrains Mono" font-size="11" letter-spacing="1">MID $${mid.toFixed(0)}</text>`;
+        // Price labels — top, bottom
+        svg += `<text x="10" y="16" fill="#c1272d" font-family="JetBrains Mono" font-size="10" opacity="0.6">+1% · $${priceMax.toFixed(0)}</text>`;
+        svg += `<text x="10" y="${H-6}" fill="#b8ff2f" font-family="JetBrains Mono" font-size="10" opacity="0.6">-1% · $${priceMin.toFixed(0)}</text>`;
+        // Side labels
+        svg += `<text x="985" y="${midYLine-20}" fill="#c1272d" font-family="JetBrains Mono" font-size="9" text-anchor="end" letter-spacing="2">ASKS ▲</text>`;
+        svg += `<text x="985" y="${midYLine+28}" fill="#b8ff2f" font-family="JetBrains Mono" font-size="9" text-anchor="end" letter-spacing="2">BIDS ▼</text>`;
+
+        // Max wall annotation
+        const topWall = [...bids, ...asks].sort((a,b)=>b.usd-a.usd)[0];
+        if (topWall) {
+            const ty = priceToY(topWall.price);
+            const side = bids.includes(topWall) ? 'BID' : 'ASK';
+            const color = side === 'BID' ? '#b8ff2f' : '#c1272d';
+            svg += `<circle cx="200" cy="${ty}" r="4" fill="${color}" />`;
+            svg += `<text x="215" y="${ty+3}" fill="${color}" font-family="JetBrains Mono" font-size="10" font-weight="600">$${(topWall.usd/1000).toFixed(0)}k @ ${topWall.price.toFixed(0)}</text>`;
+        }
+        svg += '</svg>';
+        document.getElementById('ob-heatmap').innerHTML = svg;
+        document.getElementById('ob-meta').textContent = `${d.venues||0} venues · ${bids.length}b / ${asks.length}a levels · mid $${mid.toFixed(0)}`;
+    } catch (e) {
+        console.error(e);
+    }
+}
+
 async function loadHeatmap() {
     try {
         const r = await fetch('/dash');
@@ -626,12 +712,13 @@ async function loadHeatmap() {
     } catch (e) {}
 }
 
-loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); updateClock();
+loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); updateClock();
 setInterval(loadDash, 5000);
 setInterval(loadNews, 60000);
 setInterval(loadSignals, 5000);
 setInterval(loadWhales, 5000);
 setInterval(loadHeatmap, 30000);
+setInterval(loadOrderbook, 3000);
 setInterval(updateClock, 1000);
 </script>
 </body>

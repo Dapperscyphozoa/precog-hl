@@ -167,6 +167,46 @@ def _load_landing():
 def landing():
     return Response(_load_landing(), mimetype='text/html')
 
+@app.route('/orderbook/<coin>', methods=['GET'])
+def orderbook_depth(coin):
+    try:
+        agg = orderbook_ws.get_aggregated_depth(coin.upper()) if hasattr(orderbook_ws,'get_aggregated_depth') else None
+        if not agg:
+            # Fallback: build from _DEPTH
+            from orderbook_ws import _DEPTH, _LOCK
+            with _LOCK:
+                d = _DEPTH.get(coin.upper(), {})
+                bids_raw = d.get('bids', {})
+                asks_raw = d.get('asks', {})
+                mid = d.get('mid', 0)
+            # _DEPTH uses venue_px keys
+            bids = {}; asks = {}
+            for k,v in bids_raw.items():
+                if isinstance(v, tuple): px, sz = v; bids[px] = bids.get(px,0)+sz
+            for k,v in asks_raw.items():
+                if isinstance(v, tuple): px, sz = v; asks[px] = asks.get(px,0)+sz
+            agg = {'bids':bids,'asks':asks,'mid':mid,'venue_count':0}
+        mid = agg.get('mid', 0)
+        # Build depth levels within 2% of mid, bucketed
+        if not mid: return jsonify({'mid':0,'bids':[],'asks':[]})
+        bids = sorted([(p,s) for p,s in agg['bids'].items() if p > mid*0.98 and p <= mid], reverse=True)
+        asks = sorted([(p,s) for p,s in agg['asks'].items() if p < mid*1.02 and p >= mid])
+        # Bucket into 40 levels
+        import math
+        def bucket(orders, N=40):
+            if not orders: return []
+            out = []
+            for px, sz in orders:
+                usd = px * sz
+                out.append({'price': px, 'size': sz, 'usd': usd})
+            return out[:N]
+        return jsonify({'coin':coin.upper(),'mid':mid,
+                        'bids':bucket(bids,40),
+                        'asks':bucket(asks,40),
+                        'venues':agg.get('venue_count',0)})
+    except Exception as e:
+        return jsonify({'err':str(e)})
+
 @app.route('/signals', methods=['GET'])
 def signals_feed():
     with _SIGNAL_LOG_LOCK:
