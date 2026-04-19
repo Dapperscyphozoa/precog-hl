@@ -1419,6 +1419,14 @@ def main():
 
             cur_risk = current_risk_pct(equity)
             log(f"--- tick eq=${equity:.2f} risk={cur_risk*100:.2f}% mult={risk_mult} pos={len(live_positions)} cL={state['consec_losses']} ---")
+            # Publish cached state for /dash
+            try:
+                main._cached_account = {'equity': equity, 'ts': time.time(),
+                    'positions': [{'coin':k,'side':'L' if v['size']>0 else 'S',
+                                   'size':abs(v['size']),'entry':v['entry'],
+                                   'upnl':v.get('upnl',0),'lev':v.get('lev',10)}
+                                  for k,v in live_positions.items()]}
+            except Exception: pass
 
             # WEBHOOK QUEUE — process DynaPro signals first (higher priority)
             wh_count = 0
@@ -1555,17 +1563,22 @@ def tuner_log():
 
 @app.route('/dash', methods=['GET'])
 def dash_json():
-    try:
-        cs = info.user_state(WALLET)
-        eq = float(cs.get('marginSummary',{}).get('accountValue',0))
-        positions = []
-        for p in cs.get('assetPositions',[]):
-            pp=p['position']; sz=float(pp['szi'])
-            positions.append({'coin':pp['coin'],'side':'L' if sz>0 else 'S','size':abs(sz),
-                              'entry':float(pp['entryPx']),'upnl':float(pp['unrealizedPnl']),
-                              'lev':int(pp['leverage']['value'])})
-    except Exception:
-        eq = 0; positions = []
+    # Use cached account state from main tick to avoid HL 429 on dash hits
+    cached = getattr(main, '_cached_account', {})
+    eq = cached.get('equity', 0)
+    positions = cached.get('positions', [])
+    if not cached or time.time() - cached.get('ts', 0) > 30:
+        try:
+            cs = info.user_state(WALLET)
+            eq = float(cs.get('marginSummary',{}).get('accountValue',0))
+            positions = []
+            for p in cs.get('assetPositions',[]):
+                pp=p['position']; sz=float(pp['szi'])
+                positions.append({'coin':pp['coin'],'side':'L' if sz>0 else 'S','size':abs(sz),
+                                  'entry':float(pp['entryPx']),'upnl':float(pp['unrealizedPnl']),
+                                  'lev':int(pp['leverage']['value'])})
+        except Exception as e:
+            pass
     try: news = news_filter.get_state()
     except Exception: news = {}
     try: ladder = risk_ladder.get_state()
