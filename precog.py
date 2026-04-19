@@ -440,12 +440,13 @@ def trend_gate(coin, side):
     if side == 'SELL' and last > ema: return False
     return True
 
+USE_GRID_GATE = False  # overfit layer disabled; V3 + ATR-min do the filtering
+
 def apply_ticker_gate(coin, side, price, candles):
-    """Apply per-ticker optimized gates + V3 trend gate + ATR-min filter. Returns True if signal passes."""
+    """V3 trend + ATR-min filter. Returns True if passes."""
     if not trend_gate(coin, side):
+        log(f"{coin} {side} BLOCKED by V3 trend")
         return False
-    # ATR-min filter: block trades in low-volatility regime (ATR/price < 0.2%)
-    # tuner phase C: lifts PF 1.41 -> 1.81 with identical PnL
     if candles and len(candles) >= 15:
         trs = []
         for j in range(1, min(15, len(candles))):
@@ -456,7 +457,10 @@ def apply_ticker_gate(coin, side, price, candles):
             atr_val = sum(trs)/len(trs)
             last_c = candles[-1][4]
             if last_c>0 and atr_val/last_c < 0.002:
+                log(f"{coin} {side} BLOCKED by ATR-min ({atr_val/last_c*100:.2f}%)")
                 return False
+    if not USE_GRID_GATE:
+        return True
     key = coin.upper().replace('.P','')
     # Try: exact, +USDT, strip k prefix +USDT (kBONK→BONKUSDT, kPEPE→PEPEUSDT)
     gate = TICKER_GATES.get(key) or TICKER_GATES.get(key + 'USDT')
