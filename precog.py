@@ -116,7 +116,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except: pass
-    return jsonify({'status':'ok','version':'v8.12.0','equity':eq,
+    return jsonify({'status':'ok','version':'v8.14','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -1183,7 +1183,7 @@ def main():
                 log(f"BTC vol {btc_range*100:.1f}% — risk halved")
 
             cur_risk = current_risk_pct(equity)
-            log(f"--- tick eq=${equity:.2f} risk={int(cur_risk*100)}% mult={risk_mult} positions={len(live_positions)} consec_L={state['consec_losses']} ---")
+            log(f"--- tick eq=${equity:.2f} risk={cur_risk*100:.2f}% mult={risk_mult} pos={len(live_positions)} cL={state['consec_losses']} ---")
 
             # WEBHOOK QUEUE — process DynaPro signals first (higher priority)
             wh_count = 0
