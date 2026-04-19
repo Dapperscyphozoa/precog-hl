@@ -17,6 +17,17 @@ LOG = '/var/data/tuner.log' if os.path.isdir('/var/data') else '/tmp/tuner.log'
 CACHE = '/var/data/tuner_cache' if os.path.isdir('/var/data') else '/tmp/tuner_cache'
 os.makedirs(CACHE, exist_ok=True)
 
+WEB_URL = os.environ.get('WEB_URL', 'https://precog-hl-web.onrender.com')
+
+def post_results(payload):
+    try:
+        req = urllib.request.Request(f'{WEB_URL}/tuner/update',
+            data=json.dumps(payload).encode(),
+            headers={'Content-Type':'application/json'}, method='POST')
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception as e:
+        pass  # non-fatal
+
 def L(msg):
     line = f"[{time.strftime('%H:%M:%S')}] {msg}"
     print(line, flush=True)
@@ -212,6 +223,7 @@ def checkpoint(best, phase, combo_count, total_combos, elapsed, extra=None):
     if extra: payload.update(extra)
     try: json.dump(payload, open(OUT,'w'), indent=2)
     except Exception as e: L(f"checkpoint err: {e}")
+    post_results(payload)
 
 def main_loop():
     L("BOOT tuner_worker")

@@ -1231,6 +1231,28 @@ def main():
         time.sleep(LOOP_SEC)
 
 
+@app.route('/tuner/update', methods=['POST'])
+def tuner_update():
+    try:
+        import json
+        data = flask_request.get_json(force=True, silent=True) or {}
+        # Store to web disk
+        try:
+            os.makedirs('/var/data', exist_ok=True)
+            with open('/var/data/tuner_results.json','w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            with open('/tmp/tuner_results.json','w') as f:
+                json.dump(data, f, indent=2)
+        # Also log summary to buffer
+        top = data.get('top',[])
+        if top:
+            t0 = top[0]
+            log(f"TUNER {data.get('phase','?')} {data.get('completed','?')}/{data.get('total','?')} | top: n={t0.get('n')} WR={t0.get('wr',0):.1f}% pnl={t0.get('pnl',0):+.1f}%")
+        return jsonify({'ok':True})
+    except Exception as e:
+        return jsonify({'error':str(e)}), 500
+
 @app.route('/tuner/status', methods=['GET'])
 def tuner_status():
     try:
