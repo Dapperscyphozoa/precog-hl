@@ -618,7 +618,7 @@ CB_CONSEC_LOSSES = 999  # disabled per user principle
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50
 
-TRAIL_PCT = 0.008          # OOS winner: +250% vs +40% at 0.3%
+TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
 
