@@ -279,7 +279,7 @@ def start():
         print("[ob_ws] websocket-client missing", flush=True); return
     threading.Thread(target=_runner_bybit, daemon=True, name='ob_bybit').start()
     threading.Thread(target=_runner_binance, daemon=True, name='ob_binance').start()
-    threading.Thread(target=_runner_okx, daemon=True, name='ob_okx').start()
-    threading.Thread(target=_runner_coinbase, daemon=True, name='ob_coinbase').start()
+    # threading.Thread(target=_runner_okx, daemon=True, name='ob_okx').start()  # disabled: broke aggregation
+    # threading.Thread(target=_runner_coinbase, daemon=True, name='ob_coinbase').start()  # disabled: broke aggregation
     threading.Thread(target=_wall_scanner, daemon=True, name='ob_scan').start()
     print("[ob_ws] started Bybit+Binance depth + wall scanner", flush=True)
