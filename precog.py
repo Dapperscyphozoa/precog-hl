@@ -302,6 +302,74 @@ def close_all_positions():
     log(f"FORCE CLOSE ALL: {len(closed)} positions closed")
     return jsonify({'status':'closed_all','positions':closed})
 
+@app.route('/closeworst/<int:n>', methods=['GET'])
+def close_worst_n(n):
+    """Close N worst-performing positions by unrealized PnL."""
+    state = load_state()
+    positions = get_all_positions_live()
+    sorted_pos = sorted(positions.items(), key=lambda x: x[1].get('pnl',0))
+    targets = sorted_pos[:n]
+    closed = []
+    for coin, pos in targets:
+        try:
+            pnl = close(coin)
+            closed.append({'coin':coin,'pnl':pnl,'upnl':pos.get('pnl',0)})
+            state['positions'].pop(coin, None)
+        except Exception as e:
+            closed.append({'coin':coin,'error':str(e)})
+    save_state(state)
+    log(f"CLOSE WORST {n}: {[c['coin'] for c in closed]}")
+    return jsonify({'status':'closed','count':len(closed),'positions':closed})
+
+@app.route('/close/<coin>', methods=['GET'])
+def close_one(coin):
+    """Close specific coin by name."""
+    state = load_state()
+    try:
+        pnl = close(coin.upper())
+        state['positions'].pop(coin.upper(), None)
+        save_state(state)
+        log(f"MANUAL CLOSE {coin}: pnl={pnl}")
+        return jsonify({'status':'closed','coin':coin.upper(),'pnl':pnl})
+    except Exception as e:
+        return jsonify({'status':'err','coin':coin.upper(),'err':str(e)})
+
+@app.route('/closelongs', methods=['GET'])
+def close_all_longs():
+    """Close every long position."""
+    state = load_state()
+    positions = get_all_positions_live()
+    closed = []
+    for coin, pos in positions.items():
+        if pos.get('size', 0) > 0:
+            try:
+                pnl = close(coin)
+                closed.append({'coin':coin,'pnl':pnl})
+                state['positions'].pop(coin, None)
+            except Exception as e:
+                closed.append({'coin':coin,'error':str(e)})
+    save_state(state)
+    log(f"CLOSE ALL LONGS: {len(closed)} closed")
+    return jsonify({'status':'closed_longs','count':len(closed),'positions':closed})
+
+@app.route('/closeshorts', methods=['GET'])
+def close_all_shorts():
+    """Close every short position."""
+    state = load_state()
+    positions = get_all_positions_live()
+    closed = []
+    for coin, pos in positions.items():
+        if pos.get('size', 0) < 0:
+            try:
+                pnl = close(coin)
+                closed.append({'coin':coin,'pnl':pnl})
+                state['positions'].pop(coin, None)
+            except Exception as e:
+                closed.append({'coin':coin,'error':str(e)})
+    save_state(state)
+    log(f"CLOSE ALL SHORTS: {len(closed)} closed")
+    return jsonify({'status':'closed_shorts','count':len(closed),'positions':closed})
+
 @app.route('/transfer', methods=['POST'])
 def transfer_funds():
     """Transfer USDC internally on HL. POST {amount, to_wallet}"""
