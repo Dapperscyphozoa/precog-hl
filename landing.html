@@ -464,10 +464,12 @@ async function loadDash() {
         posDiv.innerHTML = sorted.map(p => {
             const cls = (p.upnl||0)>=0?'pnl-pos':'pnl-neg';
             const sign = (p.upnl||0)>=0?'+':'';
+            const lev = p.lev || '-';
+            const tp = p.tp ? p.tp.toPrecision(5) : '-';
             return `<div class="pos-row">
                 <div class="pos-coin">${p.coin}</div>
-                <div><span class="pos-side side-${p.side}">${p.side}</span></div>
-                <div class="pos-size">${p.size} @ ${p.entry}</div>
+                <div><span class="pos-side side-${p.side}">${p.side}</span> <span style="opacity:0.5;font-size:9px">${lev}x</span></div>
+                <div class="pos-size">${p.size} @ ${p.entry}<br><span style="opacity:0.5;font-size:9px">TP ${tp}</span></div>
                 <div class="pos-pnl ${cls}">${sign}$${(p.upnl||0).toFixed(2)}</div>
             </div>`;
         }).join('') || '<div class="pos-row" style="opacity:0.5">// no active positions</div>';

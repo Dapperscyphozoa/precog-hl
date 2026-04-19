@@ -912,7 +912,9 @@ def get_all_positions_live(force=False):
                     'size':sz,
                     'entry':float(pos['entryPx']),
                     'pnl':float(pos['unrealizedPnl']),
-                    'mark':float(pos.get('positionValue',0)) / abs(sz) if sz else 0
+                    'mark':float(pos.get('positionValue',0)) / abs(sz) if sz else 0,
+                    'lev':int(pos.get('leverage',{}).get('value',10)),
+                    'upnl':float(pos['unrealizedPnl']),
                 }
     except Exception as e:
         log(f"positions fetch err: {e}")
@@ -1473,12 +1475,31 @@ def main():
             log(f"--- tick eq=${equity:.2f} risk={cur_risk*100:.2f}% mult={risk_mult} pos={len(live_positions)} cL={state['consec_losses']} ---")
             # Publish cached state for /dash
             try:
-                main._cached_account = {'equity': equity, 'ts': time.time(),
-                    'positions': [{'coin':k,'side':'L' if v['size']>0 else 'S',
-                                   'size':abs(v['size']),'entry':v['entry'],
-                                   'upnl':v.get('upnl',0),'lev':v.get('lev',10)}
-                                  for k,v in live_positions.items()]}
-            except Exception: pass
+                pos_list = []
+                for k, v in live_positions.items():
+                    side_long = v['size'] > 0
+                    entry = v['entry']
+                    # TP target: nearest wall (if any) or trail-projected target
+                    tp_target = None
+                    try:
+                        wall = orderbook_ws.get_nearest_wall(k, 'ask' if side_long else 'bid')
+                        if wall: tp_target = wall['price']
+                    except Exception: pass
+                    if not tp_target:
+                        # Fallback: entry * (1 + 3*trail) as rough target
+                        tp_target = entry * (1.024 if side_long else 0.976)
+                    pos_list.append({
+                        'coin': k,
+                        'side': 'L' if side_long else 'S',
+                        'size': abs(v['size']),
+                        'entry': entry,
+                        'upnl': v.get('upnl', v.get('pnl', 0)),
+                        'lev': v.get('lev', 10),
+                        'tp': tp_target,
+                        'mark': v.get('mark', 0),
+                    })
+                main._cached_account = {'equity': equity, 'ts': time.time(), 'positions': pos_list}
+            except Exception as e: log(f"cache err: {e}")
 
             # WEBHOOK QUEUE — process DynaPro signals first (higher priority)
             wh_count = 0
