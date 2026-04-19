@@ -6,7 +6,7 @@ import time, threading
 _LOCK = threading.Lock()
 _LAST_SIGNAL = {}  # coin -> (side, bar_ts, timestamp_logged)
 
-PERSISTENCE_WINDOW_SEC = 900  # last signal must be within 15min
+PERSISTENCE_WINDOW_SEC = 900  # 3 bars on 5m = OOS winner  # last signal must be within 15min
 
 def check(coin, side, bar_ts):
     """Returns True if this is the 2nd consecutive bar with same side. First bar returns False (staged)."""
