@@ -512,8 +512,8 @@ def derive(s):
             'pivot_lb': max(2, 9 - s['sens']), 'cd': s['cd']}
 SP = derive(GRID); BP = derive(GRID)
 # TUNER WINNER OVERRIDE — plb=36 rsi=70/35
-SP['pivot_lb'] = 36
-BP['pivot_lb'] = 36
+SP['pivot_lb'] = 10
+BP['pivot_lb'] = 10  # loosened from tuner 36 for signal flow
 SP['rsi_hi'] = 70
 BP['rsi_lo'] = 35
 
@@ -683,7 +683,7 @@ def fetch(coin, n_bars=100, retries=3):
             log(f"candle err {coin}: {e}"); return []
     return []
 
-SCAN_BARS = 2
+SCAN_BARS = 12  # scan last 12 bars to catch signals after warmup
 CD_MS = 10 * 5 * 60 * 1000  # cd=10 bars of 5m = 50min — tuner winner
 
 def chase_gate_ok(side, price, candles, i):
@@ -705,7 +705,7 @@ def chase_gate_ok(side, price, candles, i):
 def signal(candles, last_sell_ts, last_buy_ts, coin=None):
     """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp.
     Applies chase_gate for coins in CHASE_GATE_COINS."""
-    if len(candles)<100: return None, None
+    if len(candles)<60: return None, None
     h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
     N=len(cl); r14=rsi_calc(cl,14)
     LB = SP['pivot_lb']
