@@ -32,6 +32,9 @@ import btc_correlation
 import spoof_detection
 import session_scaler
 import whale_filter
+import cvd_ws
+import oi_tracker
+import funding_arb
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -1316,6 +1319,12 @@ def main():
     except Exception as e: log(f"liq_ws err: {e}")
     try: whale_filter.start()
     except Exception as e: log(f"whale_filter err: {e}")
+    try: cvd_ws.start()
+    except Exception as e: log(f"cvd_ws err: {e}")
+    try: oi_tracker.start()
+    except Exception as e: log(f"oi_tracker err: {e}")
+    try: threading.Timer(60.0, funding_arb.refresh).start()
+    except Exception as e: log(f"funding_arb err: {e}")
     # Funding refresh deferred — first tick runs it after 30s delay
     threading.Timer(30.0, lambda: funding_filter.refresh_all(COINS)).start()
     try: news_filter.start()
@@ -1454,9 +1463,11 @@ def main():
                 try: spoof_detection.scan_walls(k, get_mid(k))
                 except Exception: pass
 
-            # Hourly funding refresh
+            # Hourly funding refresh (both funding_filter and funding_arb)
             fund_age = time.time() - getattr(main, '_funding_ts', 0)
             if fund_age > 3600:
+                try: funding_arb.refresh()
+                except Exception: pass
                 try: funding_filter.refresh_all(COINS); main._funding_ts = time.time()
                 except Exception as e: log(f"funding refresh err: {e}")
 
@@ -1691,6 +1702,9 @@ def dash_json():
         'spoof': spoof_detection.status(),
         'session': {'name': session_scaler.session_name(), 'mult': session_scaler.get_mult()},
         'whale': whale_filter.status(),
+        'cvd': cvd_ws.status(),
+        'oi': oi_tracker.status(),
+        'funding_arb': funding_arb.status(),
         'coin_wr': coin_wr, 'killed_coins': killed,
         'consec_losses': state.get('consec_losses', 0),
     })
