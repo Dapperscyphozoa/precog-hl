@@ -23,6 +23,28 @@ import bybit_ws
 # TRADE LOG — persistent CSV for real WR tracking
 # ═══════════════════════════════════════════════════════
 TRADE_LOG = '/var/data/trades.csv'
+
+# Per-coin kill-switch: disable a coin if rolling 10-trade WR < 35%
+COIN_KILL_MIN_N = 10
+COIN_KILL_WR_THRESHOLD = 0.35
+COIN_KILL_COOLDOWN_SEC = 12 * 3600  # 12h
+
+def coin_disabled(coin, state):
+    k = state.get('coin_kill', {}).get(coin)
+    if not k: return False
+    return time.time() < k.get('until', 0)
+
+def update_coin_wr(coin, win, state):
+    h = state.setdefault('coin_hist', {}).setdefault(coin, [])
+    h.append(1 if win else 0)
+    if len(h) > COIN_KILL_MIN_N:
+        h.pop(0)
+    if len(h) >= COIN_KILL_MIN_N:
+        wr = sum(h)/len(h)
+        if wr < COIN_KILL_WR_THRESHOLD:
+            state.setdefault('coin_kill', {})[coin] = {'until': time.time() + COIN_KILL_COOLDOWN_SEC, 'wr': wr}
+            log(f"COIN KILL {coin}: rolling 10-trade WR {wr*100:.0f}% < {COIN_KILL_WR_THRESHOLD*100:.0f}% → disabled 12h")
+
 def log_trade(engine, coin, direction, entry, pnl, source, sl_pct=None):
     import csv
     try:
@@ -527,7 +549,7 @@ SP['rsi_hi'] = 70
 BP['rsi_lo'] = 35
 
 
-INITIAL_RISK_PCT = 0.01      # 1% — tuner-validated 68% WR
+INITIAL_RISK_PCT = 0.04      # 4% — aggressive (tuner-validated 68% WR)
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
@@ -693,7 +715,7 @@ def fetch(coin, n_bars=100, retries=3):
     return []
 
 SCAN_BARS = 12  # scan last 12 bars to catch signals after warmup
-CD_MS = 10 * 5 * 60 * 1000  # cd=10 bars of 5m = 50min — tuner winner
+CD_MS = 0  # cooldown killed — re-enter same direction on valid signal
 
 def chase_gate_ok(side, price, candles, i):
     """Reject entries chasing extended moves.
@@ -894,7 +916,7 @@ def cancel_trigger_orders(coin):
     except Exception as e:
         log(f"{coin} cancel triggers err: {e}")
 
-def close(coin):
+def close(coin, state_ref=None):
     """Returns realized pnl_pct for logging (FIX #11)."""
     live = get_all_positions_live(force=True).get(coin)
     if not live: return None
@@ -950,6 +972,7 @@ def place_native_sl(coin, is_long, entry, size):
         log(f"{coin} native SL err: {e}")
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
+    if coin_disabled(coin, state): return
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell', 0)
     last_b=state['cooldowns'].get(coin+'_buy',  0)
@@ -1063,8 +1086,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if live and live['size']>0:
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1
-                else: state['consec_losses'] = 0
+                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state)
+                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state)
                 state['last_pnl_close'] = pnl_pct
         if not live or live['size']>0:
             px = get_mid(coin)
@@ -1081,8 +1104,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if live and live['size']<0:
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1
-                else: state['consec_losses'] = 0
+                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state)
+                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state)
                 state['last_pnl_close'] = pnl_pct
         if not live or live['size']<0:
             px = get_mid(coin)
@@ -1208,8 +1231,8 @@ def main():
                         if live:
                             pnl_pct = close(coin)
                             if pnl_pct is not None:
-                                if pnl_pct < 0: state['consec_losses'] += 1
-                                else: state['consec_losses'] = 0
+                                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state)
+                                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state)
                             state['positions'].pop(coin, None)
                             log(f"WEBHOOK CLOSE {coin} ({action}) pnl={pnl_pct}")
                     elif action in ('buy', 'sell'):
@@ -1252,13 +1275,13 @@ def main():
                 except Exception as e:
                     log(f"webhook process err: {e}"); break
 
-            # PRECOG + WEBHOOK SIGNALS — scan all coins
-            for c in COINS:
-                try:
-                    process(c, state, equity, live_positions, risk_mult)
-                except Exception as e:
-                    log(f"err {c}: {e}")
-                time.sleep(0.05)  # Bybit WS = zero rate limit, minimal yield for thread fairness
+            # PRECOG scan — parallel 8 workers (Bybit WS candles = no rate limit)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futs = {pool.submit(process, c, state, equity, live_positions, risk_mult): c for c in COINS}
+                for f in as_completed(futs):
+                    try: f.result()
+                    except Exception as e: log(f"err {futs[f]}: {e}")
 
             save_state(state)
             log(f"--- tick complete ---")
