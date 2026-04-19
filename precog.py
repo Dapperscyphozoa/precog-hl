@@ -591,8 +591,8 @@ def derive(s):
             'pivot_lb': max(2, 9 - s['sens']), 'cd': s['cd']}
 SP = derive(GRID); BP = derive(GRID)
 # TUNER WINNER OVERRIDE — plb=36 rsi=70/35
-SP['pivot_lb'] = 10
-BP['pivot_lb'] = 10  # loosened from tuner 36 for signal flow
+SP['pivot_lb'] = 15  # OOS: plb=15 lifts PnL +5%, matches trail 0.8% winner
+BP['pivot_lb'] = 15
 SP['rsi_hi'] = 70
 BP['rsi_lo'] = 35
 
@@ -1100,6 +1100,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     last_s=state['cooldowns'].get(coin+'_sell', 0)
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
+    # Opposite-signal exit: if we hold opposite-side position, close it first
+    if sig and coin in state.get('positions', {}):
+        pos = state['positions'][coin]
+        if pos and ((pos.get('side')=='L' and sig=='SELL') or (pos.get('side')=='S' and sig=='BUY')):
+            try:
+                close(coin)
+                log(f"{coin} OPP-EXIT on {sig} signal")
+            except Exception as e: log(f"opp-exit err {coin}: {e}")
     # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
     if not sig:
         try:
