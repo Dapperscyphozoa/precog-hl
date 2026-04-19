@@ -18,7 +18,7 @@ extern double TP_Pct     = 0.8;
 extern bool   EMA_Exit   = false;
 extern string SignalURL  = "https://precog-hl-web.onrender.com/mt4/signals";
 extern int    PollSec    = 10;
-extern bool   UseLocalEMAFilter = false;  // 2nd-gate webhook signals with local EMA (was always-on in v4.0)
+extern bool   UseLocalEMAFilter = true;  // 2nd-gate webhook signals with local EMA (was always-on in v4.0)
 
 datetime lastBarTime[256];
 string   syms[256];
