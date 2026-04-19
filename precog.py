@@ -376,6 +376,8 @@ COINS = [
     'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
     'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
     'AR','GALA','VIRTUAL',
+    # Tuner-passed candidates (14d OOS with V3+ATR, WR>=65%, PnL>1%):
+    'MAVIA', 'HMSTR', 'ZEREBRO', 'BLAST', 'BOME', 'MANTA', 'CHILLGUY', 'RSR', 'MELANIA', 'SCR', 'BIO', 'TNSR', 'MINA', 'NOT', 'BRETT', 'ME', 'IOTA', 'DYM', 'ORDI', 'POPCAT', 'SAGA', 'FIL', 'REZ', 'BANANA', 'kNEIRO', 'GMT', 'NEO', 'MAV',
 ]
 
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
