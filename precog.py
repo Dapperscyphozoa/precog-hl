@@ -1389,8 +1389,8 @@ def main():
                 except Exception as e:
                     log(f"wall-break check err {wcoin}: {e}")
 
-            # Profit-lock: move SL to +0.7% when unrealized hits +1.5%
-            for k, lp in live_positions.items():
+            # Profit-lock DISABLED — OOS showed every config loses vs trail-only (no_plock +40%, any plock -20 to +15%)
+            for k, lp in live_positions.items() if False else []:
                 try:
                     side = 'BUY' if lp['size']>0 else 'SELL'
                     entry = lp['entry']
