@@ -264,6 +264,79 @@ def _runner_coinbase():
         except Exception as e: print(f"[ob coinbase] {e}", flush=True)
         if _RUN: time.sleep(5)
 
+
+
+HL_TO_BITGET = {
+    'BTC':'BTCUSDT','ETH':'ETHUSDT','SOL':'SOLUSDT','XRP':'XRPUSDT','ADA':'ADAUSDT',
+    'AVAX':'AVAXUSDT','LINK':'LINKUSDT','DOT':'DOTUSDT','ATOM':'ATOMUSDT','SUI':'SUIUSDT',
+    'DOGE':'DOGEUSDT','LTC':'LTCUSDT','BNB':'BNBUSDT','APT':'APTUSDT','NEAR':'NEARUSDT',
+    'TIA':'TIAUSDT','INJ':'INJUSDT','FIL':'FILUSDT','ARB':'ARBUSDT','OP':'OPUSDT',
+    'AAVE':'AAVEUSDT','LDO':'LDOUSDT','WIF':'WIFUSDT','ORDI':'ORDIUSDT','TON':'TONUSDT',
+}
+
+HL_TO_KRAKEN = {
+    'BTC':'PF_XBTUSD','ETH':'PF_ETHUSD','SOL':'PF_SOLUSD','XRP':'PF_XRPUSD','ADA':'PF_ADAUSD',
+    'AVAX':'PF_AVAXUSD','LINK':'PF_LINKUSD','DOT':'PF_DOTUSD','ATOM':'PF_ATOMUSD','SUI':'PF_SUIUSD',
+    'DOGE':'PF_DOGEUSD','LTC':'PF_LTCUSD','AAVE':'PF_AAVEUSD','FIL':'PF_FILUSD','ARB':'PF_ARBUSD',
+    'OP':'PF_OPUSD','INJ':'PF_INJUSD','LDO':'PF_LDOUSD','APT':'PF_APTUSD','NEAR':'PF_NEARUSD',
+}
+
+def _bitget_msg(ws, msg):
+    try:
+        m = json.loads(msg)
+        if m.get('action') not in ('snapshot','update'): return
+        arg = m.get('arg', {}); inst = arg.get('instId','')
+        hl = None
+        for h,b in HL_TO_BITGET.items():
+            if b == inst: hl = h; break
+        if not hl: return
+        for d in m.get('data', []):
+            _update_levels(hl, d.get('bids', [])[:50], d.get('asks', [])[:50], 'bg')
+    except Exception: pass
+
+def _bitget_open(ws):
+    args = [{'instType':'USDT-FUTURES','channel':'books','instId':v} for v in HL_TO_BITGET.values()]
+    ws.send(json.dumps({'op':'subscribe','args':args}))
+
+def _runner_bitget():
+    while _RUN:
+        try:
+            ws = websocket.WebSocketApp('wss://ws.bitget.com/v2/ws/public',
+                on_message=_bitget_msg, on_open=_bitget_open,
+                on_error=lambda ws,e:None, on_close=lambda ws,c,m:None)
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e: print(f"[ob bitget] {e}", flush=True)
+        if _RUN: time.sleep(5)
+
+def _kraken_msg(ws, msg):
+    try:
+        m = json.loads(msg)
+        if m.get('feed') not in ('book_snapshot','book'): return
+        prod = m.get('product_id','')
+        hl = None
+        for h,k in HL_TO_KRAKEN.items():
+            if k == prod: hl = h; break
+        if not hl: return
+        # Kraken provides bids/asks as list of {price, qty}
+        bids = [[b['price'], b['qty']] for b in m.get('bids', [])[:50]] if m.get('bids') else []
+        asks = [[a['price'], a['qty']] for a in m.get('asks', [])[:50]] if m.get('asks') else []
+        if bids or asks:
+            _update_levels(hl, bids, asks, 'kr')
+    except Exception: pass
+
+def _kraken_open(ws):
+    ws.send(json.dumps({'event':'subscribe','feed':'book','product_ids':list(HL_TO_KRAKEN.values())}))
+
+def _runner_kraken():
+    while _RUN:
+        try:
+            ws = websocket.WebSocketApp('wss://futures.kraken.com/ws/v1',
+                on_message=_kraken_msg, on_open=_kraken_open,
+                on_error=lambda ws,e:None, on_close=lambda ws,c,m:None)
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e: print(f"[ob kraken] {e}", flush=True)
+        if _RUN: time.sleep(5)
+
 def start():
     global _RUN
     if _RUN: return
@@ -274,5 +347,7 @@ def start():
     threading.Thread(target=_runner_binance, daemon=True, name='ob_binance').start()
     threading.Thread(target=_runner_okx, daemon=True, name='ob_okx').start()
     threading.Thread(target=_runner_coinbase, daemon=True, name='ob_coinbase').start()
+    threading.Thread(target=_runner_bitget, daemon=True, name='ob_bitget').start()
+    threading.Thread(target=_runner_kraken, daemon=True, name='ob_kraken').start()
     threading.Thread(target=_wall_scanner, daemon=True, name='ob_scan').start()
     print("[ob_ws] started Bybit+Binance depth + wall scanner", flush=True)

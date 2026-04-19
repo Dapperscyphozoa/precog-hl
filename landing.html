@@ -447,12 +447,20 @@ body::after {
     <!-- MARKET DATA -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Aggregation</div>
-            <div class="panel-meta">6 streams</div>
+            <div class="panel-title">Aggregation · 6 Venues</div>
+            <div class="panel-meta">Bybit·Bin·OKX·CB·Bitget·Kraken</div>
         </div>
         <div id="aggregation" style="font-size: 11px; line-height: 2;"></div>
     </div>
 </div>
+
+<!-- COIN WR HEATMAP -->
+<div class="panel" style="margin-bottom: 32px;">
+    <div class="panel-head">
+        <div class="panel-title">Per-Coin Win Rate Heatmap</div>
+        <div class="panel-meta" id="heat-meta">—</div>
+    </div>
+    <div id="heatmap" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 4px; font-size: 10px;"></div>
 
 <!-- FOOTER -->
 <div class="footer">
@@ -593,11 +601,37 @@ function updateClock() {
     document.getElementById('utc-clock').textContent = n.toISOString().substr(11,8);
 }
 
-loadDash(); loadNews(); loadSignals(); loadWhales(); updateClock();
+async function loadHeatmap() {
+    try {
+        const r = await fetch('/dash');
+        const d = await r.json();
+        const cw = d.coin_wr || {};
+        const entries = Object.entries(cw)
+            .filter(([c,s]) => (s.wins||0)+(s.losses||0) >= 3)
+            .sort((a,b) => (b[1].wr||0)-(a[1].wr||0));
+        document.getElementById('heatmap').innerHTML = entries.map(([c,s]) => {
+            const n = (s.wins||0)+(s.losses||0);
+            const wr = (s.wr||0)*100;
+            let bg;
+            if (wr >= 70) bg = 'rgba(184,255,47,0.4)';
+            else if (wr >= 55) bg = 'rgba(184,255,47,0.15)';
+            else if (wr >= 40) bg = 'rgba(217,118,6,0.2)';
+            else bg = 'rgba(193,39,45,0.3)';
+            return `<div style="padding:8px 6px;background:${bg};border:1px solid var(--line);text-align:center">
+                <div style="font-weight:600;font-size:11px">${c}</div>
+                <div style="font-size:9px;opacity:0.7">${wr.toFixed(0)}% · ${n}</div>
+            </div>`;
+        }).join('') || '<div style="opacity:0.5;padding:20px">// no closed trades yet</div>';
+        document.getElementById('heat-meta').textContent = entries.length + ' coins · 3+ trades';
+    } catch (e) {}
+}
+
+loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); updateClock();
 setInterval(loadDash, 5000);
 setInterval(loadNews, 60000);
 setInterval(loadSignals, 5000);
 setInterval(loadWhales, 5000);
+setInterval(loadHeatmap, 30000);
 setInterval(updateClock, 1000);
 </script>
 </body>
