@@ -551,7 +551,23 @@ TRAIL_PCT = 0.003          # 0.3% — tuner winner config
 MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
 
-info = Info(constants.MAINNET_API_URL, skip_ws=True)
+def _init_hl_with_retry(max_attempts=8):
+    """Retry Info() init with exponential backoff — Hyperliquid 429s on cold deploys."""
+    import time as _t
+    for attempt in range(max_attempts):
+        try:
+            return Info(constants.MAINNET_API_URL, skip_ws=True)
+        except Exception as e:
+            msg = str(e)
+            if '429' in msg or 'rate' in msg.lower():
+                wait = min(60, 3 * (2 ** attempt))
+                print(f"[HL init] 429 rate-limited, retry {attempt+1}/{max_attempts} in {wait}s", flush=True)
+                _t.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("Hyperliquid Info() init failed after retries")
+
+info = _init_hl_with_retry()
 account = Account.from_key(PRIV_KEY)
 exchange = Exchange(account, constants.MAINNET_API_URL, account_address=WALLET)
 
