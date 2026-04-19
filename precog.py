@@ -16,7 +16,6 @@ from eth_account import Account
 import threading
 from queue import Queue
 from flask import Flask, request as flask_request, jsonify
-from gates import run_gates
 import bybit_ws
 import orderbook_ws
 import news_filter
@@ -85,7 +84,7 @@ try:
     import json as _json
     with open(os.path.join(os.path.dirname(__file__), 'mt4_ticker_gates.json')) as _f:
         MT4_TICKER_GATES = _json.load(_f)
-except:
+except Exception:
     MT4_TICKER_GATES = {}
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
 MT4_BIAS = {'direction': '', 'ts': 0}
@@ -144,7 +143,7 @@ app = Flask(__name__)
 def health():
     eq = 0
     try: eq = get_balance()
-    except: pass
+    except Exception: pass
     return jsonify({'status':'ok','version':'v8.15','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -234,7 +233,7 @@ def webhook():
     data = None
     try:
         data = flask_request.get_json(force=True, silent=True)
-    except: pass
+    except Exception: pass
     
     if not data:
         text = raw_body.strip()
@@ -275,7 +274,7 @@ def webhook():
                     data = {'action': parts[0].lower(), 'ticker': parts[1]}
                 if len(parts) >= 3:
                     try: data['price'] = float(parts[-1])
-                    except: pass
+                    except Exception: pass
     
     if not data:
         # Last resort — just log and accept, don't 400
@@ -651,7 +650,7 @@ def load_state():
         for k,v in default.items():
             if k not in loaded: loaded[k]=v
         return loaded
-    except: return default
+    except Exception: return default
 
 def save_state(s):
     """Atomic write with backup for deploy resilience."""
@@ -662,7 +661,7 @@ def save_state(s):
     # Backup copy survives if primary is lost on deploy
     try:
         import shutil; shutil.copy2(STATE_PATH, STATE_PATH + '.bak')
-    except: pass
+    except Exception: pass
 
 def kill_switch_active():
     return os.path.exists(KILL_FILE)
@@ -819,11 +818,11 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
 # ═══════════════════════════════════════════════════════
 def get_balance():
     try: return float(_cached_user_state()['marginSummary']['accountValue'])
-    except: return 0
+    except Exception: return 0
 
 def get_total_margin():
     try: return float(_cached_user_state()['marginSummary'].get('totalMarginUsed', 0))
-    except: return 0
+    except Exception: return 0
 
 # ═══════════════════════════════════════════════════════
 # API CACHE — reduces HL API calls from 100+/cycle to ~3/cycle
@@ -837,7 +836,7 @@ def _cached_mids():
         try:
             _cache['mids'] = info.all_mids()
             _cache['mids_ts'] = now
-        except: pass
+        except Exception: pass
     return _cache['mids'] or {}
 
 def _cached_user_state():
@@ -846,12 +845,12 @@ def _cached_user_state():
         try:
             _cache['state'] = info.user_state(WALLET)
             _cache['state_ts'] = now
-        except: pass
+        except Exception: pass
     return _cache['state'] or {}
 
 def get_mid(coin):
     try: return float(_cached_mids()[coin])
-    except: return None
+    except Exception: return None
 
 _POSITIONS_CACHE = {'data': {}, 'ts': 0}
 
@@ -892,11 +891,24 @@ def get_funding_rate(coin):
         for i, u in enumerate(universe):
             if u['name']==coin and i<len(asset_ctxs):
                 return float(asset_ctxs[i].get('funding', 0))
-    except: pass
+    except Exception: pass
     return 0
 
-def calc_size(equity, px, risk_pct, risk_mult=1.0):
-    raw = equity * risk_pct * risk_mult * actual_lev / px
+def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
+    # Per-coin leverage (BTC/ETH 20x, alts 3-10x)
+    actual_lev = leverage_map.get_max(coin, default=LEV) if coin else LEV
+    # News risk multiplier
+    try: news_mult = news_filter.get_risk_mult()
+    except Exception: news_mult = 1.0
+    try: news_dir = news_filter.get_state().get('direction_bias', 0)
+    except Exception: news_dir = 0
+    # News + orderbook composite boost
+    try: confluence = wall_confluence.composite_boost(coin, side, px, news_dir) if coin else 1.0
+    except Exception: confluence = 1.0
+    # Risk ladder override
+    try: tier_risk = risk_ladder.get_risk()
+    except Exception: tier_risk = risk_pct
+    raw = equity * tier_risk * risk_mult * news_mult * confluence * actual_lev / px
     if raw>=100: return round(raw,0)
     if raw>=10:  return round(raw,1)
     if raw>=1:   return round(raw,2)
@@ -1032,6 +1044,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     last_s=state['cooldowns'].get(coin+'_sell', 0)
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
+    # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
+    if not sig:
+        try:
+            pb_s = state['cooldowns'].get(coin+'_pb_sell', 0)
+            pb_b = state['cooldowns'].get(coin+'_pb_buy', 0)
+            sig, bar_ts = pullback_signal(coin, candles, pb_b, pb_s)
+            if sig:
+                key = coin + ('_pb_buy' if sig=='BUY' else '_pb_sell')
+                state['cooldowns'][key] = bar_ts
+        except Exception as e:
+            log(f"pullback err {coin}: {e}")
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
@@ -1133,6 +1156,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     except Exception as e:
         log(f"{coin} gate check err: {e}")
 
+    # Signal persistence: require 2 consecutive bars same side
+    if not signal_persistence.check(coin, sig, bar_ts):
+        return  # first bar staged, wait for confirmation
+
     log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
 
     now = time.time()
@@ -1147,9 +1174,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if not live or live['size']>0:
             px = get_mid(coin)
             if px:
-                fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult))
+                fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
                 if fill_px:
-                    sz = calc_size(equity, px, risk_pct, risk_mult)
+                    sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     place_native_sl(coin, False, fill_px, sz)
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
@@ -1165,9 +1192,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if not live or live['size']<0:
             px = get_mid(coin)
             if px:
-                fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult))
+                fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
                 if fill_px:
-                    sz = calc_size(equity, px, risk_pct, risk_mult)
+                    sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     place_native_sl(coin, True, fill_px, sz)
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
@@ -1259,6 +1286,20 @@ def main():
                                              'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
 
+            # Profit-lock: move SL to +0.7% when unrealized hits +1.5%
+            for k, lp in live_positions.items():
+                try:
+                    side = 'BUY' if lp['size']>0 else 'SELL'
+                    entry = lp['entry']
+                    cur_px = get_mid(k) or entry
+                    cur_sl = state.get('sl_overrides', {}).get(k)
+                    new_sl = profit_lock.compute_new_sl(entry, cur_px, side, cur_sl)
+                    if new_sl is not None:
+                        state.setdefault('sl_overrides', {})[k] = new_sl
+                        log(f"PROFIT-LOCK {k} {side}: SL→{new_sl:.6f}")
+                except Exception as e:
+                    log(f"profit-lock err {k}: {e}")
+
             # BTC vol throttle
             risk_mult = 1.0
             # BTC vol throttle — cached, fetch only every 15 min
@@ -1322,7 +1363,7 @@ def main():
                                 if not apply_ticker_gate(coin, side_str, px, candles_for_gate):
                                     log(f"WEBHOOK {coin} {side_str} GATED (trend/ticker filter)")
                                     wh_count += 1; continue
-                                sz = calc_size(equity, px, risk_pct, risk_mult)
+                                sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
                                     place_native_sl(coin, is_buy, fill, sz)
@@ -1428,13 +1469,13 @@ def dash_json():
     except Exception:
         eq = 0; positions = []
     try: news = news_filter.get_state()
-    except: news = {}
+    except Exception: news = {}
     try: ladder = risk_ladder.get_state()
-    except: ladder = {}
+    except Exception: ladder = {}
     try: ob_stat = orderbook_ws.status()
-    except: ob_stat = {}
+    except Exception: ob_stat = {}
     try: lev_cache = leverage_map.get_cache()
-    except: lev_cache = {}
+    except Exception: lev_cache = {}
     coin_hist = state.get('coin_hist', {})
     coin_kill = state.get('coin_kill', {})
     coin_wr = {}

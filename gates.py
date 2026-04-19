@@ -22,7 +22,7 @@ def get_fear_greed():
         d = json.loads(r.read())
         _fng_cache['val'] = int(d['data'][0]['value'])
         _fng_cache['ts'] = time.time()
-    except: pass
+    except Exception: pass
     return _fng_cache['val']
 
 
@@ -71,7 +71,7 @@ def gate2_tick_count(coin, min_ticks=5):
         if tick_rate < adj_min:
             return False, tick_rate / adj_min, f"low ticks {tick_rate:.1f}/s (need {adj_min:.1f})"
         return True, min(1.0, tick_rate / (adj_min * 2)), f"ticks {tick_rate:.1f}/s"
-    except: return True, 0.5, "tick check failed"
+    except Exception: return True, 0.5, "tick check failed"
 
 # ═══════════════════════════════════════════════════════
 # GATE 3: Z-SCORE (Ψ-based)
@@ -126,7 +126,7 @@ def gate5_spread(coin, max_spread_pct=0.05):
             return False, 0, f"spread {spread:.3f}% > {max_spread_pct}%"
         score = 1.0 - (spread / max_spread_pct)
         return True, score, f"spread {spread:.4f}%"
-    except: return True, 0.5, "spread check failed"
+    except Exception: return True, 0.5, "spread check failed"
 
 
 # ═══════════════════════════════════════════════════════
@@ -151,7 +151,7 @@ def gate6_odda(coin, side):
             if sell_pct < 0.35: return False, sell_pct, f"buy-heavy {sell_pct*100:.0f}% sell"
             score = min(1.0, sell_pct * 1.2)
         return True, score, f"ODDA {'buy' if side=='BUY' else 'sell'} {score:.2f}"
-    except: return True, 0.5, "ODDA check failed"
+    except Exception: return True, 0.5, "ODDA check failed"
 
 # ═══════════════════════════════════════════════════════
 # GATE 7: DISLOCATION CHECK

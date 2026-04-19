@@ -68,7 +68,7 @@ def _bybit_msg(ws, msg):
         if not coin: return
         data = m.get('data', {})
         _update_levels(coin, data.get('b', []), data.get('a', []), 'by')
-    except: pass
+    except Exception: pass
 
 def _binance_msg(ws, msg):
     try:
@@ -81,7 +81,7 @@ def _binance_msg(ws, msg):
         if not coin: return
         data = m.get('data', {})
         _update_levels(coin, data.get('bids', []), data.get('asks', []), 'bn')
-    except: pass
+    except Exception: pass
 
 def _bybit_open(ws):
     topics = [f'orderbook.50.{v[0]}' for v in HL_VENUES.values()]

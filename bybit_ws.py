@@ -132,7 +132,7 @@ def _on_msg_trade(ws, msg):
                 last = data[-1]
                 with _LOCK:
                     _PRICES[hl] = (float(last['p']), int(last['T']))
-    except: pass
+    except Exception: pass
 
 def _on_msg_kline(ws, msg):
     try:
@@ -157,7 +157,7 @@ def _on_msg_kline(ws, msg):
                         dq[-1] = (ts, o, h, l, c, v)
                     else:
                         dq.append((ts, o, h, l, c, v))
-    except: pass
+    except Exception: pass
 
 def _open_trade(ws):
     syms = list(HL_TO_BYBIT.values())
