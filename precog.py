@@ -24,6 +24,9 @@ import risk_ladder
 import signal_persistence
 import profit_lock
 import leverage_map
+import wall_bounce
+import liquidation_ws
+import bybit_lead
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -144,7 +147,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.15','equity':eq,
+    return jsonify({'status':'ok','version':'v8.16','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -931,8 +934,13 @@ def place(coin, is_buy, size):
     if size <= 0:
         log(f"{coin} size rounded to 0 — skip"); return None
 
-    # SMART LIMIT — offset price in our favor for better entry
-    maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
+    # Bybit-lead limit: capture HL lag using Bybit's current price
+    side = 'BUY' if is_buy else 'SELL'
+    edge = bybit_lead.compute_edge_price(coin, side, px)
+    if edge:
+        maker_px = round_price(coin, edge)
+    else:
+        maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
     try:
         r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
@@ -1055,6 +1063,32 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 state['cooldowns'][key] = bar_ts
         except Exception as e:
             log(f"pullback err {coin}: {e}")
+    # Tertiary: wall-bounce retest engine (requires verified OB + V3 alignment)
+    if not sig:
+        try:
+            # Infer V3 direction from trend_gate checks
+            v3_dir = 0
+            if trend_gate(coin, 'BUY') and not trend_gate(coin, 'SELL'): v3_dir = 1
+            elif trend_gate(coin, 'SELL') and not trend_gate(coin, 'BUY'): v3_dir = -1
+            cur_px = get_mid(coin)
+            wb_side, wb_wall = wall_bounce.check(coin, cur_px, v3_dir)
+            if wb_side:
+                sig = wb_side; bar_ts = int(time.time()*1000)
+                state.setdefault('wall_entries', {})[coin] = {
+                    'side': wb_side, 'wall_price': wb_wall['price'],
+                    'wall_usd': wb_wall['usd'], 'entry_ts': time.time()}
+                log(f"WALL-BOUNCE {coin} {wb_side} @ wall ${wb_wall['usd']/1000:.0f}k p={wb_wall['price']}")
+        except Exception as e:
+            log(f"wall_bounce err {coin}: {e}")
+    # Quaternary: liquidation cascade fade
+    if not sig:
+        try:
+            casc = liquidation_ws.get_cascade(coin, max_age_sec=180)
+            if casc:
+                sig = casc['fade_direction']; bar_ts = int(time.time()*1000)
+                log(f"LIQ-CASCADE {coin} fade {sig} (${casc['total_usd']/1e6:.1f}M liqs)")
+        except Exception as e:
+            log(f"liq cascade err {coin}: {e}")
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
@@ -1213,6 +1247,8 @@ def main():
     except Exception as e: log(f"bybit_ws err: {e}")
     try: orderbook_ws.start()
     except Exception as e: log(f"orderbook_ws err: {e}")
+    try: liquidation_ws.start()
+    except Exception as e: log(f"liq_ws err: {e}")
     try: news_filter.start()
     except Exception as e: log(f"news err: {e}")
     try: leverage_map.refresh(info)
@@ -1285,6 +1321,39 @@ def main():
                     state['positions'][k] = {'side':side, 'opened_at':now - 3600, 'entry':entry_px,
                                              'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
+
+            # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
+            for k, lp in live_positions.items():
+                try:
+                    side_long = lp['size']>0
+                    wall_side = 'ask' if side_long else 'bid'
+                    wall = orderbook_ws.get_nearest_wall(k, wall_side)
+                    if not wall: continue
+                    cp = get_mid(k)
+                    if not cp: continue
+                    # LONG reaches ask wall (resistance) OR SHORT reaches bid wall (support)
+                    if side_long and cp >= wall['price'] * 0.999:
+                        log(f"WALL-TP {k} LONG reached ask wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
+                        close(k)
+                    elif not side_long and cp <= wall['price'] * 1.001:
+                        log(f"WALL-TP {k} SHORT reached bid wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
+                        close(k)
+                except Exception as e:
+                    pass
+
+            # Wall-break auto-exit
+            wall_ents = state.get('wall_entries', {})
+            for wcoin, wdata in list(wall_ents.items()):
+                if wcoin not in live_positions:
+                    wall_ents.pop(wcoin); continue
+                try:
+                    cp = get_mid(wcoin)
+                    if wall_bounce.wall_broken(wcoin, wdata['side'], wdata['wall_price'], cp):
+                        log(f"WALL-BROKEN {wcoin} {wdata['side']} — exiting")
+                        close(wcoin)
+                        wall_ents.pop(wcoin)
+                except Exception as e:
+                    log(f"wall-break check err {wcoin}: {e}")
 
             # Profit-lock: move SL to +0.7% when unrealized hits +1.5%
             for k, lp in live_positions.items():
@@ -1476,6 +1545,11 @@ def dash_json():
     except Exception: ob_stat = {}
     try: lev_cache = leverage_map.get_cache()
     except Exception: lev_cache = {}
+    try: liq_stat = liquidation_ws.status()
+    except Exception: liq_stat = {}
+    try: wall_entries = state.get('wall_entries', {})
+    except Exception: wall_entries = {}
+
     coin_hist = state.get('coin_hist', {})
     coin_kill = state.get('coin_kill', {})
     coin_wr = {}
@@ -1488,6 +1562,7 @@ def dash_json():
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
         'orderbook': ob_stat, 'leverage_cache_size': len(lev_cache),
+        'liquidation': liq_stat, 'wall_entries': len(wall_entries),
         'coin_wr': coin_wr, 'killed_coins': killed,
         'consec_losses': state.get('consec_losses', 0),
     })
