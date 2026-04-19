@@ -86,13 +86,21 @@ def _update(events):
         if s['direction'] != 0:
             dsum += s['direction']; dcnt += 1
     with _LOCK:
-        _STATE['blackout'] = now < max_bout
-        _STATE['blackout_until'] = max_bout
+        _STATE['blackout'] = False  # removed — news = liquidity, we trade it
+        _STATE['blackout_until'] = 0
         _STATE['direction_bias'] = (dsum / dcnt) if dcnt else 0
-        if _STATE['blackout']: _STATE['risk_mult'] = 0.0
-        elif max_mag >= 4 and _STATE['direction_bias'] == 0: _STATE['risk_mult'] = 0.3
-        elif max_mag >= 3 and abs(_STATE['direction_bias']) >= 0.5: _STATE['risk_mult'] = 1.3
-        else: _STATE['risk_mult'] = 1.0
+        # News creates volatility = opportunity. Boost aligned trades, reduce unclear.
+        if max_mag >= 5 and abs(_STATE['direction_bias']) >= 0.5:
+            _STATE['risk_mult'] = 1.5  # strong directional news = size up
+        elif max_mag >= 4 and abs(_STATE['direction_bias']) >= 0.5:
+            _STATE['risk_mult'] = 1.3
+        elif max_mag >= 4 and _STATE['direction_bias'] == 0:
+            _STATE['risk_mult'] = 0.7  # unclear = reduce but still trade
+        elif max_mag >= 3:
+            _STATE['risk_mult'] = 1.1
+        else:
+            _STATE['risk_mult'] = 1.0
+        _STATE['news_direction'] = _STATE['direction_bias']  # surface for signal logic
         _STATE['last_events'] = [{'title': e['title'][:100], 'src': e['src'],
                                    'mag': e['score']['magnitude'],
                                    'dir': e['score']['direction']}
