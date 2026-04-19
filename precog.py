@@ -444,9 +444,22 @@ def trend_gate(coin, side):
     return True
 
 def apply_ticker_gate(coin, side, price, candles):
-    """Apply per-ticker optimized gates + V3 trend gate. Returns True if signal passes."""
+    """Apply per-ticker optimized gates + V3 trend gate + ATR-min filter. Returns True if signal passes."""
     if not trend_gate(coin, side):
         return False
+    # ATR-min filter: block trades in low-volatility regime (ATR/price < 0.2%)
+    # tuner phase C: lifts PF 1.41 -> 1.81 with identical PnL
+    if candles and len(candles) >= 15:
+        trs = []
+        for j in range(1, min(15, len(candles))):
+            h,l,c = candles[-j][2], candles[-j][3], candles[-j][4]
+            pc = candles[-j-1][4]
+            trs.append(max(h-l, abs(h-pc), abs(l-pc)))
+        if trs:
+            atr_val = sum(trs)/len(trs)
+            last_c = candles[-1][4]
+            if last_c>0 and atr_val/last_c < 0.002:
+                return False
     key = coin.upper().replace('.P','')
     # Try: exact, +USDT, strip k prefix +USDT (kBONK→BONKUSDT, kPEPE→PEPEUSDT)
     gate = TICKER_GATES.get(key) or TICKER_GATES.get(key + 'USDT')
@@ -495,7 +508,7 @@ def apply_ticker_gate(coin, side, price, candles):
     
     return True
 
-GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}
+GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}  # tuner-overridden below
 
 def derive(s):
     return {
@@ -509,6 +522,12 @@ def derive(s):
         'cd':       s['cd']
     }
 SP = derive(GRID); BP = derive(GRID)
+# TUNER WINNER OVERRIDE — plb=36 rsi=70/35
+SP['pivot_lb'] = 36
+BP['pivot_lb'] = 36
+SP['rsi_hi'] = 70
+BP['rsi_lo'] = 35
+
 
 INITIAL_RISK_PCT = 0.0015    # 0.15% risk
 SCALED_RISK_PCT  = 0.005
@@ -520,7 +539,7 @@ USE_ISOLATED_MARGIN = True
 MAX_POSITIONS = 20       # was 8 — LA dead, no margin reserve needed
 MAX_SAME_SIDE = 12       # was 6 — with MAX_POS 20, side cap was blocking 14 trades
 MAX_TOTAL_RISK = 0.80    # reserve 20% margin
-STOP_LOSS_PCT = 0.01      # 1.0% price × 10x = 10% of trade. Keeps 92% of winners (MAE backtested)
+STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
 MAX_HOLD_SEC = 4 * 3600
@@ -528,7 +547,7 @@ CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
 
-TRAIL_PCT = 0.007          # 0.7% trail — BT winner: +424% vs +138% at 0.4%
+TRAIL_PCT = 0.003          # 0.3% — tuner winner config
 MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
 
@@ -654,7 +673,7 @@ def fetch(coin, n_bars=100, retries=3):
 # SIGNAL — cooldown by timestamp, scan last K bars
 # ═══════════════════════════════════════════════════════
 SCAN_BARS = 3  # check last SCAN_BARS closed bars each tick
-CD_MS = 3 * 5 * 60 * 1000  # cd=3 bars of 5m = 15 min
+CD_MS = 10 * 5 * 60 * 1000  # cd=10 bars of 5m = 50min — tuner winner
 
 def chase_gate_ok(side, price, candles, i):
     """Reject entries chasing extended moves.
