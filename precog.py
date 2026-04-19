@@ -283,48 +283,6 @@ def reset_cb():
     log("CIRCUIT BREAKER RESET via /reset endpoint")
     return jsonify({'status':'reset','cb_pause_until':0,'consec_losses':0})
 
-@app.route('/controls', methods=['GET'])
-def controls():
-    if flask_request.args.get('k') != WEBHOOK_SECRET[:16]:
-        return "Access denied", 401
-    html = """<!DOCTYPE html>
-<html><head><title>PRECOG</title><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-body{background:#07080a;color:#d9d6cd;font-family:-apple-system,sans-serif;padding:20px;margin:0}
-h1{color:#b8ff2f;font-size:18px;letter-spacing:0.2em;margin-bottom:24px}
-button{display:block;width:100%;padding:20px;margin:10px 0;font-size:16px;font-weight:600;
-  background:#1a1c20;color:#d9d6cd;border:1px solid #b8ff2f;border-radius:4px;cursor:pointer}
-button.danger{border-color:#c1272d;color:#c1272d}
-button.warn{border-color:#d97706;color:#d97706}
-button:active{background:#b8ff2f;color:#07080a}
-.result{padding:16px;background:#1a1c20;margin-top:16px;border:1px solid #b8ff2f;font-size:11px;word-break:break-all}
-.warning{background:#c1272d;color:#fff;padding:12px;margin-bottom:20px;border-radius:4px;font-size:12px}
-</style></head><body>
-<h1>PRECOG CONTROLS</h1>
-<div class="warning">Each button executes immediately.</div>
-<button onclick="go('/closeworst/3')">CLOSE 3 WORST</button>
-<button onclick="go('/closeworst/5')">CLOSE 5 WORST</button>
-<button onclick="go('/closeworst/10')">CLOSE 10 WORST</button>
-<button class="warn" onclick="go('/closelongs')">CLOSE ALL LONGS</button>
-<button class="warn" onclick="go('/closeshorts')">CLOSE ALL SHORTS</button>
-<button class="danger" onclick="if(confirm('Close ALL?'))go('/closeall')">CLOSE ALL</button>
-<div id="r"></div>
-<script>
-const K = "SECRET_PLACEHOLDER";
-async function go(path){
-  document.getElementById('r').innerHTML='<div class="result">Executing...</div>';
-  try {
-    const r = await fetch(path + '?secret=' + K);
-    const d = await r.json();
-    document.getElementById('r').innerHTML = '<div class="result">' + JSON.stringify(d, null, 2) + '</div>';
-  } catch(e) {
-    document.getElementById('r').innerHTML = '<div class="result">ERROR: ' + e + '</div>';
-  }
-}
-</script></body></html>"""
-    html = html.replace("SECRET_PLACEHOLDER", WEBHOOK_SECRET)
-    return Response(html, mimetype='text/html')
-
 @app.route('/closeall', methods=['GET'])
 def close_all_positions():
     """Force close ALL — requires ?secret="""
@@ -344,78 +302,6 @@ def close_all_positions():
     save_state(state)
     log(f"FORCE CLOSE ALL: {len(closed)} positions closed")
     return jsonify({'status':'closed_all','positions':closed})
-
-@app.route('/closeworst/<int:n>', methods=['GET'])
-def close_worst_n(n):
-    """Close N worst — requires ?secret="""
-    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
-    state = load_state()
-    positions = get_all_positions_live()
-    sorted_pos = sorted(positions.items(), key=lambda x: x[1].get('pnl',0))
-    targets = sorted_pos[:n]
-    closed = []
-    for coin, pos in targets:
-        try:
-            pnl = close(coin)
-            closed.append({'coin':coin,'pnl':pnl,'upnl':pos.get('pnl',0)})
-            state['positions'].pop(coin, None)
-        except Exception as e:
-            closed.append({'coin':coin,'error':str(e)})
-    save_state(state)
-    log(f"CLOSE WORST {n}: {[c['coin'] for c in closed]}")
-    return jsonify({'status':'closed','count':len(closed),'positions':closed})
-
-@app.route('/close/<coin>', methods=['GET'])
-def close_one(coin):
-    """Close one — requires ?secret="""
-    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
-    state = load_state()
-    try:
-        pnl = close(coin.upper())
-        state['positions'].pop(coin.upper(), None)
-        save_state(state)
-        log(f"MANUAL CLOSE {coin}: pnl={pnl}")
-        return jsonify({'status':'closed','coin':coin.upper(),'pnl':pnl})
-    except Exception as e:
-        return jsonify({'status':'err','coin':coin.upper(),'err':str(e)})
-
-@app.route('/closelongs', methods=['GET'])
-def close_all_longs():
-    """Close longs — requires ?secret="""
-    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
-    state = load_state()
-    positions = get_all_positions_live()
-    closed = []
-    for coin, pos in positions.items():
-        if pos.get('size', 0) > 0:
-            try:
-                pnl = close(coin)
-                closed.append({'coin':coin,'pnl':pnl})
-                state['positions'].pop(coin, None)
-            except Exception as e:
-                closed.append({'coin':coin,'error':str(e)})
-    save_state(state)
-    log(f"CLOSE ALL LONGS: {len(closed)} closed")
-    return jsonify({'status':'closed_longs','count':len(closed),'positions':closed})
-
-@app.route('/closeshorts', methods=['GET'])
-def close_all_shorts():
-    """Close shorts — requires ?secret="""
-    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
-    state = load_state()
-    positions = get_all_positions_live()
-    closed = []
-    for coin, pos in positions.items():
-        if pos.get('size', 0) < 0:
-            try:
-                pnl = close(coin)
-                closed.append({'coin':coin,'pnl':pnl})
-                state['positions'].pop(coin, None)
-            except Exception as e:
-                closed.append({'coin':coin,'error':str(e)})
-    save_state(state)
-    log(f"CLOSE ALL SHORTS: {len(closed)} closed")
-    return jsonify({'status':'closed_shorts','count':len(closed),'positions':closed})
 
 @app.route('/transfer', methods=['POST'])
 def transfer_funds():
