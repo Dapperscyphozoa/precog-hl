@@ -178,7 +178,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.19','equity':eq,
+    return jsonify({'status':'ok','version':'v8.20','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -1651,7 +1651,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.19',
+        'equity': eq, 'version': 'v8.20',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
