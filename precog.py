@@ -19,6 +19,12 @@ from flask import Flask, request as flask_request, jsonify
 from gates import run_gates
 import bybit_ws
 import orderbook_ws
+import news_filter
+import wall_confluence
+import risk_ladder
+import signal_persistence
+import profit_lock
+import leverage_map
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -139,7 +145,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except: pass
-    return jsonify({'status':'ok','version':'v8.14','equity':eq,
+    return jsonify({'status':'ok','version':'v8.15','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -890,7 +896,7 @@ def get_funding_rate(coin):
     return 0
 
 def calc_size(equity, px, risk_pct, risk_mult=1.0):
-    raw = equity * risk_pct * risk_mult * LEV / px
+    raw = equity * risk_pct * risk_mult * actual_lev / px
     if raw>=100: return round(raw,0)
     if raw>=10:  return round(raw,1)
     if raw>=1:   return round(raw,2)
@@ -1135,8 +1141,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if live and live['size']>0:
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state)
-                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state)
+                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state); risk_ladder.record_trade(False)
+                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state); risk_ladder.record_trade(True)
                 state['last_pnl_close'] = pnl_pct
         if not live or live['size']>0:
             px = get_mid(coin)
@@ -1153,8 +1159,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if live and live['size']<0:
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state)
-                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state)
+                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state); risk_ladder.record_trade(False)
+                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state); risk_ladder.record_trade(True)
                 state['last_pnl_close'] = pnl_pct
         if not live or live['size']<0:
             px = get_mid(coin)
@@ -1177,6 +1183,10 @@ def main():
     except Exception as e: log(f"bybit_ws err: {e}")
     try: orderbook_ws.start()
     except Exception as e: log(f"orderbook_ws err: {e}")
+    try: news_filter.start()
+    except Exception as e: log(f"news err: {e}")
+    try: leverage_map.refresh(info)
+    except Exception as e: log(f"lev refresh err: {e}")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
@@ -1282,8 +1292,8 @@ def main():
                         if live:
                             pnl_pct = close(coin)
                             if pnl_pct is not None:
-                                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state)
-                                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state)
+                                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state); risk_ladder.record_trade(False)
+                                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state); risk_ladder.record_trade(True)
                             state['positions'].pop(coin, None)
                             log(f"WEBHOOK CLOSE {coin} ({action}) pnl={pnl_pct}")
                     elif action in ('buy', 'sell'):
@@ -1399,6 +1409,107 @@ def tuner_log():
         return jsonify({'status':'no_log'})
     except Exception as e:
         return jsonify({'error':str(e)})
+
+
+@app.route('/dash', methods=['GET'])
+def dash_json():
+    try:
+        cs = info.user_state(WALLET)
+        eq = float(cs.get('marginSummary',{}).get('accountValue',0))
+        positions = []
+        for p in cs.get('assetPositions',[]):
+            pp=p['position']; sz=float(pp['szi'])
+            positions.append({'coin':pp['coin'],'side':'L' if sz>0 else 'S','size':abs(sz),
+                              'entry':float(pp['entryPx']),'upnl':float(pp['unrealizedPnl']),
+                              'lev':int(pp['leverage']['value'])})
+    except Exception:
+        eq = 0; positions = []
+    try: news = news_filter.get_state()
+    except: news = {}
+    try: ladder = risk_ladder.get_state()
+    except: ladder = {}
+    try: ob_stat = orderbook_ws.status()
+    except: ob_stat = {}
+    try: lev_cache = leverage_map.get_cache()
+    except: lev_cache = {}
+    coin_hist = state.get('coin_hist', {})
+    coin_kill = state.get('coin_kill', {})
+    coin_wr = {}
+    for coin, h in coin_hist.items():
+        if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
+    killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
+    return jsonify({
+        'equity': eq, 'version': 'v8.15',
+        'positions': positions, 'n_positions': len(positions),
+        'universe_size': len(COINS),
+        'news': news, 'risk_ladder': ladder,
+        'orderbook': ob_stat, 'leverage_cache_size': len(lev_cache),
+        'coin_wr': coin_wr, 'killed_coins': killed,
+        'consec_losses': state.get('consec_losses', 0),
+    })
+
+@app.route('/dash/html', methods=['GET'])
+def dash_html():
+    return """<!DOCTYPE html><html><head><title>PreCog Live</title>
+<style>body{font-family:monospace;background:#0b0b0b;color:#ccc;padding:20px;max-width:1400px;margin:auto}
+h2{color:#0f0;border-bottom:1px solid #333;padding-bottom:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.card{background:#111;padding:12px;border:1px solid #222;border-radius:4px}
+.kv{display:flex;justify-content:space-between;padding:2px 0}
+.k{color:#888} .v{color:#fff}
+.pos{background:#0a1a0a}.neg{background:#1a0a0a}
+table{width:100%;border-collapse:collapse}
+td,th{padding:4px 8px;text-align:left;border-bottom:1px solid #222}
+.red{color:#f55}.green{color:#5f5}.yellow{color:#ff5}
+</style></head><body>
+<h2>PreCog Live Dashboard</h2>
+<div id="root">loading...</div>
+<script>
+async function refresh(){
+  const r = await fetch('/dash'); const d = await r.json();
+  const fmt = (n,d=2) => Number(n).toFixed(d);
+  const news = d.news || {};
+  const rl = d.risk_ladder || {};
+  const ob = d.orderbook || {};
+  const pos_rows = (d.positions||[]).map(p=>`<tr><td>${p.coin}</td><td class="${p.side=='L'?'green':'red'}">${p.side}</td><td>${p.size}</td><td>${fmt(p.entry,4)}</td><td class="${p.upnl>=0?'green':'red'}">${fmt(p.upnl,2)}</td><td>${p.lev}x</td></tr>`).join('');
+  const wr_rows = Object.entries(d.coin_wr||{}).sort((a,b)=>b[1]-a[1]).slice(0,30).map(([c,w])=>`<tr><td>${c}</td><td class="${w>=60?'green':w>=45?'yellow':'red'}">${w}%</td></tr>`).join('');
+  const killed = Object.keys(d.killed_coins||{});
+  const news_list = (news.last_events||[]).slice(0,8).map(e=>`<div class="kv"><span class="k">[${e.src}]</span><span class="v">${e.title} (${e.mag}/${e.dir>0?'↑':e.dir<0?'↓':'?'})</span></div>`).join('');
+  document.getElementById('root').innerHTML = `
+  <div class="grid">
+    <div class="card"><h3>Account</h3>
+      <div class="kv"><span class="k">Equity</span><span class="v">$${fmt(d.equity)}</span></div>
+      <div class="kv"><span class="k">Positions</span><span class="v">${d.n_positions}/${30}</span></div>
+      <div class="kv"><span class="k">Universe</span><span class="v">${d.universe_size} coins</span></div>
+      <div class="kv"><span class="k">Consec losses</span><span class="v">${d.consec_losses}</span></div>
+    </div>
+    <div class="card"><h3>Risk Ladder</h3>
+      <div class="kv"><span class="k">Tier</span><span class="v">${rl.tier||0}</span></div>
+      <div class="kv"><span class="k">Risk</span><span class="v">${fmt((rl.risk||0)*100,2)}%</span></div>
+      <div class="kv"><span class="k">Trades logged</span><span class="v">${rl.trades_logged||0}</span></div>
+      <div class="kv"><span class="k">WR (100)</span><span class="v">${fmt((rl.rolling_wr_100||0)*100,1)}%</span></div>
+      <div class="kv"><span class="k">WR (50)</span><span class="v">${fmt((rl.rolling_wr_50||0)*100,1)}%</span></div>
+    </div>
+    <div class="card"><h3>News / Regime</h3>
+      <div class="kv"><span class="k">Blackout</span><span class="v ${news.blackout?'red':'green'}">${news.blackout?'YES':'clear'}</span></div>
+      <div class="kv"><span class="k">Risk mult</span><span class="v">${news.risk_mult||1}x</span></div>
+      <div class="kv"><span class="k">Direction bias</span><span class="v">${news.direction_bias||0}</span></div>
+    </div>
+    <div class="card"><h3>Orderbook WS</h3>
+      <div class="kv"><span class="k">Feeds</span><span class="v">${ob.depth_feeds||0}</span></div>
+      <div class="kv"><span class="k">Verified walls</span><span class="v">${ob.tracked_walls||0}</span></div>
+      <div class="kv"><span class="k">Coins w/ walls</span><span class="v">${ob.verified_coins||0}</span></div>
+    </div>
+  </div>
+  <h2>Open Positions</h2>
+  <table><tr><th>Coin</th><th>Side</th><th>Size</th><th>Entry</th><th>uPnL</th><th>Lev</th></tr>${pos_rows||'<tr><td colspan=6>none</td></tr>'}</table>
+  <h2>Per-Coin WR (top 30)</h2>
+  <table><tr><th>Coin</th><th>WR</th></tr>${wr_rows}</table>
+  ${killed.length?`<h2>Killed coins (12h)</h2><div>${killed.join(', ')}</div>`:''}
+  <h2>Recent news (${news.last_events?.length||0})</h2>${news_list}`;
+}
+refresh(); setInterval(refresh, 10000);
+</script></body></html>"""
 
 if __name__ == '__main__':
     # Run precog signal loop in background thread
