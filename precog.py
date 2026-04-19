@@ -425,7 +425,7 @@ V3_ENABLED = True
 V3_HTF = '4h'
 V3_EMA = 9
 
-V3_BUFFER = 0.005  # 0.5% — only block when clearly in opposite trend
+V3_BUFFER = 0.02  # 2% — only block extreme trend — only block when clearly in opposite trend
 
 def trend_gate(coin, side):
     """V3: block BUY if 4H close < 4H EMA9 * (1-buffer), SELL if above EMA * (1+buffer)."""
