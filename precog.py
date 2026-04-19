@@ -626,8 +626,8 @@ SP = derive(GRID); BP = derive(GRID)
 # TUNER WINNER OVERRIDE — plb=36 rsi=70/35
 SP['pivot_lb'] = 15  # OOS: plb=15 lifts PnL +5%, matches trail 0.8% winner
 BP['pivot_lb'] = 15
-SP['rsi_hi'] = 70
-BP['rsi_lo'] = 35
+SP['rsi_hi'] = 65
+BP['rsi_lo'] = 40
 
 
 INITIAL_RISK_PCT = 0.02  # halved: 2x position slots      # 4% — aggressive (tuner-validated 68% WR)
