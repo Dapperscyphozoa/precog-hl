@@ -17,6 +17,7 @@ import threading
 from queue import Queue
 from flask import Flask, request as flask_request, jsonify
 from gates import run_gates
+import bybit_ws
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -396,8 +397,56 @@ else:
     TICKER_GATES = {}
     print("WARNING: ticker_gates.json not found, running without per-ticker gates", flush=True)
 
+# ═══════════════════════════════════════════════════════
+# V3 TREND GATE — 4H EMA9 direction alignment
+# OOS 7d: 100% WR at 4h/EMA9/no-buffer (6 trades, +3.14% PnL)
+# ═══════════════════════════════════════════════════════
+_HTF_CACHE = {}
+HTF_CACHE_SEC = 900  # 15 min — 4h bars close every 4h, 15m cache fine
+
+def fetch_htf(coin, interval='4h', bars=30):
+    now = time.time()
+    k = f"{coin}_{interval}"
+    c = _HTF_CACHE.get(k)
+    if c and now - c['ts'] < HTF_CACHE_SEC:
+        return c['data']
+    sec_map = {'1h':3600,'4h':14400,'15m':900,'5m':300}
+    sec = sec_map.get(interval, 14400)
+    end = int(time.time()*1000)
+    start = end - bars*sec*1000
+    try:
+        d = info.candles_snapshot(coin, interval, start, end)
+        result = [(int(x['t']), float(x['o']), float(x['h']), float(x['l']), float(x['c']), float(x['v'])) for x in d]
+        _HTF_CACHE[k] = {'data': result, 'ts': now}
+        return result
+    except Exception as e:
+        if '429' in str(e) and c: return c['data']
+        log(f"htf err {coin} {interval}: {e}")
+        return []
+
+V3_ENABLED = True
+V3_HTF = '4h'
+V3_EMA = 9
+
+def trend_gate(coin, side):
+    """V3: block BUY if 4H close < 4H EMA9, SELL if above. Returns True if passes."""
+    if not V3_ENABLED: return True
+    htf = fetch_htf(coin, V3_HTF, V3_EMA * 3 + 5)
+    if len(htf) < V3_EMA + 2: return True
+    closes = [b[4] for b in htf]
+    k = 2/(V3_EMA+1)
+    ema = sum(closes[:V3_EMA])/V3_EMA
+    for c in closes[V3_EMA:]:
+        ema = c*k + ema*(1-k)
+    last = closes[-1]
+    if side == 'BUY' and last < ema: return False
+    if side == 'SELL' and last > ema: return False
+    return True
+
 def apply_ticker_gate(coin, side, price, candles):
-    """Apply per-ticker optimized gates. Returns True if signal passes."""
+    """Apply per-ticker optimized gates + V3 trend gate. Returns True if signal passes."""
+    if not trend_gate(coin, side):
+        return False
     key = coin.upper().replace('.P','')
     # Try: exact, +USDT, strip k prefix +USDT (kBONK→BONKUSDT, kPEPE→PEPEUSDT)
     gate = TICKER_GATES.get(key) or TICKER_GATES.get(key + 'USDT')
@@ -1012,7 +1061,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.12 | wallet={WALLET} | precog+webhook | trail={TRAIL_PCT} | risk={INITIAL_RISK_PCT}")
+    log(f"PreCog v8.13 | wallet={WALLET} | precog+webhook | trail={TRAIL_PCT} | risk={INITIAL_RISK_PCT}")
+    log(f"V3 trend gate: {V3_HTF}/EMA{V3_EMA} | Bybit WS: starting")
+    try:
+        bybit_ws.start()
+    except Exception as e:
+        log(f"bybit_ws start err: {e}")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
@@ -1133,9 +1187,18 @@ def main():
                                 log(f"WEBHOOK {coin} {action} — already positioned, skip")
                                 wh_count += 1; continue
                         if len(live_positions) < MAX_POSITIONS:
-                            px = get_mid(coin)
+                            # BYBIT WS lead price for entry trigger (fallback to HL mid)
+                            by_px, by_age = bybit_ws.get(coin)
+                            hl_px = get_mid(coin)
+                            px = by_px if (by_px and by_age is not None and by_age < 3000) else hl_px
                             if px:
                                 is_buy = (action == 'buy')
+                                side_str = 'BUY' if is_buy else 'SELL'
+                                # GATE — webhook must clear same filter as internal signal
+                                candles_for_gate = fetch(coin)
+                                if not apply_ticker_gate(coin, side_str, px, candles_for_gate):
+                                    log(f"WEBHOOK {coin} {side_str} GATED (trend/ticker filter)")
+                                    wh_count += 1; continue
                                 sz = calc_size(equity, px, risk_pct, risk_mult)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
@@ -1147,8 +1210,8 @@ def main():
                                         'stage': 'initial', 'peak': fill,
                                         'source': 'dynapro'
                                     }
-                                    log(f"WEBHOOK OPEN {coin} {'BUY' if is_buy else 'SELL'} @ {fill}")
-                                    log_trade('HL', coin, 'BUY' if is_buy else 'SELL', fill, 0, 'webhook')
+                                    log(f"WEBHOOK OPEN {coin} {side_str} @ {fill} (px_src={'bybit_ws' if px==by_px else 'hl_mid'}, age={by_age}ms)")
+                                    log_trade('HL', coin, side_str, fill, 0, 'webhook')
                     wh_count += 1
                 except Exception as e:
                     log(f"webhook process err: {e}"); break
