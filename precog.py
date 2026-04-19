@@ -285,7 +285,8 @@ def reset_cb():
 
 @app.route('/closeall', methods=['GET'])
 def close_all_positions():
-    """Force close ALL open positions and clear state."""
+    """Force close ALL — requires ?secret="""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
     state = load_state()
     positions = get_all_positions_live()
     closed = []
@@ -304,7 +305,8 @@ def close_all_positions():
 
 @app.route('/closeworst/<int:n>', methods=['GET'])
 def close_worst_n(n):
-    """Close N worst-performing positions by unrealized PnL."""
+    """Close N worst — requires ?secret="""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
     state = load_state()
     positions = get_all_positions_live()
     sorted_pos = sorted(positions.items(), key=lambda x: x[1].get('pnl',0))
@@ -323,7 +325,8 @@ def close_worst_n(n):
 
 @app.route('/close/<coin>', methods=['GET'])
 def close_one(coin):
-    """Close specific coin by name."""
+    """Close one — requires ?secret="""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
     state = load_state()
     try:
         pnl = close(coin.upper())
@@ -336,7 +339,8 @@ def close_one(coin):
 
 @app.route('/closelongs', methods=['GET'])
 def close_all_longs():
-    """Close every long position."""
+    """Close longs — requires ?secret="""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
     state = load_state()
     positions = get_all_positions_live()
     closed = []
@@ -354,7 +358,8 @@ def close_all_longs():
 
 @app.route('/closeshorts', methods=['GET'])
 def close_all_shorts():
-    """Close every short position."""
+    """Close shorts — requires ?secret="""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
     state = load_state()
     positions = get_all_positions_live()
     closed = []
