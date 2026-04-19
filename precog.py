@@ -29,6 +29,7 @@ import liquidation_ws
 import bybit_lead
 import funding_filter
 import btc_correlation
+import confidence
 import spoof_detection
 import session_scaler
 import whale_filter
@@ -1416,7 +1417,20 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
     # if not signal_persistence.check(coin, sig, bar_ts): return
 
-    log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
+    # Confidence scoring: 0-100 → sizing multiplier (0.5x / 1.0x / 1.5x / 2.0x)
+    # OOS: every score tier profitable, use as SIZING not filter. Every signal trades.
+    try:
+        btc_state = btc_correlation.get_state()
+        btc_d = btc_state.get('btc_dir', 0)
+        conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
+        size_mult = confidence.size_multiplier(conf_score)
+        risk_mult = risk_mult * size_mult
+        log(f"{coin} CONF={conf_score} size_mult={size_mult} {conf_breakdown}")
+    except Exception as e:
+        log(f"{coin} conf err: {e}")
+        conf_score = 0
+
+    log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score})")
 
     now = time.time()
     if sig == 'SELL':
