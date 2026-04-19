@@ -150,7 +150,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.16','equity':eq,
+    return jsonify({'status':'ok','version':'v8.17','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -1201,9 +1201,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     except Exception as e:
         log(f"{coin} gate check err: {e}")
 
-    # Signal persistence: require 2 consecutive bars same side
-    if not signal_persistence.check(coin, sig, bar_ts):
-        return  # first bar staged, wait for confirmation
+    # Signal persistence: DISABLED — was blocking all entries. Re-enable after 50-trade measurement.
+    # if not signal_persistence.check(coin, sig, bar_ts): return
 
     log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
 
@@ -1345,10 +1344,10 @@ def main():
                     cp = get_mid(k)
                     if not cp: continue
                     # LONG reaches ask wall (resistance) OR SHORT reaches bid wall (support)
-                    if side_long and cp >= wall['price'] * 0.999:
+                    if side_long and cp >= wall['price'] * 1.002:  # 0.2% past wall, not just touching
                         log(f"WALL-TP {k} LONG reached ask wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
                         close(k)
-                    elif not side_long and cp <= wall['price'] * 1.001:
+                    elif not side_long and cp <= wall['price'] * 0.998:  # 0.2% past wall
                         log(f"WALL-TP {k} SHORT reached bid wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
                         close(k)
                 except Exception as e:
@@ -1376,7 +1375,20 @@ def main():
                     cur_px = get_mid(k) or entry
                     cur_sl = state.get('sl_overrides', {}).get(k)
                     new_sl = profit_lock.compute_new_sl(entry, cur_px, side, cur_sl)
-                    if new_sl is not None:
+                    if new_sl is not None and not state.get('scaled_out', {}).get(k):
+                        # Scale out 50% on profit trigger (+1.5%), leave half to run
+                        try:
+                            half_sz = abs(lp['size']) / 2
+                            half_sz = round_size(k, half_sz)
+                            if half_sz > 0:
+                                is_closing_buy = not side_long  # SELL to close long
+                                side_long = lp['size']>0
+                                exchange.order(k, not side_long, half_sz, cur_px * (1.005 if not side_long else 0.995),
+                                               {'limit':{'tif':'Ioc'}}, reduce_only=True)
+                                state.setdefault('scaled_out', {})[k] = True
+                                log(f"SCALE-OUT 50% {k} {side} @ {cur_px:.6f} — letting rest run")
+                        except Exception as e:
+                            log(f"scale-out err {k}: {e}")
                         state.setdefault('sl_overrides', {})[k] = new_sl
                         log(f"PROFIT-LOCK {k} {side}: SL→{new_sl:.6f}")
                 except Exception as e:
@@ -1576,7 +1588,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.15',
+        'equity': eq, 'version': 'v8.17',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
