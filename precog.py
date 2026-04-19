@@ -468,11 +468,11 @@ COINS = [
     'RESOLV', 'HEMI', 'STABLE', 'BABY', 'TST', 'YZY', 'PROMPT', 'DOOD', 'FOGO', 'NXPC', 'INIT', 'APEX', 'WLFI',  # batch 2
     'MAVIA', 'HMSTR', 'ZEREBRO', 'BLAST', 'BOME', 'MANTA', 'CHILLGUY', 'RSR', 'MELANIA', 'SCR', 'BIO', 'TNSR', 'MINA', 'NOT', 'BRETT', 'ME', 'IOTA', 'DYM', 'ORDI', 'POPCAT', 'SAGA', 'FIL', 'REZ', 'BANANA', 'kNEIRO', 'GMT', 'NEO', 'MAV',
     # Tier 3 expansion (+50)
-    'RENDER','RUNE','STX','CAKE','ETC','MKR','THETA','ZEC','NEO','IMX',
-    'FLOW','GRT','KAVA','ROSE','ENJ','MINA','ICP','EGLD','GMX','OCEAN',
-    'FXS','SSV','DYDX','SNX','CRV','COMP','BAT','KSM','GLM','ILV',
-    'FLM','TURBO','MEW','GOAT','SNEK','PNUT','KAS','MEME','BOOK','NEIROETH',
-    'SPELL','RATS','HBAR','TRX','MANTA','RONIN','NAK','HMSTR','SEI','ZK'
+    'RENDER','RUNE','STX','CAKE','ETC','MKR','ZEC','NEO','IMX',
+    'MINA','ICP','GMX',
+    'FXS','DYDX','SNX','CRV','COMP','ILV',
+    'TURBO','MEW','GOAT','PNUT','KAS','MEME','NEIROETH',
+    'HBAR','TRX','MANTA','HMSTR','SEI','ZK'
 
 ]
 
