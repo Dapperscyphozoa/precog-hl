@@ -1259,8 +1259,8 @@ def main():
     except Exception as e: log(f"orderbook_ws err: {e}")
     try: liquidation_ws.start()
     except Exception as e: log(f"liq_ws err: {e}")
-    try: funding_filter.refresh_all(COINS)
-    except Exception as e: log(f"funding refresh err: {e}")
+    # Funding refresh deferred — first tick runs it after 30s delay
+    threading.Timer(30.0, lambda: funding_filter.refresh_all(COINS)).start()
     try: news_filter.start()
     except Exception as e: log(f"news err: {e}")
     try: leverage_map.refresh(info)
