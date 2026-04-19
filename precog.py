@@ -27,6 +27,9 @@ import leverage_map
 import wall_bounce
 import liquidation_ws
 import bybit_lead
+import funding_filter
+import btc_correlation
+import vacuum_zone
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -495,6 +498,14 @@ def apply_ticker_gate(coin, side, price, candles):
             if last_c>0 and atr_val/last_c < 0.002:
                 log(f"{coin} {side} BLOCKED by ATR-min ({atr_val/last_c*100:.2f}%)")
                 return False
+    # Funding filter — block expensive-carry trades
+    if not funding_filter.allow_side(coin, side):
+        log(f"{coin} {side} BLOCKED by funding rate")
+        return False
+    # BTC correlation — block alt trades against strong BTC direction
+    if not btc_correlation.allow_alt_trade(coin, side):
+        log(f"{coin} {side} BLOCKED by BTC correlation")
+        return False
     if not USE_GRID_GATE:
         return True
     key = coin.upper().replace('.P','')
@@ -1249,6 +1260,8 @@ def main():
     except Exception as e: log(f"orderbook_ws err: {e}")
     try: liquidation_ws.start()
     except Exception as e: log(f"liq_ws err: {e}")
+    try: funding_filter.refresh_all(COINS)
+    except Exception as e: log(f"funding refresh err: {e}")
     try: news_filter.start()
     except Exception as e: log(f"news err: {e}")
     try: leverage_map.refresh(info)
@@ -1368,6 +1381,12 @@ def main():
                         log(f"PROFIT-LOCK {k} {side}: SL→{new_sl:.6f}")
                 except Exception as e:
                     log(f"profit-lock err {k}: {e}")
+
+            # Hourly funding refresh
+            fund_age = time.time() - getattr(main, '_funding_ts', 0)
+            if fund_age > 3600:
+                try: funding_filter.refresh_all(COINS); main._funding_ts = time.time()
+                except Exception as e: log(f"funding refresh err: {e}")
 
             # BTC vol throttle
             risk_mult = 1.0
@@ -1563,6 +1582,8 @@ def dash_json():
         'news': news, 'risk_ladder': ladder,
         'orderbook': ob_stat, 'leverage_cache_size': len(lev_cache),
         'liquidation': liq_stat, 'wall_entries': len(wall_entries),
+        'btc_corr': btc_correlation.get_state(),
+        'funding_cached': len(funding_filter._CACHE) if hasattr(funding_filter, '_CACHE') else 0,
         'coin_wr': coin_wr, 'killed_coins': killed,
         'consec_losses': state.get('consec_losses', 0),
     })
