@@ -167,6 +167,29 @@ def _load_landing():
 def landing():
     return Response(_load_landing(), mimetype='text/html')
 
+@app.route('/signals', methods=['GET'])
+def signals_feed():
+    with _SIGNAL_LOG_LOCK:
+        items = list(_SIGNAL_LOG)[-30:][::-1]
+    return jsonify({'items': items})
+
+@app.route('/whales', methods=['GET'])
+def whales_feed():
+    try:
+        from collections import deque
+        items = []
+        if hasattr(whale_filter, '_WHALES'):
+            now = time.time()
+            with whale_filter._LOCK:
+                for coin, dq in whale_filter._WHALES.items():
+                    for ts, side, usd in list(dq)[-5:]:
+                        if now - ts < 300:
+                            items.append({'coin':coin,'side':side,'usd':usd,'ts':ts})
+        items.sort(key=lambda x: x['ts'], reverse=True)
+        return jsonify({'items': items[:20]})
+    except Exception as e:
+        return jsonify({'items': [], 'err': str(e)})
+
 @app.route('/news', methods=['GET'])
 def news_feed():
     try:
@@ -444,6 +467,13 @@ COINS = [
     # Tuner-passed candidates (14d OOS with V3+ATR, WR>=65%, PnL>1%):
     'RESOLV', 'HEMI', 'STABLE', 'BABY', 'TST', 'YZY', 'PROMPT', 'DOOD', 'FOGO', 'NXPC', 'INIT', 'APEX', 'WLFI',  # batch 2
     'MAVIA', 'HMSTR', 'ZEREBRO', 'BLAST', 'BOME', 'MANTA', 'CHILLGUY', 'RSR', 'MELANIA', 'SCR', 'BIO', 'TNSR', 'MINA', 'NOT', 'BRETT', 'ME', 'IOTA', 'DYM', 'ORDI', 'POPCAT', 'SAGA', 'FIL', 'REZ', 'BANANA', 'kNEIRO', 'GMT', 'NEO', 'MAV',
+    # Tier 3 expansion (+50)
+    'RENDER','RUNE','STX','CAKE','ETC','MKR','THETA','ZEC','NEO','IMX',
+    'FLOW','GRT','KAVA','ROSE','ENJ','MINA','ICP','EGLD','GMX','OCEAN',
+    'FXS','SSV','DYDX','SNX','CRV','COMP','BAT','KSM','GLM','ILV',
+    'FLM','TURBO','MEW','GOAT','SNEK','PNUT','KAS','MEME','BOOK','NEIROETH',
+    'SPELL','RATS','HBAR','TRX','MANTA','RONIN','NAK','HMSTR','SEI','ZK'
+
 ]
 
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
@@ -898,6 +928,14 @@ def get_mid(coin):
     except Exception: return None
 
 _POSITIONS_CACHE = {'data': {}, 'ts': 0}
+_SIGNAL_LOG = []  # ring buffer
+_SIGNAL_LOG_LOCK = threading.Lock()
+def log_signal(coin, kind, side=None):
+    import datetime
+    with _SIGNAL_LOG_LOCK:
+        _SIGNAL_LOG.append({'coin':coin,'kind':kind,'side':side,
+                            'ts': datetime.datetime.utcnow().strftime('%H:%M:%S')})
+        if len(_SIGNAL_LOG) > 50: del _SIGNAL_LOG[:len(_SIGNAL_LOG)-50]
 
 def get_all_positions_live(force=False):
     """Cached — refreshes once per tick (5s). Force=True for critical ops."""
@@ -959,6 +997,20 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     try: whale_mult = whale_filter.confluence_boost(coin, side) if coin else 1.0
     except Exception: whale_mult = 1.0
     confluence *= whale_mult
+    # CVD confluence: aligned buy/sell pressure boost
+    try:
+        cvd_sig = cvd_ws.cvd_signal(coin) if coin else None
+        if cvd_sig == side: confluence *= 1.3
+        elif cvd_sig and cvd_sig != side: confluence *= 0.7
+    except Exception: pass
+    # OI confluence: position-adding on our side = trend continuation
+    try:
+        if coin:
+            # Simple price direction from recent candles not available here — use side as intent
+            oi_delta = oi_tracker.get_delta(coin) if coin else 0
+            if oi_delta > 0.02:  # OI rising >2%
+                confluence *= 1.2
+    except Exception: pass
     # Risk ladder override
     try: tier_risk = risk_ladder.get_risk()
     except Exception: tier_risk = risk_pct
@@ -1262,7 +1314,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Signal persistence: re-enabled at 3-bar window (OOS: +15% PnL boost)
     if not signal_persistence.check(coin, sig, bar_ts): return
 
-    log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
+    log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult})")
 
     now = time.time()
     if sig == 'SELL':

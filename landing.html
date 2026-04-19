@@ -424,6 +424,36 @@ body::after {
     </div>
 </div>
 
+<!-- SECONDARY GRID -->
+<div class="grid">
+    <!-- SIGNAL FEED -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Signal Feed · Live</div>
+            <div class="panel-meta" id="sig-meta">—</div>
+        </div>
+        <div id="signals" style="max-height: 320px; overflow-y: auto;"></div>
+    </div>
+
+    <!-- WHALE TICKER -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Whale Prints · >$100k</div>
+            <div class="panel-meta" id="whale-meta">—</div>
+        </div>
+        <div id="whales" style="max-height: 320px; overflow-y: auto;"></div>
+    </div>
+
+    <!-- MARKET DATA -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Aggregation</div>
+            <div class="panel-meta">6 streams</div>
+        </div>
+        <div id="aggregation" style="font-size: 11px; line-height: 2;"></div>
+    </div>
+</div>
+
 <!-- FOOTER -->
 <div class="footer">
     <div>PRECOG // CYBER·PSYCHO // HYPERLIQUID</div>
@@ -475,6 +505,21 @@ async function loadDash() {
         }).join('') || '<div class="pos-row" style="opacity:0.5">// no active positions</div>';
         document.getElementById('pos-meta').textContent = pos.length + ' active';
 
+        // Aggregation panel
+        document.getElementById('aggregation').innerHTML = `
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <div>Orderbook: <strong style="color:var(--acid)">${d.orderbook?.depth_feeds||0}</strong></div>
+                <div>Walls: <strong style="color:var(--acid)">${d.orderbook?.tracked_walls||0}</strong></div>
+                <div>Verified: <strong style="color:var(--acid)">${d.orderbook?.verified_coins||0}</strong></div>
+                <div>Liquidations: <strong style="color:var(--blood)">${d.liquidation?.total_liqs_cached||0}</strong></div>
+                <div>Cascades: <strong style="color:var(--blood)">${d.liquidation?.recent_cascades||0}</strong></div>
+                <div>Whales/h: <strong style="color:var(--oxide)">${d.whale?.total_whales||0}</strong></div>
+                <div>CVD coins: <strong style="color:var(--cyan)">${d.cvd?.active||0}</strong></div>
+                <div>OI tracked: <strong style="color:var(--cyan)">${d.oi?.tracked||0}</strong></div>
+                <div>Spoof: <strong style="color:var(--pulse)">${d.spoof?.recent_spoofs||0}</strong></div>
+                <div>Funding arb: <strong style="color:var(--oxide)">${d.funding_arb?.hl_coins||0}</strong></div>
+            </div>`;
+
         // Ticker
         const tickerData = sorted.slice(0,10).map(p => {
             const cls = (p.upnl||0)>=0?'':'bear';
@@ -485,6 +530,44 @@ async function loadDash() {
 
         document.getElementById('foot-updated').textContent = 'Updated · ' + new Date().toISOString().substr(11,8);
     } catch (e) { console.error(e); }
+}
+
+async function loadSignals() {
+    try {
+        const r = await fetch('/signals');
+        const d = await r.json();
+        const items = d.items || [];
+        document.getElementById('signals').innerHTML = items.map(s => {
+            const cls = s.kind === 'OPEN' ? 'pnl-pos' : (s.kind === 'CLOSED' ? 'pnl-neg' : '');
+            return `<div class="pos-row" style="grid-template-columns:70px 1fr auto;font-size:11px">
+                <div class="pos-coin">${s.coin}</div>
+                <div style="opacity:0.8">${s.kind} ${s.side || ''}</div>
+                <div class="${cls}" style="font-size:9px;opacity:0.7">${s.ts || ''}</div>
+            </div>`;
+        }).join('') || '<div class="pos-row" style="opacity:0.5">// awaiting signals</div>';
+        document.getElementById('sig-meta').textContent = items.length + ' recent';
+    } catch (e) {
+        document.getElementById('signals').innerHTML = '<div class="pos-row" style="opacity:0.5">// loading</div>';
+    }
+}
+
+async function loadWhales() {
+    try {
+        const r = await fetch('/whales');
+        const d = await r.json();
+        const items = d.items || [];
+        document.getElementById('whales').innerHTML = items.map(w => {
+            const sideCls = w.side === 'BUY' ? 'pnl-pos' : 'pnl-neg';
+            return `<div class="pos-row" style="grid-template-columns:60px 50px 1fr;font-size:11px">
+                <div class="pos-coin">${w.coin}</div>
+                <div class="${sideCls}" style="font-weight:600">${w.side}</div>
+                <div style="text-align:right">$${(w.usd/1000).toFixed(0)}k</div>
+            </div>`;
+        }).join('') || '<div class="pos-row" style="opacity:0.5">// no whale prints yet</div>';
+        document.getElementById('whale-meta').textContent = items.length + ' last 5m';
+    } catch (e) {
+        document.getElementById('whales').innerHTML = '<div class="pos-row" style="opacity:0.5">// loading</div>';
+    }
 }
 
 async function loadNews() {
@@ -510,9 +593,11 @@ function updateClock() {
     document.getElementById('utc-clock').textContent = n.toISOString().substr(11,8);
 }
 
-loadDash(); loadNews(); updateClock();
+loadDash(); loadNews(); loadSignals(); loadWhales(); updateClock();
 setInterval(loadDash, 5000);
 setInterval(loadNews, 60000);
+setInterval(loadSignals, 5000);
+setInterval(loadWhales, 5000);
 setInterval(updateClock, 1000);
 </script>
 </body>
