@@ -1230,6 +1230,44 @@ def main():
             log(f"tick err: {e}\n{traceback.format_exc()}")
         time.sleep(LOOP_SEC)
 
+
+@app.route('/tuner/status', methods=['GET'])
+def tuner_status():
+    try:
+        import json
+        for p in ['/var/data/tuner_results.json','/tmp/tuner_results.json']:
+            if os.path.exists(p):
+                d=json.load(open(p))
+                return jsonify({'phase':d.get('phase'),'completed':d.get('completed'),
+                                'total':d.get('total'),'elapsed_sec':d.get('elapsed_sec'),
+                                'top3':d.get('top',[])[:3]})
+        return jsonify({'status':'no_results_yet'})
+    except Exception as e:
+        return jsonify({'error':str(e)})
+
+@app.route('/tuner/top', methods=['GET'])
+def tuner_top():
+    try:
+        import json
+        for p in ['/var/data/tuner_results.json','/tmp/tuner_results.json']:
+            if os.path.exists(p):
+                return jsonify(json.load(open(p)))
+        return jsonify({'status':'no_results_yet'})
+    except Exception as e:
+        return jsonify({'error':str(e)})
+
+@app.route('/tuner/log', methods=['GET'])
+def tuner_log():
+    try:
+        for p in ['/var/data/tuner.log','/tmp/tuner.log']:
+            if os.path.exists(p):
+                with open(p) as f:
+                    lines=f.readlines()[-200:]
+                return jsonify({'log': ''.join(lines)})
+        return jsonify({'status':'no_log'})
+    except Exception as e:
+        return jsonify({'error':str(e)})
+
 if __name__ == '__main__':
     # Run precog signal loop in background thread
     t = threading.Thread(target=main, daemon=True)

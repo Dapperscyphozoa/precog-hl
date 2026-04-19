@@ -1,0 +1,12 @@
+services:
+  - type: worker
+    name: precog-tuner
+    runtime: python
+    plan: standard
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 tuner_worker.py
+    disk:
+      name: tuner-data
+      mountPath: /var/data
+      sizeGB: 1
