@@ -600,7 +600,7 @@ SP['rsi_hi'] = 70
 BP['rsi_lo'] = 35
 
 
-INITIAL_RISK_PCT = 0.04      # 4% — aggressive (tuner-validated 68% WR)
+INITIAL_RISK_PCT = 0.02  # halved: 2x position slots      # 4% — aggressive (tuner-validated 68% WR)
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
@@ -613,14 +613,14 @@ MAX_TOTAL_RISK = 0.92    # 8% reserve
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
-MAX_HOLD_SEC = 4 * 3600
+MAX_HOLD_SEC = 4 * 3600  # stale exit after 4h
 CB_CONSEC_LOSSES = 999  # disabled per user principle
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50
 
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 MAKER_FALLBACK_SEC = 10
-MAKER_OFFSET = 0.0003  # 0.03% better than mid — buy lower, sell higher
+MAKER_OFFSET = 0.001  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
 def _init_hl_with_retry(max_attempts=8):
     """Retry Info() init with exponential backoff — Hyperliquid 429s on cold deploys."""
