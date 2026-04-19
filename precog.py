@@ -461,7 +461,7 @@ def derive(s):
     }
 SP = derive(GRID); BP = derive(GRID)
 
-INITIAL_RISK_PCT = 0.10    # 10% risk — high confidence per-ticker gates
+INITIAL_RISK_PCT = 0.01    # 1% risk — emergency cut, live bleed
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
