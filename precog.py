@@ -650,7 +650,7 @@ FUNDING_CUT_RATIO = 0.50
 
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 MAKER_FALLBACK_SEC = 10
-MAKER_OFFSET = 0.001  # 0.1% entry split — OOS +127% PnL (better avg entry)
+MAKER_OFFSET = 0.002  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
 def _init_hl_with_retry(max_attempts=8):
     """Retry Info() init with exponential backoff — Hyperliquid 429s on cold deploys."""
