@@ -33,3 +33,43 @@ def wall_context(coin, side, entry_price):
     dist = abs(entry_price - wall['price']) / max(entry_price, 1) * 100
     return {'price': wall['price'], 'usd': wall['usd'], 'dist_pct': dist,
             'persistence': wall.get('persistence_windows', 0)}
+
+
+def wall_pressure(coin, mid_price, band_pct=0.02):
+    """Returns -1 to +1: aggregated bid-ask imbalance within ±band_pct of mid.
+    Positive = ask-heavy (resistance dominant, bearish pressure).
+    Negative = bid-heavy (support dominant, bullish pressure).
+    """
+    try:
+        with orderbook_ws._LOCK:
+            d = orderbook_ws._DEPTH.get(coin)
+            if not d or not d.get('mid'): return 0
+            bids = list(d['bids'].values())
+            asks = list(d['asks'].values())
+        total_bid = sum(px*sz for px,sz in bids if abs(px-mid_price)/mid_price < band_pct)
+        total_ask = sum(px*sz for px,sz in asks if abs(px-mid_price)/mid_price < band_pct)
+        total = total_bid + total_ask
+        if total < 100000: return 0  # too thin to trust
+        return (total_ask - total_bid) / total
+    except Exception:
+        return 0
+
+def composite_boost(coin, side, entry_price, news_direction):
+    """News + orderbook confluence.
+    side=BUY: bullish view. news_direction>0 = bullish. wall_pressure<0 = bid-heavy = support.
+    Aligned: news bull + walls bull + BUY = 2x. Contradicted: 0.5x. Mixed: 1.0x.
+    """
+    pressure = wall_pressure(coin, entry_price)
+    # Normalize: side_view = +1 for BUY, -1 for SELL
+    side_view = 1 if side == 'BUY' else -1
+    # Wall view: negative pressure (bid-heavy) favors BUY, positive (ask-heavy) favors SELL
+    wall_view = -pressure  # flip sign: -pressure aligns with bullish view
+    # News view already signed: +1 bullish, -1 bearish
+    news_view = news_direction
+    # Composite alignment: how well all three agree
+    alignment = side_view * (wall_view + news_view) / 2  # -1 to +1
+    if alignment > 0.5: return 2.0   # strong confluence
+    if alignment > 0.2: return 1.4
+    if alignment > -0.2: return 1.0  # neutral
+    if alignment > -0.5: return 0.7  # mild conflict
+    return 0.4                        # strong conflict: news+walls both against trade
