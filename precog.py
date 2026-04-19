@@ -746,6 +746,8 @@ CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering i
 FUNDING_CUT_RATIO = 0.50
 
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
+TRAIL_TIGHTEN_AFTER_SEC = 7200  # 2h: tighten trail to 0.9% (OOS +77% PnL vs static)
+TRAIL_TIGHTEN_PCT = 0.009          # OOS winner: +250% vs +40% at 0.3%
 MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0015  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
@@ -1335,13 +1337,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 hwm = fav
                 cur['hwm'] = hwm
             
+            # Time-aware trail: tighten to 0.9% after 2h hold (OOS +77% PnL)
+            age = now - st['opened_at']
+            trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
             # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
-            if hwm > TRAIL_PCT and (hwm - fav) >= TRAIL_PCT and fav >= TRAIL_PCT * 0.5:
+            if hwm > trl and (hwm - fav) >= trl and fav >= trl * 0.5:
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     state['consec_losses'] = 0
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {TRAIL_PCT*100:.1f}%)")
+                log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {trl*100:.2f}%, age {age/60:.0f}m)")
                 state['positions'].pop(coin, None)
                 return
 
