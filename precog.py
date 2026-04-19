@@ -1177,7 +1177,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
+state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
+
 def main():
+    global state
     log(f"PreCog v8.14 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
     try: bybit_ws.start()
     except Exception as e: log(f"bybit_ws err: {e}")
