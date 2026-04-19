@@ -125,7 +125,7 @@ def health():
                     'gates_loaded':len(TICKER_GATES),
                     'recent_logs':LOG_BUFFER[-20:]})
 
-LOG_BUFFER = []  # ring buffer for last 100 log lines
+LOG_BUFFER = []
 
 
 @app.route('/trades', methods=['GET'])
@@ -397,10 +397,7 @@ else:
     TICKER_GATES = {}
     print("WARNING: ticker_gates.json not found, running without per-ticker gates", flush=True)
 
-# ═══════════════════════════════════════════════════════
-# V3 TREND GATE — 4H EMA9 direction alignment
-# OOS 7d: 100% WR at 4h/EMA9/no-buffer (6 trades, +3.14% PnL)
-# ═══════════════════════════════════════════════════════
+# V3 trend gate (4H EMA9 direction) — applied first in apply_ticker_gate
 _HTF_CACHE = {}
 HTF_CACHE_SEC = 900  # 15 min — 4h bars close every 4h, 15m cache fine
 
@@ -511,16 +508,8 @@ def apply_ticker_gate(coin, side, price, candles):
 GRID = {'sens':1, 'rsi':10, 'wick':1, 'ext':1, 'block':1, 'vol':1, 'cd':3}  # tuner-overridden below
 
 def derive(s):
-    return {
-        'lb':       max(2, 2 + (s['ext']-1)*15),
-        'rsi_hi':   50 + s['rsi']*3,
-        'rsi_lo':   50 - s['rsi']*3,
-        'wick':     (s['wick']-1) * 0.07,
-        'struct_n': 99 if s['block']<2 else max(2, round(7 - s['block']*0.5)),
-        'pivot_lb': max(2, 9 - s['sens']),
-        'vol_mult': 1.0 + (s['vol']-1)*0.15,
-        'cd':       s['cd']
-    }
+    return {'rsi_hi': 50 + s['rsi']*3, 'rsi_lo': 50 - s['rsi']*3,
+            'pivot_lb': max(2, 9 - s['sens']), 'cd': s['cd']}
 SP = derive(GRID); BP = derive(GRID)
 # TUNER WINNER OVERRIDE — plb=36 rsi=70/35
 SP['pivot_lb'] = 36
@@ -533,11 +522,11 @@ INITIAL_RISK_PCT = 0.0015    # 0.15% risk
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
-LOOP_SEC = 5  # continuous processing — no 5min sleep between cycles
+LOOP_SEC = 2  # tight outer loop (Bybit WS push)
 USE_ISOLATED_MARGIN = True
 
-MAX_POSITIONS = 20       # was 8 — LA dead, no margin reserve needed
-MAX_SAME_SIDE = 12       # was 6 — with MAX_POS 20, side cap was blocking 14 trades
+MAX_POSITIONS = 20
+MAX_SAME_SIDE = 12
 MAX_TOTAL_RISK = 0.80    # reserve 20% margin
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
@@ -545,7 +534,7 @@ BTC_VOL_THRESHOLD = 0.03
 MAX_HOLD_SEC = 4 * 3600
 CB_CONSEC_LOSSES = 5
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
-FUNDING_CUT_RATIO = 0.50  # was 0.20 — don't cut small winners prematurely
+FUNDING_CUT_RATIO = 0.50
 
 TRAIL_PCT = 0.003          # 0.3% — tuner winner config
 MAKER_FALLBACK_SEC = 10
@@ -665,7 +654,17 @@ _CANDLE_CACHE = {}  # {coin: {'data': [...], 'ts': float}}
 CANDLE_CACHE_SEC = 120  # 2 min cache — covers both BOS and MR scans in same cycle
 
 def fetch(coin, n_bars=100, retries=3):
+    """Bybit WS candles FIRST (no rate limit), HL REST only as fallback."""
     now = time.time()
+    # Try Bybit WS candle buffer first
+    try:
+        if bybit_ws.has_coin(coin):
+            by_candles = bybit_ws.get_candles(coin, limit=n_bars+50)
+            if len(by_candles) >= n_bars:
+                return by_candles[-n_bars:]
+    except Exception:
+        pass
+    # Cached HL REST fallback
     cached = _CANDLE_CACHE.get(coin)
     if cached and now - cached['ts'] < CANDLE_CACHE_SEC:
         return cached['data']
@@ -684,11 +683,7 @@ def fetch(coin, n_bars=100, retries=3):
             log(f"candle err {coin}: {e}"); return []
     return []
 
-# ═══════════════════════════════════════════════════════
-
-# SIGNAL — cooldown by timestamp, scan last K bars
-# ═══════════════════════════════════════════════════════
-SCAN_BARS = 3  # check last SCAN_BARS closed bars each tick
+SCAN_BARS = 2
 CD_MS = 10 * 5 * 60 * 1000  # cd=10 bars of 5m = 50min — tuner winner
 
 def chase_gate_ok(side, price, candles, i):
@@ -823,7 +818,7 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0):
     return round(raw,4)
 
 def set_isolated_leverage(coin):
-    """FIX #1: set isolated margin + leverage before opening."""
+    """Set isolated margin + leverage before opening."""
     try:
         exchange.update_leverage(LEV, coin, is_cross=False)
     except Exception as e:
@@ -1096,12 +1091,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 # MAIN LOOP
 # ═══════════════════════════════════════════════════════
 def main():
-    log(f"PreCog v8.13 | wallet={WALLET} | precog+webhook | trail={TRAIL_PCT} | risk={INITIAL_RISK_PCT}")
-    log(f"V3 trend gate: {V3_HTF}/EMA{V3_EMA} | Bybit WS: starting")
-    try:
-        bybit_ws.start()
-    except Exception as e:
-        log(f"bybit_ws start err: {e}")
+    log(f"PreCog v8.14 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
+    try: bybit_ws.start()
+    except Exception as e: log(f"bybit_ws err: {e}")
     log(f"Universe ({len(COINS)}): {COINS}")
     log(f"Chase-gate ({len(CHASE_GATE_COINS)}): {sorted(CHASE_GATE_COINS)}")
     log(f"Risk: {int(INITIAL_RISK_PCT*100)}% → {int(SCALED_RISK_PCT*100)}% at ${SCALE_DOWN_AT}")
@@ -1257,7 +1249,7 @@ def main():
                     process(c, state, equity, live_positions, risk_mult)
                 except Exception as e:
                     log(f"err {c}: {e}")
-                time.sleep(2.3)  # 2.3s between coins — prevents 429 at tail end of 50-coin cycle
+                time.sleep(0.05)  # Bybit WS = zero rate limit, minimal yield for thread fairness
 
             save_state(state)
             log(f"--- tick complete ---")
