@@ -100,6 +100,42 @@ except Exception:
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
 MT4_BIAS = {'direction': '', 'ts': 0}
 
+# --- MT4 queue persistence (HL-isolated; writes /var/data/mt4_queue.json) ---
+MT4_QUEUE_FILE = '/var/data/mt4_queue.json'
+MT4_STALE_SEC = 300  # drop signals older than 5 min on serve
+
+def _mt4_save():
+    try:
+        with open(MT4_QUEUE_FILE, 'w') as _f:
+            _json.dump({'queue': MT4_QUEUE, 'bias': MT4_BIAS}, _f)
+    except Exception as _e:
+        pass  # never let disk IO break HL
+
+def _mt4_load():
+    global MT4_QUEUE, MT4_BIAS
+    try:
+        if os.path.exists(MT4_QUEUE_FILE):
+            with open(MT4_QUEUE_FILE) as _f:
+                _d = _json.load(_f)
+            _q = _d.get('queue', [])
+            _now = time.time()
+            # drop stale on boot
+            MT4_QUEUE[:] = [_s for _s in _q if (_now - _s.get('ts', 0)) < MT4_STALE_SEC]
+            _b = _d.get('bias')
+            if isinstance(_b, dict):
+                MT4_BIAS.update(_b)
+            try:
+                log(f"MT4 QUEUE RESTORED: {len(MT4_QUEUE)} signals from disk")
+            except Exception:
+                pass
+    except Exception as _e:
+        try:
+            log(f"MT4 QUEUE LOAD ERR: {_e}")
+        except Exception:
+            pass
+# --- end MT4 persistence block ---
+
+
 PEPPERSTONE_TICKERS = {
     'XAUUSD','XAGUSD','SPOTCRUDE','SPOTBRENT','NATGAS',
     'EURUSD','GBPUSD','USDJPY','EURGBP','GBPNZD',
@@ -362,6 +398,7 @@ def webhook():
                 MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': 0, 'ts': time.time()})
                 mt4_count += 1
             if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
+            _mt4_save()
             log(f"MT4 BROADCAST: {direction} → {mt4_count} tickers (from '{text}')")
             return jsonify({'status':'broadcast','direction':direction,'count':mt4_count}), 200
         
@@ -453,7 +490,8 @@ def webhook():
             direction = 'SELL' if direction == 'BUY' else 'BUY'
             log(f"MT4 INVERTED {clean}: {action.upper()} → {direction}")
         MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': price, 'ts': time.time()})
-        if len(MT4_QUEUE) > 20: MT4_QUEUE.pop(0)
+        if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
+        _mt4_save()
         log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price}")
         log_trade('MT4', clean, direction, price, 0, 'webhook')
         return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':direction}), 200
@@ -479,10 +517,16 @@ def signal_alias():
 
 @app.route('/mt4/signals', methods=['GET'])
 def mt4_signals():
-    """EA polls this every 10s. Returns one signal, removes from queue."""
+    """EA polls this every 10s. Returns one signal, removes from queue. Drops stale."""
     global MT4_QUEUE
+    _now = time.time()
+    # drop stale signals (older than MT4_STALE_SEC)
+    while MT4_QUEUE and (_now - MT4_QUEUE[0].get('ts', 0)) >= MT4_STALE_SEC:
+        _drop = MT4_QUEUE.pop(0)
+        log(f"MT4 STALE DROP: {_drop.get('direction','')} {_drop.get('symbol','')} age={int(_now - _drop.get('ts',0))}s")
     if MT4_QUEUE:
         sig = MT4_QUEUE.pop(0)
+        _mt4_save()
         log(f"MT4 SERVED: {sig['direction']} {sig['symbol']}")
         return jsonify(sig)
     return jsonify({'symbol':'','direction':'','price':0})
@@ -1885,5 +1929,6 @@ if __name__ == '__main__':
     # LA KILLED — was burning 60 API calls/sec with 0 trades, causing 429s
     # Run Flask webhook server in main thread (Render expects port 10000)
     port = int(os.environ.get('PORT', 10000))
+    _mt4_load()  # restore MT4 queue from disk across deploys
     log(f"Webhook server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
