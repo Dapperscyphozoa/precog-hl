@@ -1457,12 +1457,12 @@ def get_funding_rate(coin):
     return 0
 
 def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
-    # ELITE: coin-specific 20x leverage (capped at HL max)
+    # ELITE: per-tier sizing (PURE 20x×10%, NINETY_99 15x×5%, EIGHTY_89 12x×5%)
     if percoin_configs.ELITE_MODE and coin and percoin_configs.is_elite(coin):
-        max_hl = leverage_map.get_max(coin, default=20)
-        actual_lev = min(20, max_hl)
-        # Elite path: skip all confluence multipliers, just pure 10% × lev
-        raw = equity * 0.10 * actual_lev / px
+        elite_lev, elite_risk = percoin_configs.get_sizing(coin)
+        max_hl = leverage_map.get_max(coin, default=elite_lev)
+        actual_lev = min(elite_lev, max_hl)
+        raw = equity * elite_risk * actual_lev / px
         if raw>=100: return round(raw,0)
         if raw>=10:  return round(raw,1)
         if raw>=1:   return round(raw,2)
@@ -1821,9 +1821,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         return
 
     risk_pct = current_risk_pct(equity)
-    # ELITE: override risk to 10% for pure 100% WR coins
+    # ELITE: override risk per tier (PURE 10%, NINETY_99 5%, EIGHTY_89 5%)
     if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
-        risk_pct = 0.10
+        _, tier_risk = percoin_configs.get_sizing(coin)
+        risk_pct = tier_risk
     total_locked = get_total_margin()
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
