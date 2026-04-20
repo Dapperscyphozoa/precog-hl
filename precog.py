@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreCog v8.12 — 50-coin universe + 48 MT4 tickers
+"""PreCog v8.28 — 50-coin universe + 48 MT4 tickers
 
 Dual signal engine:
   1. Internal BOS/pivot/RSI → per-ticker gated (73 configs)
@@ -363,7 +363,7 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.20','equity':eq,
+    return jsonify({'status':'ok','version':'v8.28','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -1566,7 +1566,7 @@ state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
 
 def main():
     global state
-    log(f"PreCog v8.14 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
+    log(f"PreCog v8.28 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
     try: bybit_ws.start()
     except Exception as e: log(f"bybit_ws err: {e}")
     try: orderbook_ws.start()
@@ -1947,7 +1947,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.20',
+        'equity': eq, 'version': 'v8.28',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
