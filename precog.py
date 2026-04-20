@@ -105,6 +105,88 @@ MT4_BIAS = {'direction': '', 'ts': 0}
 MT4_QUEUE_FILE = '/var/data/mt4_queue.json'
 MT4_STALE_SEC = 300  # drop signals older than 5 min on serve
 
+# ===== Webhook filter (HL-isolated) =====
+MT4_FILTERS_ENABLED = os.environ.get('MT4_FILTERS_ENABLED', 'true').lower() == 'true'
+MT4_COOLDOWN_SEC = 15 * 60  # 15min per-ticker cooldown
+MT4_ATR_MIN_PCT = 0.08      # reject dead market
+MT4_ATR_MAX_PCT = 2.50      # reject news spike
+_mt4_last_signal = {}       # {clean_ticker: ts_seconds}
+_mt4_atr_cache = {}         # {clean_ticker: (ts, atr_pct)}
+_mt4_atr_cache_ttl = 600    # 10min TTL on ATR
+
+def _mt4_atr_pct(clean_ticker):
+    """Fetch 14-period ATR% via Yahoo. Returns None on failure (filter passes through)."""
+    now = time.time()
+    cached = _mt4_atr_cache.get(clean_ticker)
+    if cached and (now - cached[0] < _mt4_atr_cache_ttl):
+        return cached[1]
+    YAHOO_MAP = {
+        'XAUUSD':'GC=F','XAGUSD':'SI=F','XPTUSD':'PL=F','XPDUSD':'PA=F',
+        'SPOTCRUDE':'CL=F','SPOTBRENT':'BZ=F','NATGAS':'NG=F',
+        'COPPER':'HG=F','CORN':'ZC=F','WHEAT':'ZW=F','SOYBEANS':'ZS=F',
+        'EURUSD':'EURUSD=X','GBPUSD':'GBPUSD=X','USDJPY':'JPY=X',
+        'EURGBP':'EURGBP=X','GBPNZD':'GBPNZD=X','AUDCAD':'AUDCAD=X',
+        'AUDUSD':'AUDUSD=X','USDCAD':'CAD=X','USDCHF':'CHF=X',
+        'AUDCHF':'AUDCHF=X','AUDNZD':'AUDNZD=X','AUDJPY':'AUDJPY=X',
+        'CADCHF':'CADCHF=X','CADJPY':'CADJPY=X','CHFJPY':'CHFJPY=X',
+        'EURAUD':'EURAUD=X','EURCAD':'EURCAD=X','EURCHF':'EURCHF=X',
+        'GBPAUD':'GBPAUD=X','GBPCHF':'GBPCHF=X','NZDUSD':'NZDUSD=X',
+        'NZDCAD':'NZDCAD=X','NAS100':'^NDX','US30':'^DJI','US500':'^GSPC',
+        'US2000':'^RUT','GER40':'^GDAXI','UK100':'^FTSE',
+        'JPN225':'^N225','HK50':'^HSI','VIX':'^VIX',
+    }
+    ysym = YAHOO_MAP.get(clean_ticker)
+    if not ysym:
+        return None
+    try:
+        import urllib.request as _ur
+        end_ts = int(now)
+        start_ts = end_ts - 86400 * 3  # 3 days back
+        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ysym}?period1={start_ts}&period2={end_ts}&interval=1h'
+        req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+        resp = _ur.urlopen(req, timeout=5)
+        data = _json.loads(resp.read())
+        result = data.get('chart',{}).get('result',[{}])[0]
+        q = result.get('indicators',{}).get('quote',[{}])[0]
+        highs = [h for h in q.get('high',[]) if h is not None]
+        lows = [l for l in q.get('low',[]) if l is not None]
+        closes = [c for c in q.get('close',[]) if c is not None]
+        if len(closes) < 15:
+            return None
+        # ATR14 on most recent 14 bars
+        trs = []
+        for i in range(len(closes)-14, len(closes)):
+            if i <= 0: continue
+            tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+            trs.append(tr)
+        if not trs:
+            return None
+        atr = sum(trs) / len(trs)
+        atr_pct = (atr / closes[-1]) * 100
+        _mt4_atr_cache[clean_ticker] = (now, atr_pct)
+        return atr_pct
+    except Exception as _e:
+        return None
+
+def _mt4_filter_pass(clean_ticker):
+    """Returns (passed: bool, reason: str). Reason is empty on pass."""
+    if not MT4_FILTERS_ENABLED:
+        return True, ''
+    now = time.time()
+    # Cooldown check
+    last = _mt4_last_signal.get(clean_ticker)
+    if last and (now - last) < MT4_COOLDOWN_SEC:
+        return False, f'COOLDOWN ({int((now-last)/60)}min ago)'
+    # ATR check
+    atr = _mt4_atr_pct(clean_ticker)
+    if atr is not None:
+        if atr < MT4_ATR_MIN_PCT:
+            return False, f'ATR_LOW ({atr:.2f}%)'
+        if atr > MT4_ATR_MAX_PCT:
+            return False, f'ATR_HIGH ({atr:.2f}%)'
+    return True, ''
+# ===== end webhook filter =====
+
 def _mt4_save():
     try:
         with open(MT4_QUEUE_FILE, 'w') as _f:
@@ -486,7 +568,13 @@ def webhook():
         clean = raw_ticker.upper().replace('PEPPERSTONE:','').replace('.A','')
         gate = MT4_TICKER_GATES.get(clean, {})
         direction = action.upper()
-        # EURGBP inversion — mean-reverting pair, flip signal
+        # FILTER: ATR + cooldown gate (HL-isolated)
+        _passed, _reason = _mt4_filter_pass(clean)
+        if not _passed:
+            log(f"MT4 FILTERED {clean} {direction}: {_reason}")
+            return jsonify({'status':'filtered','symbol':clean,'reason':_reason}), 200
+        _mt4_last_signal[clean] = time.time()
+        # Inversion — mean-reverting pairs, flip signal
         if gate.get('inverted'):
             direction = 'SELL' if direction == 'BUY' else 'BUY'
             log(f"MT4 INVERTED {clean}: {action.upper()} → {direction}")
