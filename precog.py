@@ -17,6 +17,7 @@ import threading
 from queue import Queue
 from flask import Flask, request as flask_request, jsonify, Response
 import bybit_ws
+import percoin_configs
 import orderbook_ws
 import news_filter
 import wall_confluence
