@@ -1781,8 +1781,44 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     total_locked = get_total_margin()
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
-        log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
-        return
+        # Before hard-skipping: try to close highest-profit elite position to make room
+        if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+            candidates = []
+            for k, lp in live_positions.items():
+                if not percoin_configs.is_elite(k): continue
+                if k == coin: continue  # don't close self
+                sz = lp.get('size', 0)
+                entry = lp.get('entry', 0)
+                if sz == 0 or not entry: continue
+                try:
+                    mid = get_mid(k)
+                    if not mid: continue
+                    pside = 'L' if sz > 0 else 'S'
+                    fav_k = (mid - entry) / entry if pside == 'L' else (entry - mid) / entry
+                    if fav_k > 0.003:
+                        candidates.append((fav_k, k, abs(sz) * entry))
+                except Exception: pass
+            if candidates:
+                candidates.sort(reverse=True)
+                fav_k, k, notional = candidates[0]
+                try:
+                    pnl = close(k)
+                    log(f"MARGIN-CLOSE {k} +{fav_k*100:.2f}% (freed ~${notional:.0f} for incoming {coin} {sig})")
+                    state['positions'].pop(k, None)
+                    if pnl is not None:
+                        state['last_pnl_close'] = pnl
+                        state['consec_losses'] = 0
+                    # Recompute margin to see if there's room now
+                    total_locked = get_total_margin()
+                except Exception as e:
+                    log(f"margin-close err {k}: {e}")
+            # After close attempt, check again
+            if (total_locked + proposed)/equity > MAX_TOTAL_RISK:
+                log(f"{coin} {sig} SKIP (margin still {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}% after close attempt)")
+                return
+        else:
+            log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
+            return
 
     # Per-ticker gate check — uses candles already fetched above (no extra API call)
     try:
