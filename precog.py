@@ -1072,12 +1072,7 @@ USE_ISOLATED_MARGIN = True
 MAX_POSITIONS = 40  # OOS: ~27 avg concurrent, peak 40+
 MAX_SAME_SIDE = 15  # tighter — imbalanced books bleed
 MAX_TOTAL_RISK = 0.92    # 8% reserve
-STOP_LOSS_PCT = 0.02      # 2% — alt default
-# Major coins (low vol, tight ranges) — need tighter SL + tighter trail to capture wins
-MAJOR_COINS = {'BTC', 'ETH'}
-MAJOR_SL_PCT = 0.01       # 1% SL for majors — half-size losses
-MAJOR_TRAIL_PCT = 0.008   # 0.8% trail for majors — lock smaller wins faster
-MAJOR_TRAIL_TIGHTEN_PCT = 0.005  # 0.5% after 2h hold
+STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
 MAX_HOLD_SEC = 4 * 3600  # stale exit after 4h
@@ -1581,8 +1576,7 @@ def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay."""
     try:
         entry = float(entry); size = float(size)
-        sl_pct = MAJOR_SL_PCT if coin in MAJOR_COINS else STOP_LOSS_PCT
-        trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
+        trigger_px = entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT)
         trigger_px = float(round_price(coin, trigger_px))
         # Limit price: aggressive to ensure fill (2% past trigger for slippage room)
         limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
@@ -1674,20 +1668,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
-            # Per-coin SL/trail tier: majors get tighter (less ranging tolerance)
-            sl_pct  = MAJOR_SL_PCT if coin in MAJOR_COINS else STOP_LOSS_PCT
-            trl_base = MAJOR_TRAIL_PCT if coin in MAJOR_COINS else TRAIL_PCT
-            trl_tight = MAJOR_TRAIL_TIGHTEN_PCT if coin in MAJOR_COINS else TRAIL_TIGHTEN_PCT
-
             # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
-            if fav <= -sl_pct:
+            if fav <= -STOP_LOSS_PCT:
                 prev_pos = dict(cur)
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     record_close(prev_pos, coin, pnl_pct, state)
                     state['consec_losses'] += 1
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{sl_pct*100:.1f}%)")
+                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{STOP_LOSS_PCT*100:.1f}%)")
                 state['positions'].pop(coin, None)
                 return
 
@@ -1697,9 +1686,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 hwm = fav
                 cur['hwm'] = hwm
             
-            # Time-aware trail: tighten after 2h hold (OOS +77% PnL)
+            # Time-aware trail: tighten to 0.9% after 2h hold (OOS +77% PnL)
             age = time.time() - (cur.get('opened_at') or time.time())
-            trl = trl_tight if age > TRAIL_TIGHTEN_AFTER_SEC else trl_base
+            trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
             # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
             if hwm > trl and (hwm - fav) >= trl and fav >= trl * 0.5:
                 prev_pos = dict(cur)
@@ -1785,13 +1774,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
         size_mult = confidence.size_multiplier(conf_score)
-        # Majors: extra-tight quality gate. Below 50 conf → 0.25x. Below 30 → skip entirely.
-        if coin in MAJOR_COINS:
-            if conf_score < 30:
-                log(f"{coin} {sig} SKIP — major coin requires conf>=30, got {conf_score}")
-                return
-            elif conf_score < 50:
-                size_mult = 0.25
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
         risk_mult = risk_mult * size_mult * adapt
