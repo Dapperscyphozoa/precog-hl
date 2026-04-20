@@ -676,6 +676,37 @@ def mt4_status():
         'bias_age_sec': round(bias_age)
     })
 
+# FLATTEN BROADCAST: server sets a flag, EA polls, closes all magic-matched + deletes pendings, acks
+MT4_FLATTEN_FLAG = {'pending': False, 'ts': 0, 'reason': ''}
+
+@app.route('/mt4/flatten', methods=['POST', 'GET'])
+def mt4_flatten_set():
+    """Arm flatten broadcast. EA will act on next poll."""
+    global MT4_QUEUE, MT4_FLATTEN_FLAG
+    reason = flask_request.args.get('reason', 'user_request')
+    # Clear the server queue too
+    cleared = len(MT4_QUEUE)
+    MT4_QUEUE.clear()
+    _mt4_save()
+    MT4_FLATTEN_FLAG = {'pending': True, 'ts': time.time(), 'reason': reason}
+    log(f"MT4 FLATTEN ARMED: reason={reason}, cleared_queue={cleared}")
+    return jsonify({'status': 'armed', 'reason': reason, 'queue_cleared': cleared})
+
+@app.route('/mt4/flatten/check', methods=['GET'])
+def mt4_flatten_check():
+    """EA polls. Returns flag + timestamp. EA decides to act."""
+    return jsonify(MT4_FLATTEN_FLAG)
+
+@app.route('/mt4/flatten/ack', methods=['POST', 'GET'])
+def mt4_flatten_ack():
+    """EA acks after flatten complete. Clears flag."""
+    global MT4_FLATTEN_FLAG
+    closed = flask_request.args.get('closed', '0')
+    deleted = flask_request.args.get('deleted', '0')
+    log(f"MT4 FLATTEN ACK: closed={closed}, deleted={deleted}")
+    MT4_FLATTEN_FLAG = {'pending': False, 'ts': time.time(), 'reason': ''}
+    return jsonify({'status': 'acked'})
+
 COINS = [
     'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
     'AERO','LIT','SPX','kPEPE','kBONK','kSHIB','MORPHO','JUP','XRP',
