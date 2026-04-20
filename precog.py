@@ -31,6 +31,7 @@ import funding_filter
 import btc_correlation
 import confidence
 import tier_filter
+import percoin_configs
 import spoof_detection
 import session_scaler
 import whale_filter
@@ -365,6 +366,16 @@ def stats_reset():
                       'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
     save_state(state)
     return jsonify({'status':'stats reset'})
+
+@app.route('/elite', methods=['GET'])
+def elite_endpoint():
+    """Show elite mode status + 14-coin config."""
+    try:
+        s = percoin_configs.stats()
+        s['configs'] = percoin_configs.PURE_14
+        return jsonify(s)
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/tiers', methods=['GET'])
 def tiers_endpoint():
@@ -1446,6 +1457,17 @@ def get_funding_rate(coin):
     return 0
 
 def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
+    # ELITE: coin-specific 20x leverage (capped at HL max)
+    if percoin_configs.ELITE_MODE and coin and percoin_configs.is_elite(coin):
+        max_hl = leverage_map.get_max(coin, default=20)
+        actual_lev = min(20, max_hl)
+        # Elite path: skip all confluence multipliers, just pure 10% × lev
+        raw = equity * 0.10 * actual_lev / px
+        if raw>=100: return round(raw,0)
+        if raw>=10:  return round(raw,1)
+        if raw>=1:   return round(raw,2)
+        if raw>=0.1: return round(raw,3)
+        return round(raw,4)
     # Per-coin leverage (BTC/ETH 20x, alts 3-10x)
     actual_lev = leverage_map.get_max(coin, default=LEV) if coin else LEV
     # News risk multiplier
@@ -1690,6 +1712,34 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
+            # ELITE MODE: Fixed per-coin TP + 5% hard SL (overrides all other logic)
+            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                elite_cfg = percoin_configs.get_config(coin)
+                # Fixed TP — exit as soon as profit >= TP
+                if fav >= elite_cfg['TP']:
+                    prev_pos = dict(cur)
+                    pnl_pct = close(coin)
+                    if pnl_pct is not None:
+                        record_close(prev_pos, coin, pnl_pct, state)
+                        state['consec_losses'] = 0
+                        state['last_pnl_close'] = pnl_pct
+                    log(f"{coin} ELITE TP HIT +{fav*100:.2f}% (target {elite_cfg['TP']*100:.2f}%)")
+                    state['positions'].pop(coin, None)
+                    return
+                # Fixed SL — 5%
+                if fav <= -elite_cfg['SL']:
+                    prev_pos = dict(cur)
+                    pnl_pct = close(coin)
+                    if pnl_pct is not None:
+                        record_close(prev_pos, coin, pnl_pct, state)
+                        state['consec_losses'] += 1
+                        state['last_pnl_close'] = pnl_pct
+                    log(f"{coin} ELITE SL HIT {fav*100:.2f}% (limit -{elite_cfg['SL']*100:.0f}%)")
+                    state['positions'].pop(coin, None)
+                    return
+                # Skip default trailing for elite — pure fixed TP/SL
+                return
+
             # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
             if fav <= -STOP_LOSS_PCT:
                 prev_pos = dict(cur)
@@ -1771,6 +1821,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         return
 
     risk_pct = current_risk_pct(equity)
+    # ELITE: override risk to 10% for pure 100% WR coins
+    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+        risk_pct = 0.10
     total_locked = get_total_margin()
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
@@ -1789,6 +1842,29 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
     # if not signal_persistence.check(coin, sig, bar_ts): return
 
+    # ELITE MODE: 14-coin pure 100% WR cluster (shipped Apr 20 2026).
+    # When elite_mode active, ONLY trade coins in PURE_14 with per-coin TP/SL.
+    # 10% equity × 20x leverage = 200% notional per trade.
+    if percoin_configs.ELITE_MODE:
+        if not percoin_configs.is_elite(coin):
+            log(f"{coin} {sig} SKIP — not in elite 14-coin whitelist")
+            return
+        elite_cfg = percoin_configs.get_config(coin)
+        # Verify signal engine matches coin's allowed signals
+        if not percoin_configs.check_signal_allowed(coin, signal_engine):
+            log(f"{coin} {sig} SKIP — engine {signal_engine} not allowed for this coin (allowed: {elite_cfg['sigs']})")
+            return
+        # Apply filter (EMA200 / ADX20/25)
+        ema200_val = candles[-1].get('ema200') if candles else None
+        ema50_val = candles[-1].get('ema50') if candles else None
+        adx_val = candles[-1].get('adx') if candles else None
+        price = float(candles[-1]['c']) if candles else 0
+        side = 1 if sig == 'BUY' else -1
+        if not percoin_configs.check_filter(elite_cfg['flt'], ema200_val, ema50_val, adx_val, side, price):
+            log(f"{coin} {sig} SKIP — failed filter {elite_cfg['flt']}")
+            return
+        log(f"{coin} ELITE PASS — TP={elite_cfg['TP']*100:.2f}% SL={elite_cfg['SL']*100:.0f}% lev={percoin_configs.elite_leverage()}x")
+
     # Confidence scoring: 0-100 → sizing multiplier (0.5x / 1.0x / 1.5x / 2.0x)
     # OOS: every score tier profitable, use as SIZING not filter. Every signal trades.
     try:
@@ -1797,12 +1873,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
         size_mult = confidence.size_multiplier(conf_score)
         # TIER GATING: per-tier minimum conf threshold + size dampener
-        tier = tier_filter.get_tier(coin)
-        tier_conf_min = tier_filter.conf_threshold(coin)
-        tier_size = tier_filter.tier_size_mult(coin)
-        if conf_score < tier_conf_min:
-            log(f"{coin} {sig} SKIP — tier {tier} requires conf>={tier_conf_min}, got {conf_score}")
-            return
+        # Skip tier gating in elite mode — elite coins already pre-validated
+        if not percoin_configs.ELITE_MODE:
+            tier = tier_filter.get_tier(coin)
+            tier_conf_min = tier_filter.conf_threshold(coin)
+            tier_size = tier_filter.tier_size_mult(coin)
+            if conf_score < tier_conf_min:
+                log(f"{coin} {sig} SKIP — tier {tier} requires conf>={tier_conf_min}, got {conf_score}")
+                return
+        else:
+            tier = 0  # elite
+            tier_size = 1.0  # elite coins trade at full elite size
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
         risk_mult = risk_mult * size_mult * adapt * tier_size
