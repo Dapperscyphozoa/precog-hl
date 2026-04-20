@@ -998,10 +998,10 @@
     "atr_min": 0.0,
     "atr_max": 2.0,
     "cooldown_sec": 0,
-    "trail_activate": 0.2,
+    "trail_activate": 0.5,
     "trail_distance": 0.1,
-    "sl_pct": 1.0,
-    "vix_filter": "none",
+    "sl_pct": 1.4,
+    "vix_filter": "over18_only",
     "instrument_type": "safe_haven",
     "vix_overlay": {
       "low_vix_mult": 0.8,
@@ -1010,9 +1010,14 @@
       "panic_mult": 1.5
     },
     "confidence": "high",
-    "sample_size": 4,
-    "backtest_net": 4.68,
-    "backtest_wr": 50.0,
-    "backtest_avg": 1.17
+    "sample_size": 6,
+    "backtest_net": 10.95,
+    "backtest_wr": 67.0,
+    "backtest_avg": 1.825,
+    "session_filter": "all",
+    "xau_align": "none",
+    "xag_align": "none",
+    "counter_trend_fade": false,
+    "_optimized": "extended_grid_2026-04-21"
   }
 }
