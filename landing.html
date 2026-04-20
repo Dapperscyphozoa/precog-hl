@@ -129,16 +129,7 @@ body::after {
 .flicker     { animation: flicker 5s infinite; }
 
 /* Back-half rings: dimmer (behind orb), keep spinning on own axis */
-/* Back rings: ghosted (lighter stroke, thinner, dimmer) */
-.ring-back  { opacity: 0.18; stroke-width: 0.5 !important; }
-/* Front rings: solid + bold */
-.ring-front { opacity: 0.9;  stroke-width: 1.2 !important; }
-.ring-back.ring-3d-1,  .ring-front.ring-3d-1  { animation: spin-cw  22s linear infinite; }
-.ring-back.ring-3d-2,  .ring-front.ring-3d-2  { animation: spin-ccw 16s linear infinite; }
-.ring-back.ring-3d-3,  .ring-front.ring-3d-3  { animation: spin-cw  30s linear infinite; }
-.ring-back.ring-3d-4,  .ring-front.ring-3d-4  { animation: spin-ccw 18s linear infinite; }
-.ring-back.ring-3d-5,  .ring-front.ring-3d-5  { animation: spin-cw  26s linear infinite; }
-.ring-back.ring-3d-6,  .ring-front.ring-3d-6  { animation: spin-ccw 40s linear infinite; }
+/* Ring depth is now handled by gradient stroke (top=pale/behind, bottom=bold/front) */
 
 /* GRID PANELS */
 .grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 24px; margin-bottom: 32px; }
@@ -341,6 +332,23 @@ body::after {
                         <stop offset="50%" stop-color="#07080a" stop-opacity="0"/>
                         <stop offset="100%" stop-color="#000000" stop-opacity="0.5"/>
                     </linearGradient>
+                    <!-- RING DEPTH: top = pale/behind orb, bottom = bold/in front of orb -->
+                    <linearGradient id="ringDepth" x1="0%" y1="0%" x2="0%" y2="100%" gradientUnits="objectBoundingBox">
+                        <stop offset="0%"   stop-color="#b8ff2f" stop-opacity="0.15"/>
+                        <stop offset="40%"  stop-color="#b8ff2f" stop-opacity="0.3"/>
+                        <stop offset="55%"  stop-color="#b8ff2f" stop-opacity="0.55"/>
+                        <stop offset="100%" stop-color="#b8ff2f" stop-opacity="1"/>
+                    </linearGradient>
+                    <linearGradient id="ringDepthChrome" x1="0%" y1="0%" x2="0%" y2="100%" gradientUnits="objectBoundingBox">
+                        <stop offset="0%"   stop-color="#c8ccd4" stop-opacity="0.12"/>
+                        <stop offset="55%"  stop-color="#c8ccd4" stop-opacity="0.45"/>
+                        <stop offset="100%" stop-color="#c8ccd4" stop-opacity="0.9"/>
+                    </linearGradient>
+                    <linearGradient id="ringDepthCyan" x1="0%" y1="0%" x2="0%" y2="100%" gradientUnits="objectBoundingBox">
+                        <stop offset="0%"   stop-color="#00e5ff" stop-opacity="0.12"/>
+                        <stop offset="55%"  stop-color="#00e5ff" stop-opacity="0.45"/>
+                        <stop offset="100%" stop-color="#00e5ff" stop-opacity="0.9"/>
+                    </linearGradient>
                     <filter id="glow">
                         <feGaussianBlur stdDeviation="2"/>
                         <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
@@ -458,21 +466,27 @@ body::after {
                     <circle cx="430" cy="380" r="6"/>
                 </g>
 
-                <!-- ═══ BACK HALF OF GYRO RINGS (behind orb) ═══ -->
-                <g fill="none" stroke-width="0.9">
-                    <ellipse class="ring-3d-4 ring-back" cx="300" cy="300" rx="200" ry="56" stroke="#b8ff2f" opacity="0.25"/>
-                    <ellipse class="ring-3d-5 ring-back" cx="300" cy="300" rx="56" ry="200" stroke="#b8ff2f" opacity="0.25"/>
-                    <ellipse class="ring-3d-1 ring-back" cx="300" cy="300" rx="210" ry="70" transform="rotate(45 300 300)" stroke="#c8ccd4" opacity="0.2"/>
-                    <ellipse class="ring-3d-2 ring-back" cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.2"/>
-                    <ellipse class="ring-3d-3 ring-back" cx="300" cy="300" rx="250" ry="32" stroke="#b8ff2f" stroke-width="0.4" opacity="0.15"/>
-                    <ellipse class="ring-3d-6 ring-back" cx="300" cy="300" rx="170" ry="42" stroke="#b8ff2f" opacity="0.18"/>
+                <!-- ═══ GYRO RINGS (gradient stroke: top=behind/pale, bottom=front/bold) ═══ -->
+                <g fill="none" stroke-width="1.2">
+                    <ellipse class="ring-3d-4" cx="300" cy="300" rx="200" ry="56" stroke="url(#ringDepth)"/>
+                    <ellipse class="ring-3d-5" cx="300" cy="300" rx="56" ry="200" stroke="url(#ringDepth)"/>
+                    <ellipse class="ring-3d-1" cx="300" cy="300" rx="210" ry="70" transform="rotate(45 300 300)" stroke="url(#ringDepthChrome)"/>
+                    <ellipse class="ring-3d-2" cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="url(#ringDepthCyan)"/>
+                    <ellipse class="ring-3d-3" cx="300" cy="300" rx="250" ry="32" stroke="url(#ringDepth)" stroke-width="0.8"/>
+                    <ellipse class="ring-3d-6" cx="300" cy="300" rx="170" ry="42" stroke="url(#ringDepth)" stroke-width="0.9"/>
                     <!-- Telemetry nodes on ring-3d-3 (separate rotating group, locked to centre) -->
-                    <g class="ring-3d-3 ring-back">
-                        <g fill="#b8ff2f" opacity="0.4">
+                    <g class="ring-3d-3">
+                        <g fill="#b8ff2f" opacity="0.7">
                             <circle cx="550" cy="300" r="3"/>
                             <circle cx="300" cy="268" r="2.5"/>
                             <circle cx="50"  cy="300" r="3"/>
                             <circle cx="300" cy="332" r="2.5"/>
+                        </g>
+                        <g font-family="JetBrains Mono" font-size="7" fill="#b8ff2f" opacity="0.55" letter-spacing="1.5">
+                            <text x="562" y="303">PIVOT</text>
+                            <text x="300" y="258" text-anchor="middle">PULL</text>
+                            <text x="38"  y="303" text-anchor="end">WALL</text>
+                            <text x="300" y="350" text-anchor="middle">LIQ</text>
                         </g>
                     </g>
                 </g>
@@ -514,31 +528,6 @@ body::after {
 
                 <!-- Contact shadow on floor -->
                 <ellipse cx="300" cy="455" rx="108" ry="12" fill="#000000" opacity="0.28" filter="url(#glow)"/>
-
-                <!-- ═══ FRONT HALF OF GYRO RINGS (over orb — true 3D illusion) ═══ -->
-                <g fill="none" stroke-width="0.9">
-                    <ellipse class="ring-3d-4 ring-front" cx="300" cy="300" rx="200" ry="56" stroke="#b8ff2f" opacity="0.7"/>
-                    <ellipse class="ring-3d-5 ring-front" cx="300" cy="300" rx="56" ry="200" stroke="#b8ff2f" opacity="0.7"/>
-                    <ellipse class="ring-3d-1 ring-front" cx="300" cy="300" rx="210" ry="70" transform="rotate(45 300 300)" stroke="#c8ccd4" opacity="0.55"/>
-                    <ellipse class="ring-3d-2 ring-front" cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.55"/>
-                    <ellipse class="ring-3d-3 ring-front" cx="300" cy="300" rx="250" ry="32" stroke="#b8ff2f" stroke-width="0.5" opacity="0.4"/>
-                    <ellipse class="ring-3d-6 ring-front" cx="300" cy="300" rx="170" ry="42" stroke="#b8ff2f" opacity="0.5"/>
-                    <!-- Telemetry nodes + labels (ride with ring-3d-3) -->
-                    <g class="ring-3d-3 ring-front">
-                        <g fill="#b8ff2f" opacity="0.85">
-                            <circle cx="550" cy="300" r="3.5"/>
-                            <circle cx="300" cy="268" r="3"/>
-                            <circle cx="50"  cy="300" r="3.5"/>
-                            <circle cx="300" cy="332" r="3"/>
-                        </g>
-                        <g font-family="JetBrains Mono" font-size="7" fill="#b8ff2f" opacity="0.55" letter-spacing="1.5">
-                            <text x="562" y="303">PIVOT</text>
-                            <text x="300" y="258" text-anchor="middle">PULL</text>
-                            <text x="38"  y="303" text-anchor="end">WALL</text>
-                            <text x="300" y="350" text-anchor="middle">LIQ</text>
-                        </g>
-                    </g>
-                </g>
 
                 <!-- Chamber rings (tight around orb) -->
                 <g fill="none" stroke="#b8ff2f" stroke-width="0.7" opacity="0.25">
