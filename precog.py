@@ -2183,6 +2183,44 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
         log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
         return
+    # PRE-FLIGHT: check withdrawable margin. If near zero, close oldest profitable elite to make room.
+    try:
+        user_state = _cached_user_state()
+        withdrawable = float(user_state.get('withdrawable', 0))
+        if withdrawable < proposed * 0.5:  # less than half the proposed margin available
+            # Find elite position with best profit to close and free margin
+            candidates = []
+            for k, lp in live_positions.items():
+                if not percoin_configs.is_elite(k): continue
+                sz = lp.get('size', 0)
+                entry = lp.get('entry', 0)
+                if sz == 0 or not entry: continue
+                try:
+                    mid = get_mid(k)
+                    if not mid: continue
+                    pside = 'L' if sz > 0 else 'S'
+                    fav_k = (mid - entry) / entry if pside == 'L' else (entry - mid) / entry
+                    if fav_k > 0.003:  # at least 0.3% profit — don't close losers unnecessarily
+                        candidates.append((fav_k, k, abs(sz) * entry))
+                except Exception: pass
+            if candidates:
+                # Close highest-profit position first
+                candidates.sort(reverse=True)
+                fav_k, k, notional = candidates[0]
+                try:
+                    pnl = close(k)
+                    log(f"MARGIN-CLOSE {k} +{fav_k*100:.2f}% (freed ~${notional:.0f} notional for {coin} {sig})")
+                    state['positions'].pop(k, None)
+                    if pnl is not None:
+                        state['last_pnl_close'] = pnl
+                        state['consec_losses'] = 0
+                except Exception as e:
+                    log(f"margin-close err {k}: {e}")
+            else:
+                log(f"{coin} {sig} SKIP — withdrawable ${withdrawable:.1f} < need ${proposed:.1f}, no profitable elite to close")
+                return
+    except Exception as e:
+        log(f"{coin} preflight err: {e}")
 
     # Per-ticker gate check — uses candles already fetched above (no extra API call)
     try:
