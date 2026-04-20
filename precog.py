@@ -1914,34 +1914,25 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                             return
                 except Exception: pass
 
-            # ELITE MODE: Fixed per-coin TP + 5% hard SL (overrides all other logic)
+            # ELITE MODE: TP-Lock + Trail 0.8% (shipped Apr 21 2026)
+            # Logic:
+            #   1. Hard SL at -5% (elite_cfg['SL']) before price ever reaches TP
+            #   2. Once price hits +TP, lock SL to +TP (minimum profit secured)
+            #   3. Position continues running; trail at peak - 0.8% (whichever higher: TP_lock or trail_stop)
+            #   4. Exit only when price retraces to effective SL
             if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
                 elite_cfg = percoin_configs.get_config(coin)
                 age = time.time() - (cur.get('opened_at') or time.time())
-                # Fixed TP — exit as soon as profit >= TP
-                if fav >= elite_cfg['TP']:
-                    # FUNDING ARB: if funding is paying us & we're in profit, extend hold
-                    try:
-                        extend, reason = funding_arb.should_extend_hold(coin, side, age, fav * 100)
-                    except Exception:
-                        extend, reason = (False, "err")
-                    if extend:
-                        log(f"{coin} ELITE TP HIT +{fav*100:.2f}% but FUNDING HOLD: {reason}")
-                        # Promote trailing: move to tighter trail, hold until funding flips
-                        cur['funding_hold'] = True
-                        # Don't exit; fall through to trail logic below
-                    else:
-                        prev_pos = dict(cur)
-                        pnl_pct = close(coin)
-                        if pnl_pct is not None:
-                            record_close(prev_pos, coin, pnl_pct, state)
-                            state['consec_losses'] = 0
-                            state['last_pnl_close'] = pnl_pct
-                        log(f"{coin} ELITE TP HIT +{fav*100:.2f}% (target {elite_cfg['TP']*100:.2f}%)")
-                        state['positions'].pop(coin, None)
-                        return
-                # Fixed SL — 5%
-                if fav <= -elite_cfg['SL']:
+                TRAIL_PCT = 0.008  # 0.8% trail from peak after TP activation
+                # Track peak favorable excursion
+                peak = cur.get('fav_peak', fav)
+                if fav > peak: peak = fav; cur['fav_peak'] = peak
+                # Check if TP has been reached (activates lock)
+                if not cur.get('tp_locked') and peak >= elite_cfg['TP']:
+                    cur['tp_locked'] = True
+                    log(f"{coin} TP-LOCK ACTIVATED @ +{peak*100:.2f}% (lock at +{elite_cfg['TP']*100:.2f}%)")
+                # Hard SL at -elite_cfg['SL'] — only active BEFORE lock activates
+                if not cur.get('tp_locked') and fav <= -elite_cfg['SL']:
                     prev_pos = dict(cur)
                     pnl_pct = close(coin)
                     if pnl_pct is not None:
@@ -1951,22 +1942,30 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     log(f"{coin} ELITE SL HIT {fav*100:.2f}% (limit -{elite_cfg['SL']*100:.0f}%)")
                     state['positions'].pop(coin, None)
                     return
-                # If funding hold is active, implement micro-trail at current peak
-                if cur.get('funding_hold'):
-                    peak = cur.get('funding_peak', fav)
-                    if fav > peak: cur['funding_peak'] = fav; peak = fav
-                    # Trail 0.3% below peak — tight, let funding accumulate
-                    if peak > elite_cfg['TP'] and (peak - fav) >= 0.003:
+                # Post-lock: effective exit = MAX of (TP lock level, peak - TRAIL)
+                if cur.get('tp_locked'):
+                    tp_lock_level = elite_cfg['TP']
+                    trail_level = peak - TRAIL_PCT
+                    effective_sl = max(tp_lock_level, trail_level)
+                    if fav <= effective_sl:
+                        # Funding arb override: if funding pays us & position up, extend hold
+                        try:
+                            extend, reason = funding_arb.should_extend_hold(coin, side, age, fav * 100)
+                        except Exception:
+                            extend, reason = (False, "err")
+                        if extend and fav > tp_lock_level:
+                            log(f"{coin} TP-LOCK would exit +{fav*100:.2f}% but FUNDING HOLD: {reason}")
+                            return
                         prev_pos = dict(cur)
                         pnl_pct = close(coin)
                         if pnl_pct is not None:
                             record_close(prev_pos, coin, pnl_pct, state)
                             state['consec_losses'] = 0
                             state['last_pnl_close'] = pnl_pct
-                        log(f"{coin} FUNDING-HOLD EXIT +{fav*100:.2f}% (peak +{peak*100:.2f}%)")
+                        exit_type = 'TP-LOCK' if effective_sl == tp_lock_level else 'TRAIL'
+                        log(f"{coin} {exit_type} EXIT +{fav*100:.2f}% (peak +{peak*100:.2f}%, exit {effective_sl*100:.2f}%)")
                         state['positions'].pop(coin, None)
                         return
-                # Skip default trailing for elite — pure fixed TP/SL
                 return
 
             # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
