@@ -30,15 +30,6 @@ import bybit_lead
 import funding_filter
 import btc_correlation
 import confidence
-import tier_filter
-import percoin_configs
-import tier_killswitch
-import coin_killswitch
-import coin_sizing
-import regime_detector
-import funding_arb
-import forward_walk
-import leverage_resolver
 import spoof_detection
 import session_scaler
 import whale_filter
@@ -102,66 +93,6 @@ def record_close(pos, coin, pnl_pct, state):
     if win: stats['total_wins'] += 1
     else: stats['total_losses'] += 1
     stats['total_pnl'] += pnl_pct
-
-    # TIER KILLSWITCH: track per-tier rolling PnL and auto-disable on breach
-    try:
-        tier_name = percoin_configs.get_tier(coin)
-        if tier_name:
-            equity_before = pos.get('equity_before', state.get('last_equity', 1000))
-            equity_after = state.get('last_equity', equity_before)
-            # equity_delta_pct reconstructed from pnl_pct + position notional if needed
-            notional_pct = pos.get('notional_pct', 0.5)  # fallback 50%
-            equity_delta = (pnl_pct / 100) * notional_pct
-            equity_after = equity_before * (1 + equity_delta)
-            was_disabled = tier_killswitch.record_trade_close(tier_name, pnl_pct, equity_before, equity_after)
-            if was_disabled:
-                print(f"[KILLSWITCH] Tier {tier_name} auto-disabled at 24h rolling PnL breach", flush=True)
-    except Exception as e:
-        print(f"[killswitch] err: {e}", flush=True)
-
-    # PER-COIN KILLSWITCH: auto-disable individual cold coins
-    try:
-        cfg = percoin_configs.get_config(coin)
-        if cfg:
-            # Expected WR — approximate from tier (PURE 100, NINETY_99 91, EIGHTY_89 83, SEVENTY_79 74)
-            tier_name = percoin_configs.get_tier(coin)
-            exp_wr = {'PURE':100, 'NINETY_99':91, 'EIGHTY_89':83, 'SEVENTY_79':74}.get(tier_name, 75)
-            was_off = coin_killswitch.record_trade_close(coin, pnl_pct, expected_wr_pct=exp_wr)
-            if was_off:
-                print(f"[COIN-KILLSWITCH] {coin} auto-disabled", flush=True)
-    except Exception: pass
-
-    # DYNAMIC COIN SIZING: scale up hot coins, down cold coins
-    try:
-        cfg = percoin_configs.get_config(coin)
-        if cfg:
-            tier_name = percoin_configs.get_tier(coin)
-            # OOS expected trades/day varies per coin; use rough per-tier avg
-            tpd_expected = {'PURE':0.4, 'NINETY_99':0.9, 'EIGHTY_89':0.6, 'SEVENTY_79':1.9}.get(tier_name, 0.5)
-            exp_wr = {'PURE':100, 'NINETY_99':91, 'EIGHTY_89':83, 'SEVENTY_79':74}.get(tier_name, 75)
-            coin_sizing.record_trade(coin, pnl_pct > 0, pnl_pct, tpd_expected, exp_wr)
-    except Exception: pass
-
-    # FORWARD WALK: log every closed trade with full context for weekly validation
-    try:
-        tier_name = percoin_configs.get_tier(coin) or 'NONE'
-        cfg_snap = percoin_configs.get_config(coin) or {}
-        forward_walk.record_trade(
-            coin=coin, tier=tier_name, side=side,
-            entry=pos.get('entry', 0), exit_price=pos.get('last_mid', 0),
-            pnl_pct=pnl_pct, entry_ts=pos.get('opened_at', now), exit_ts=now,
-            signal_engine=engine,
-            config_snapshot={'TP': cfg_snap.get('TP'), 'SL': cfg_snap.get('SL'),
-                             'sigs': cfg_snap.get('sigs'), 'flt': cfg_snap.get('flt'),
-                             'RH': cfg_snap.get('RH'), 'RL': cfg_snap.get('RL')},
-            leverage=pos.get('lev', 10),
-            notional_pct=pos.get('notional_pct', 0.5),
-            size_mult=pos.get('size_mult', 1.0),
-            equity_before=pos.get('equity_before', 0),
-            equity_after=state.get('last_equity', 0),
-        )
-    except Exception as e:
-        pass  # never block on log error
 
 def wr_to_mult(wr, n, min_n=5):
     """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
@@ -305,10 +236,39 @@ def _mt4_atr_pct(clean_ticker):
     except Exception as _e:
         return None
 
+# v4.6: Quality filters - only queue high-WR tickers, block known losers
+MT4_WHITELIST = {
+    # Tier 1: 100% WR in backtest + live validation
+    'XAUUSD', 'XAGUSD', 'XPTUSD', 'XPDUSD',
+    'SPOTCRUDE', 'SPOTBRENT', 'NATGAS',
+    # Tier 2: solid WR on backtest (small sample, monitor)
+    'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'NZDUSD',
+    'USDCAD', 'USDCHF',
+    'AUDCAD', 'AUDCHF', 'AUDJPY', 'AUDNZD',
+    'GBPAUD', 'GBPCHF', 'GBPNZD',
+    'EURAUD', 'EURCAD',
+    'NZDCAD',
+}
+# Explicit block - known losers or unsafe
+MT4_BLOCKLIST = {
+    'COPPER',       # 0/3 WR today, -1.81% total
+    'CORN', 'WHEAT', 'SOYBEANS',   # minlot 1.0 = unsafe at $1.4k
+    'UK100', 'US30', 'US500', 'US2000', 'GER40', 'JPN225', 'HK50', 'NAS100',  # minlot 0.1 unsafe
+    'SUGAR', 'COFFEE',  # minlot 0.1 unsafe
+    'VIX', 'USDX', 'EURX', 'USDCNH',  # niche instruments
+    'EURGBP', 'CADCHF', 'CADJPY', 'CHFJPY',  # net losers today
+}
+
 def _mt4_filter_pass(clean_ticker):
     """Returns (passed: bool, reason: str). Reason is empty on pass."""
     if not MT4_FILTERS_ENABLED:
         return True, ''
+    t = clean_ticker.upper()
+    # Hard blocks first
+    if t in MT4_BLOCKLIST:
+        return False, f'BLOCKED ({t})'
+    if t not in MT4_WHITELIST:
+        return False, f'NOT_WHITELISTED ({t})'
     now = time.time()
     # Cooldown check
     last = _mt4_last_signal.get(clean_ticker)
@@ -433,122 +393,6 @@ def stats_reset():
                       'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
     save_state(state)
     return jsonify({'status':'stats reset'})
-
-@app.route('/resolver', methods=['GET'])
-def resolver_endpoint():
-    """Show actual lev/risk per coin after HL cap resolution."""
-    try:
-        tier_cfg = {
-            'PURE':       {'target_lev': 20, 'target_risk': 0.10, 'coins': list(percoin_configs.PURE_14.keys())},
-            'NINETY_99':  {'target_lev': 15, 'target_risk': 0.05, 'coins': list(percoin_configs.NINETY_99.keys())},
-            'EIGHTY_89':  {'target_lev': 12, 'target_risk': 0.05, 'coins': list(percoin_configs.EIGHTY_89.keys())},
-            'SEVENTY_79': {'target_lev': 12, 'target_risk': 0.05, 'coins': list(percoin_configs.SEVENTY_79.keys())},
-        }
-        hl_max = leverage_map.get_cache()
-        resolved = leverage_resolver.resolve_all(tier_cfg, hl_max)
-        # Sort by tier then coin
-        return jsonify({
-            'resolved': resolved,
-            'ceilings': leverage_resolver.TIER_RISK_CEILING,
-        })
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/coin_killswitch', methods=['GET'])
-def coin_killswitch_endpoint():
-    """Show per-coin killswitch status."""
-    try:
-        return jsonify(coin_killswitch.status())
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/coin_killswitch/enable/<coin>', methods=['POST'])
-def coin_killswitch_enable(coin):
-    ok = coin_killswitch.manual_enable(coin)
-    return jsonify({'coin': coin, 'enabled': ok})
-
-@app.route('/coin_killswitch/disable/<coin>', methods=['POST'])
-def coin_killswitch_disable(coin):
-    ok = coin_killswitch.manual_disable(coin, 'manual via API')
-    return jsonify({'coin': coin, 'disabled': ok})
-
-@app.route('/coin_sizing', methods=['GET'])
-def coin_sizing_endpoint():
-    """Show dynamic per-coin size multipliers."""
-    try:
-        return jsonify(coin_sizing.status())
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/killswitch', methods=['GET'])
-def killswitch_endpoint():
-    """Show per-tier 24h rolling PnL + killswitch status."""
-    try:
-        return jsonify(tier_killswitch.status())
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/killswitch/enable/<tier>', methods=['POST'])
-def killswitch_enable(tier):
-    ok = tier_killswitch.manual_enable(tier)
-    return jsonify({'tier': tier, 'enabled': ok})
-
-@app.route('/killswitch/disable/<tier>', methods=['POST'])
-def killswitch_disable(tier):
-    ok = tier_killswitch.manual_disable(tier, 'manual via API')
-    return jsonify({'tier': tier, 'disabled': ok})
-
-@app.route('/regime', methods=['GET'])
-def regime_endpoint():
-    """Current market regime detection."""
-    try:
-        return jsonify(regime_detector.get_regime())
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/fwv', methods=['GET'])
-def fwv_endpoint():
-    """Forward-walk validation: actual live trade performance vs OOS expectations."""
-    try:
-        hours = int(request.args.get('hours', 168))
-        return jsonify({
-            'by_tier': forward_walk.tier_performance(hours_back=hours),
-            'by_coin': forward_walk.coin_performance(hours_back=hours),
-            'window_hours': hours,
-        })
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/elite', methods=['GET'])
-def elite_endpoint():
-    """Show elite mode status + 14-coin config."""
-    try:
-        s = percoin_configs.stats()
-        s['configs'] = percoin_configs.PURE_14
-        return jsonify(s)
-    except Exception as e:
-        return jsonify({'err': str(e)})
-
-@app.route('/tiers', methods=['GET'])
-def tiers_endpoint():
-    """Show current tier assignments for HL universe."""
-    try:
-        s = tier_filter.stats()
-        if not s:
-            tier_filter.refresh_tiers()
-            s = tier_filter.stats()
-        # Per-tier coin lists
-        out = {'stats': s, 'thresholds': {
-            'conf_min': tier_filter.TIER_CONF_MIN,
-            'size_mult': tier_filter.TIER_SIZE_MULT
-        }, 'coins': {1:[],2:[],3:[],4:[]}}
-        if tier_filter._state['tiers']:
-            for c, t in tier_filter._state['tiers'].items():
-                out['coins'][t].append(c)
-            for t in [1,2,3,4]: out['coins'][t].sort()
-        return jsonify(out)
-    except Exception as e:
-        return jsonify({'err': str(e)})
 
 @app.route('/stats', methods=['GET'])
 def stats_endpoint():
@@ -1148,11 +992,7 @@ def trend_gate(coin, side):
 USE_GRID_GATE = False  # overfit layer disabled; V3 + ATR-min do the filtering
 
 def apply_ticker_gate(coin, side, price, candles):
-    """V3 trend + ATR-min filter. Returns True if passes.
-    ELITE coins bypass V3 gate (already OOS-validated, V3 blocks ~80% of their good setups)."""
-    # ELITE coins skip V3 — their per-coin filter (EMA200/ADX) is the validator
-    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
-        return True
+    """V3 trend + ATR-min filter. Returns True if passes."""
     # EMERGENCY: directional imbalance check — if 10+ shorts already open and BTC up, block new shorts
     try:
         if side == 'SELL':
@@ -1521,53 +1361,6 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
 
-def bb_signal(candles, coin=None):
-    """Bollinger Band rejection signal. Mirrors OOS tuner logic.
-    BUY: low breaks lower BB (2 SD), close back above lower BB, RSI near oversold
-    SELL: high breaks upper BB (2 SD), close back below upper BB, RSI near overbought
-    Returns (side, bar_ts) or (None, None)."""
-    if len(candles) < 40: return None, None
-    h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
-    N = len(cl); BB_P = 20
-    r14 = rsi_calc(cl, 14)
-    RL = BP['rsi_lo']; RH = SP['rsi_hi']
-    for i in range(max(BB_P+5, N-SCAN_BARS), N):
-        if r14[i] is None: continue
-        window = cl[i-BB_P:i]
-        mean = sum(window)/BB_P
-        var = sum((x-mean)**2 for x in window)/BB_P
-        sd = var**0.5
-        if sd <= 0: continue
-        upper = mean + 2*sd; lower = mean - 2*sd
-        bar_ts = candles[i][0]
-        # BUY: pierced lower BB, closed back above, RSI in oversold zone
-        if l[i] <= lower and cl[i] > lower and r14[i] < RL + 5:
-            return 'BUY', bar_ts
-        # SELL: pierced upper BB, closed back below, RSI in overbought zone
-        if h[i] >= upper and cl[i] < upper and r14[i] > RH - 5:
-            return 'SELL', bar_ts
-    return None, None
-
-def ib_signal(candles, coin=None):
-    """Inside Bar breakout signal. Two consecutive inside bars, then breakout.
-    BUY: close breaks above prior inner bar high
-    SELL: close breaks below prior inner bar low
-    Returns (side, bar_ts) or (None, None)."""
-    if len(candles) < 10: return None, None
-    h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
-    N = len(cl)
-    for i in range(max(5, N-SCAN_BARS), N):
-        # Two consecutive inside bars before current
-        if i < 4: continue
-        inside1 = h[i-1] < h[i-2] and l[i-1] > l[i-2]   # bar i-1 inside bar i-2
-        inside2 = h[i-2] < h[i-3] and l[i-2] > l[i-3]   # bar i-2 inside bar i-3
-        if not (inside1 and inside2): continue
-        bar_ts = candles[i][0]
-        # Breakout on current bar
-        if cl[i] > h[i-1]: return 'BUY', bar_ts
-        if cl[i] < l[i-1]: return 'SELL', bar_ts
-    return None, None
-
 # ═══════════════════════════════════════════════════════
 # HL INTERFACE
 # ═══════════════════════════════════════════════════════
@@ -1660,20 +1453,6 @@ def get_funding_rate(coin):
     return 0
 
 def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
-    # ELITE: use leverage_resolver to find actual (lev, risk) that respects HL caps
-    #        while preserving tier target notional up to safety ceiling
-    if percoin_configs.ELITE_MODE and coin and percoin_configs.is_elite(coin):
-        tier_name = percoin_configs.get_tier(coin)
-        target_lev, target_risk = percoin_configs.get_sizing(coin)
-        hl_max = leverage_map.get_max(coin, default=target_lev)
-        actual_lev, actual_risk, actual_notional, ceiling_hit = leverage_resolver.resolve(
-            coin, target_lev, target_risk, hl_max, tier_name)
-        raw = equity * actual_risk * risk_mult * actual_lev / px
-        if raw>=100: return round(raw,0)
-        if raw>=10:  return round(raw,1)
-        if raw>=1:   return round(raw,2)
-        if raw>=0.1: return round(raw,3)
-        return round(raw,4)
     # Per-coin leverage (BTC/ETH 20x, alts 3-10x)
     actual_lev = leverage_map.get_max(coin, default=LEV) if coin else LEV
     # News risk multiplier
@@ -1723,7 +1502,7 @@ def set_isolated_leverage(coin):
         log(f"lev set err {coin}: {e}")
 
 def place(coin, is_buy, size):
-    """HL-compliant price rounding + smart maker/taker blend using Bybit directional bias."""
+    """HL-compliant price rounding + maker/taker handling."""
     px = get_mid(coin)
     if not px: return None
     set_isolated_leverage(coin)
@@ -1731,35 +1510,8 @@ def place(coin, is_buy, size):
     if size <= 0:
         log(f"{coin} size rounded to 0 — skip"); return None
 
-    side = 'BUY' if is_buy else 'SELL'
-
-    # SMART ENTRY — Bybit leads HL by ~300ms on alts.
-    # If Bybit is moving hard in OUR direction, market's about to follow → TAKE IMMEDIATELY (taker)
-    # If Bybit is moving AGAINST us, we might catch better price → wait as maker
-    # If no Bybit signal, default to maker at edge price
-    try:
-        bias = bybit_lead.direction_bias(coin)  # +1 / 0 / -1
-    except Exception:
-        bias = 0
-    our_dir = 1 if is_buy else -1
-    force_taker = (bias == our_dir)  # Bybit pushing our way → don't wait
-
-    if force_taker:
-        # Immediate taker: HL hasn't caught up yet, enter at market + 0.3% slippage cap
-        slip_px = round_price(coin, px * (1.003 if is_buy else 0.997))
-        try:
-            r = exchange.order(coin, is_buy, size, slip_px, {'limit':{'tif':'Ioc'}}, reduce_only=False)
-            status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
-            if 'filled' in status:
-                log(f"TAKER-LEAD {coin} {side} {size}@~{px} (Bybit bias aligned)")
-                return float(status['filled'].get('avgPx', slip_px))
-            if 'error' not in status:
-                log(f"TAKER-LEAD {coin} partial: {status}")
-        except Exception as e:
-            log(f"taker-lead err {coin}: {e}")
-        # Fall through to maker if taker-lead failed
-
     # Bybit-lead limit: capture HL lag using Bybit's current price
+    side = 'BUY' if is_buy else 'SELL'
     edge = bybit_lead.compute_edge_price(coin, side, px)
     if edge:
         maker_px = round_price(coin, edge)
@@ -1877,31 +1629,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
     signal_engine = 'PIVOT' if sig else None
-
-    # For ELITE coins: if PIVOT not allowed for this coin, try BB and IB engines
-    # Each coin's allowed sigs list comes from OOS tuning
-    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
-        elite_cfg_check = percoin_configs.get_config(coin)
-        allowed = set(elite_cfg_check.get('sigs', [])) if elite_cfg_check else set()
-        # If PIVOT signal fired but coin doesn't allow PV, drop it
-        if sig == 'BUY' or sig == 'SELL':
-            if 'PV' not in allowed:
-                sig = None; signal_engine = None
-        # Try BB_REJ if allowed and nothing fired
-        if not sig and 'BB' in allowed:
-            try:
-                sig, bar_ts = bb_signal(candles, coin=coin)
-                if sig: signal_engine = 'BB_REJ'
-            except Exception as e:
-                log(f"bb_signal err {coin}: {e}")
-        # Try INSIDE_BAR if allowed and nothing fired
-        if not sig and 'IB' in allowed:
-            try:
-                sig, bar_ts = ib_signal(candles, coin=coin)
-                if sig: signal_engine = 'INSIDE_BAR'
-            except Exception as e:
-                log(f"ib_signal err {coin}: {e}")
-
     # Opposite-signal exit: if we hold opposite-side position, close it first
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
@@ -1969,80 +1696,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             entry = cur['entry']
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
-
-            # LIQUIDATION CASCADE in-position check: if cascade AGAINST our position while in profit, secure gains
-            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin) and fav > 0:
-                try:
-                    cascade = liquidation_ws.get_cascade(coin, max_age_sec=180)
-                    if cascade:
-                        # Our LONG + cascade BUY (shorts liq'd = spike up is faked, reversal coming) = close
-                        # Our SHORT + cascade SELL (longs liq'd = crash is faked, bounce coming) = close
-                        adverse = (side == 'L' and cascade.get('side') == 'BUY') or \
-                                  (side == 'S' and cascade.get('side') == 'SELL')
-                        if adverse:
-                            prev_pos = dict(cur)
-                            pnl_pct = close(coin)
-                            if pnl_pct is not None:
-                                record_close(prev_pos, coin, pnl_pct, state)
-                                state['last_pnl_close'] = pnl_pct
-                            log(f"{coin} CASCADE-CLOSE +{fav*100:.2f}% (adverse cascade ${cascade.get('total_usd',0)/1e6:.1f}M)")
-                            state['positions'].pop(coin, None)
-                            return
-                except Exception: pass
-
-            # ELITE MODE: TP-Lock + Trail 0.8% (shipped Apr 21 2026)
-            # Logic:
-            #   1. Hard SL at -5% (elite_cfg['SL']) before price ever reaches TP
-            #   2. Once price hits +TP, lock SL to +TP (minimum profit secured)
-            #   3. Position continues running; trail at peak - 0.8% (whichever higher: TP_lock or trail_stop)
-            #   4. Exit only when price retraces to effective SL
-            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
-                elite_cfg = percoin_configs.get_config(coin)
-                age = time.time() - (cur.get('opened_at') or time.time())
-                TRAIL_PCT = 0.008  # 0.8% trail from peak after TP activation
-                # Track peak favorable excursion
-                peak = cur.get('fav_peak', fav)
-                if fav > peak: peak = fav; cur['fav_peak'] = peak
-                # Check if TP has been reached (activates lock)
-                if not cur.get('tp_locked') and peak >= elite_cfg['TP']:
-                    cur['tp_locked'] = True
-                    log(f"{coin} TP-LOCK ACTIVATED @ +{peak*100:.2f}% (lock at +{elite_cfg['TP']*100:.2f}%)")
-                # Hard SL at -elite_cfg['SL'] — only active BEFORE lock activates
-                if not cur.get('tp_locked') and fav <= -elite_cfg['SL']:
-                    prev_pos = dict(cur)
-                    pnl_pct = close(coin)
-                    if pnl_pct is not None:
-                        record_close(prev_pos, coin, pnl_pct, state)
-                        state['consec_losses'] += 1
-                        state['last_pnl_close'] = pnl_pct
-                    log(f"{coin} ELITE SL HIT {fav*100:.2f}% (limit -{elite_cfg['SL']*100:.0f}%)")
-                    state['positions'].pop(coin, None)
-                    return
-                # Post-lock: effective exit = MAX of (TP lock level, peak - TRAIL)
-                if cur.get('tp_locked'):
-                    tp_lock_level = elite_cfg['TP']
-                    trail_level = peak - TRAIL_PCT
-                    effective_sl = max(tp_lock_level, trail_level)
-                    if fav <= effective_sl:
-                        # Funding arb override: if funding pays us & position up, extend hold
-                        try:
-                            extend, reason = funding_arb.should_extend_hold(coin, side, age, fav * 100)
-                        except Exception:
-                            extend, reason = (False, "err")
-                        if extend and fav > tp_lock_level:
-                            log(f"{coin} TP-LOCK would exit +{fav*100:.2f}% but FUNDING HOLD: {reason}")
-                            return
-                        prev_pos = dict(cur)
-                        pnl_pct = close(coin)
-                        if pnl_pct is not None:
-                            record_close(prev_pos, coin, pnl_pct, state)
-                            state['consec_losses'] = 0
-                            state['last_pnl_close'] = pnl_pct
-                        exit_type = 'TP-LOCK' if effective_sl == tp_lock_level else 'TRAIL'
-                        log(f"{coin} {exit_type} EXIT +{fav*100:.2f}% (peak +{peak*100:.2f}%, exit {effective_sl*100:.2f}%)")
-                        state['positions'].pop(coin, None)
-                        return
-                return
 
             # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
             if fav <= -STOP_LOSS_PCT:
@@ -2125,102 +1778,11 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         return
 
     risk_pct = current_risk_pct(equity)
-    # ELITE: use leverage_resolver for correct risk given HL leverage caps
-    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
-        tier_name = percoin_configs.get_tier(coin)
-        target_lev, target_risk = percoin_configs.get_sizing(coin)
-        hl_max = leverage_map.get_max(coin, default=target_lev)
-        actual_lev, actual_risk, actual_notional, ceiling_hit = leverage_resolver.resolve(
-            coin, target_lev, target_risk, hl_max, tier_name)
-        risk_pct = actual_risk
-        log(f"{coin} resolver: tier={tier_name} target={target_lev}x/{target_risk*100:.0f}% → actual={actual_lev}x/{actual_risk*100:.1f}% notional={actual_notional*100:.0f}%{' CAPPED' if ceiling_hit else ''}")
-        # TIER KILL SWITCH
-        tier_name = percoin_configs.get_tier(coin)
-        if tier_killswitch.is_disabled(tier_name):
-            log(f"{coin} {sig} SKIP — tier {tier_name} KILLSWITCH ACTIVE")
-            return
-        # PER-COIN KILL SWITCH (surgical shutoff for a single cold coin)
-        if coin_killswitch.is_disabled(coin):
-            log(f"{coin} {sig} SKIP — COIN KILLSWITCH ACTIVE")
-            return
-        # REGIME: apply global risk multiplier based on BTC market regime
-        try:
-            regime_mult = regime_detector.get_risk_mult()
-            risk_pct *= regime_mult
-            if regime_mult < 0.9:
-                log(f"{coin} regime={regime_detector.get_regime().get('regime')} risk x{regime_mult}")
-        except Exception as e:
-            log(f"{coin} regime err: {e}")
-        # DYNAMIC PER-COIN SIZING — scales up hot coins, down cold coins
-        try:
-            coin_mult = coin_sizing.get_mult(coin)
-            risk_mult = risk_mult * coin_mult
-            if coin_mult < 0.9 or coin_mult > 1.1:
-                log(f"{coin} coin_sizing mult={coin_mult:.2f}")
-        except Exception as e:
-            log(f"{coin} sizing err: {e}")
-        # LIQUIDATION CASCADE CONFLUENCE: cascade in our direction = boost, against us = skip
-        try:
-            cascade = liquidation_ws.get_cascade(coin, max_age_sec=300)
-            if cascade:
-                # cascade['side'] is the liquidated side: SELL = longs liquidated (price crashed, reversal buy signal)
-                #                                       BUY = shorts liquidated (price spiked, reversal sell signal)
-                # Our signal should fade the liquidated direction.
-                # If cascade SELL (longs liq'd) and we're BUYING → CONFLUENCE (fade down)
-                # If cascade BUY (shorts liq'd) and we're SELLING → CONFLUENCE (fade up)
-                favorable = (cascade.get('side')=='SELL' and sig=='BUY') or (cascade.get('side')=='BUY' and sig=='SELL')
-                if favorable:
-                    risk_mult *= 1.3
-                    log(f"{coin} LIQ CASCADE CONFLUENCE ${cascade.get('total_usd',0)/1e6:.1f}M → 1.3x boost")
-                else:
-                    # cascade AGAINST us - skip entry, likely chop/trap
-                    log(f"{coin} {sig} SKIP — liq cascade against ({cascade.get('side')})")
-                    return
-        except Exception as e:
-            pass  # liq_ws optional
     total_locked = get_total_margin()
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
         log(f"{coin} {sig} SKIP (margin {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}%)")
         return
-    # PRE-FLIGHT: check withdrawable margin. If near zero, close oldest profitable elite to make room.
-    try:
-        user_state = _cached_user_state()
-        withdrawable = float(user_state.get('withdrawable', 0))
-        if withdrawable < proposed * 0.5:  # less than half the proposed margin available
-            # Find elite position with best profit to close and free margin
-            candidates = []
-            for k, lp in live_positions.items():
-                if not percoin_configs.is_elite(k): continue
-                sz = lp.get('size', 0)
-                entry = lp.get('entry', 0)
-                if sz == 0 or not entry: continue
-                try:
-                    mid = get_mid(k)
-                    if not mid: continue
-                    pside = 'L' if sz > 0 else 'S'
-                    fav_k = (mid - entry) / entry if pside == 'L' else (entry - mid) / entry
-                    if fav_k > 0.003:  # at least 0.3% profit — don't close losers unnecessarily
-                        candidates.append((fav_k, k, abs(sz) * entry))
-                except Exception: pass
-            if candidates:
-                # Close highest-profit position first
-                candidates.sort(reverse=True)
-                fav_k, k, notional = candidates[0]
-                try:
-                    pnl = close(k)
-                    log(f"MARGIN-CLOSE {k} +{fav_k*100:.2f}% (freed ~${notional:.0f} notional for {coin} {sig})")
-                    state['positions'].pop(k, None)
-                    if pnl is not None:
-                        state['last_pnl_close'] = pnl
-                        state['consec_losses'] = 0
-                except Exception as e:
-                    log(f"margin-close err {k}: {e}")
-            else:
-                log(f"{coin} {sig} SKIP — withdrawable ${withdrawable:.1f} < need ${proposed:.1f}, no profitable elite to close")
-                return
-    except Exception as e:
-        log(f"{coin} preflight err: {e}")
 
     # Per-ticker gate check — uses candles already fetched above (no extra API call)
     try:
@@ -2234,109 +1796,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
     # if not signal_persistence.check(coin, sig, bar_ts): return
 
-    # ELITE MODE: 14-coin pure 100% WR cluster (shipped Apr 20 2026).
-    # When elite_mode active, ONLY trade coins in PURE_14 with per-coin TP/SL.
-    # 10% equity × 20x leverage = 200% notional per trade.
-    if percoin_configs.ELITE_MODE:
-        if not percoin_configs.is_elite(coin):
-            log(f"{coin} {sig} SKIP — not in elite 14-coin whitelist")
-            return
-        elite_cfg = percoin_configs.get_config(coin)
-        # Verify signal engine matches coin's allowed signals
-        if not percoin_configs.check_signal_allowed(coin, signal_engine):
-            log(f"{coin} {sig} SKIP — engine {signal_engine} not allowed for this coin (allowed: {elite_cfg['sigs']})")
-            return
-        # Apply filter (EMA200 / ADX20/25)
-        # Candles are tuples: (ts, o, h, l, c, v). Compute indicators inline.
-        ema200_val = None; ema50_val = None; adx_val = None; price = 0
-        try:
-            if candles and len(candles) >= 50:
-                closes = [float(x[4]) for x in candles]
-                highs = [float(x[2]) for x in candles]
-                lows = [float(x[3]) for x in candles]
-                price = closes[-1]
-                # EMA50
-                k50 = 2/(50+1)
-                e50 = sum(closes[:50])/50
-                for v in closes[50:]:
-                    e50 = v*k50 + e50*(1-k50)
-                ema50_val = e50
-                # EMA200
-                if len(closes) >= 200:
-                    k200 = 2/(200+1)
-                    e200 = sum(closes[:200])/200
-                    for v in closes[200:]:
-                        e200 = v*k200 + e200*(1-k200)
-                    ema200_val = e200
-                # ADX(14) — simple Wilder
-                if len(closes) >= 30:
-                    period = 14
-                    plus_dm = []; minus_dm = []; trs = []
-                    for i in range(1, len(closes)):
-                        up = highs[i] - highs[i-1]
-                        dn = lows[i-1] - lows[i]
-                        plus_dm.append(up if up > dn and up > 0 else 0)
-                        minus_dm.append(dn if dn > up and dn > 0 else 0)
-                        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
-                        trs.append(tr)
-                    if len(trs) >= period*2:
-                        def wilder(arr, n):
-                            s = sum(arr[:n])
-                            out = [s]
-                            for v in arr[n:]: s = s - s/n + v; out.append(s)
-                            return out
-                        atr = wilder(trs, period)
-                        pdm = wilder(plus_dm, period)
-                        mdm = wilder(minus_dm, period)
-                        dx = []
-                        for a, p, m in zip(atr, pdm, mdm):
-                            if a > 0:
-                                pdi = 100 * p / a; mdi = 100 * m / a
-                                s = pdi + mdi
-                                dx.append(100 * abs(pdi-mdi)/s if s > 0 else 0)
-                        if len(dx) >= period:
-                            adx_v = sum(dx[:period])/period
-                            for v in dx[period:]: adx_v = (adx_v*(period-1) + v)/period
-                            adx_val = adx_v
-        except Exception as e:
-            log(f"{coin} indicator calc err: {e}")
-        side = 1 if sig == 'BUY' else -1
-        if not percoin_configs.check_filter(elite_cfg['flt'], ema200_val, ema50_val, adx_val, side, price):
-            log(f"{coin} {sig} SKIP — failed filter {elite_cfg['flt']}")
-            return
-
-        # EXTRA FILTERS for SEVENTY_79 tier (73% WR → need precision)
-        # 3-layer stack: signal_persistence + wall_confluence HARD gate + BTC correlation strict
-        if percoin_configs.needs_extra_filters(coin):
-            # Filter 1: signal_persistence (2-bar confirm)
-            try:
-                if not signal_persistence.check(coin, sig, bar_ts):
-                    log(f"{coin} {sig} SKIP — signal_persistence (1st bar, staged)")
-                    return
-            except Exception as e:
-                log(f"{coin} persistence err: {e}")
-            # Filter 2: wall_confluence HARD gate — entry must be within 0.3% of verified wall
-            try:
-                wall_ctx = wall_confluence.wall_context(coin, sig, price)
-                if not wall_ctx or wall_ctx.get('dist_pct', 99) > 0.3:
-                    log(f"{coin} {sig} SKIP — no wall confluence (dist>{wall_ctx.get('dist_pct','N/A')}%)")
-                    return
-            except Exception as e:
-                log(f"{coin} wall gate err: {e}")
-            # Filter 3: BTC correlation STRICT — block any signal counter to BTC 1H direction
-            try:
-                btc_st = btc_correlation.get_state()
-                btc_1h = btc_st.get('btc_1h_dir', 0)
-                signal_dir = 1 if sig == 'BUY' else -1
-                if btc_1h != 0 and btc_1h != signal_dir:
-                    log(f"{coin} {sig} SKIP — counter BTC 1h ({btc_1h})")
-                    return
-            except Exception as e:
-                log(f"{coin} btc gate err: {e}")
-            log(f"{coin} {sig} PASSED 3-FILTER STACK (tier SEVENTY_79)")
-
-        log(f"{coin} ELITE PASS — TP={elite_cfg['TP']*100:.2f}% SL={elite_cfg['SL']*100:.0f}% lev={percoin_configs.elite_leverage(coin)}x")
-
     # Confidence scoring: 0-100 → sizing multiplier (0.5x / 1.0x / 1.5x / 2.0x)
     # OOS: every score tier profitable, use as SIZING not filter. Every signal trades.
     try:
@@ -2344,22 +1803,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
         size_mult = confidence.size_multiplier(conf_score)
-        # TIER GATING: per-tier minimum conf threshold + size dampener
-        # Skip tier gating in elite mode — elite coins already pre-validated
-        if not percoin_configs.ELITE_MODE:
-            tier = tier_filter.get_tier(coin)
-            tier_conf_min = tier_filter.conf_threshold(coin)
-            tier_size = tier_filter.tier_size_mult(coin)
-            if conf_score < tier_conf_min:
-                log(f"{coin} {sig} SKIP — tier {tier} requires conf>={tier_conf_min}, got {conf_score}")
-                return
-        else:
-            tier = 0  # elite
-            tier_size = 1.0  # elite coins trade at full elite size
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
-        risk_mult = risk_mult * size_mult * adapt * tier_size
-        log(f"{coin} CONF={conf_score} T{tier} conf_mult={size_mult} adapt={adapt:.2f} tier_mult={tier_size} final={risk_mult:.2f} {conf_breakdown}")
+        risk_mult = risk_mult * size_mult * adapt
+        log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
         conf_score = 0
@@ -2435,16 +1882,6 @@ def main():
     except Exception as e: log(f"oi_tracker err: {e}")
     try: threading.Timer(60.0, funding_arb.refresh).start()
     except Exception as e: log(f"funding_arb err: {e}")
-    # Regime detector: refresh every 5min from Binance klines
-    try:
-        def _regime_loop():
-            while True:
-                try: regime_detector.refresh()
-                except Exception as e: log(f"regime err: {e}")
-                time.sleep(300)
-        threading.Thread(target=_regime_loop, daemon=True).start()
-        log("regime_detector: 5min loop started")
-    except Exception as e: log(f"regime loop err: {e}")
     # Funding refresh deferred — first tick runs it after 30s delay
     threading.Timer(30.0, lambda: funding_filter.refresh_all(COINS)).start()
     try: news_filter.start()
@@ -2519,42 +1956,6 @@ def main():
                     state['positions'][k] = {'side':side, 'opened_at':now - 3600, 'entry':entry_px,
                                              'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
-
-            # AUTO-CLOSE non-elite positions when elite_mode is ON
-            # Legacy positions from pre-elite code path hold margin that blocks new elite signals.
-            # Close when in profit, or if age > 2h (cut losses and free margin).
-            if percoin_configs.ELITE_MODE:
-                for k in list(live_positions.keys()):
-                    if percoin_configs.is_elite(k): continue  # elite coins managed by elite TP-Lock logic
-                    lp = live_positions[k]
-                    sz = lp.get('size', 0)
-                    if sz == 0: continue
-                    entry = lp.get('entry', 0)
-                    if not entry: continue
-                    try:
-                        mid = get_mid(k)
-                        if not mid: continue
-                        side = 'L' if sz > 0 else 'S'
-                        fav = (mid - entry) / entry if side == 'L' else (entry - mid) / entry
-                        pos_meta = state.get('positions', {}).get(k, {})
-                        age = now - pos_meta.get('opened_at', now)
-                        # Close if in profit OR age > 2h OR loss exceeds 3%
-                        reason = None
-                        if fav > 0.001: reason = f'non-elite in profit +{fav*100:.2f}%'
-                        elif age > 7200: reason = f'non-elite age {age/60:.0f}min'
-                        elif fav < -0.03: reason = f'non-elite cut-loss {fav*100:.2f}%'
-                        if reason:
-                            try:
-                                pnl = close(k)
-                                if pnl is not None:
-                                    state['last_pnl_close'] = pnl
-                                    state['consec_losses'] = 0 if pnl > 0 else state.get('consec_losses', 0) + 1
-                                log(f"AUTO-CLOSE {k} (elite mode, {reason}, pnl={pnl})")
-                                state['positions'].pop(k, None)
-                            except Exception as ce:
-                                log(f"auto-close err {k}: {ce}")
-                    except Exception as e:
-                        log(f"auto-close check err {k}: {e}")
 
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
