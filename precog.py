@@ -308,8 +308,8 @@ def orderbook_depth(coin):
         mid = agg.get('mid', 0)
         # Build depth levels within 2% of mid, bucketed
         if not mid: return jsonify({'mid':0,'bids':[],'asks':[]})
-        bids = sorted([(p,s) for p,s in agg['bids'].items() if p > mid*0.98 and p <= mid], reverse=True)
-        asks = sorted([(p,s) for p,s in agg['asks'].items() if p < mid*1.02 and p >= mid])
+        bids = sorted([(p,s) for p,s in agg['bids'].items() if p > mid*0.97 and p <= mid], reverse=True)
+        asks = sorted([(p,s) for p,s in agg['asks'].items() if p < mid*1.03 and p >= mid])
         # Bucket into 40 levels
         import math
         def bucket(orders, N=40):

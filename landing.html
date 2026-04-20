@@ -460,7 +460,7 @@ body::after {
         <div class="panel-title">BTC Orderbook Heatmap · 6 Venues Aggregated</div>
         <div class="panel-meta" id="ob-meta">—</div>
     </div>
-    <div id="ob-heatmap" style="height: 340px; position: relative;"></div>
+    <div id="ob-heatmap" style="height: 520px; position: relative;"></div>
 </div>
 
 <!-- COIN WR HEATMAP -->
@@ -623,25 +623,18 @@ async function loadOrderbook() {
         const mid = d.mid;
         const maxUsd = Math.max(...bids.map(b=>b.usd), ...asks.map(a=>a.usd), 1);
 
-        const H = 340;
-        const midY = H / 2;
-        // Price range: ±1% of mid
-        const priceMin = mid * 0.99;
-        const priceMax = mid * 1.01;
+        const H = 520;
+        // Dynamic range from actual data — not fixed ±1%
+        const allPrices = [...bids.map(b=>b.price), ...asks.map(a=>a.price)];
+        let dataMin = allPrices.length ? Math.min(...allPrices) : mid*0.98;
+        let dataMax = allPrices.length ? Math.max(...allPrices) : mid*1.02;
+        // Symmetrize around mid so mid stays centered
+        const span = Math.max(mid - dataMin, dataMax - mid) * 1.05;  // 5% padding
+        const priceMin = mid - span;
+        const priceMax = mid + span;
         const priceToY = p => H - ((p - priceMin) / (priceMax - priceMin)) * H;
 
         let svg = `<svg viewBox="0 0 1000 ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block">`;
-        // Background gradient
-        svg += `<defs>
-            <linearGradient id="bidGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stop-color="rgba(184,255,47,0)" />
-                <stop offset="100%" stop-color="rgba(184,255,47,0.8)" />
-            </linearGradient>
-            <linearGradient id="askGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stop-color="rgba(193,39,45,0)" />
-                <stop offset="100%" stop-color="rgba(193,39,45,0.8)" />
-            </linearGradient>
-        </defs>`;
 
         // Bid bars (below mid, green, from right)
         bids.forEach(b => {
@@ -649,39 +642,47 @@ async function loadOrderbook() {
             if (y < 0 || y > H) return;
             const w = (b.usd / maxUsd) * 800;
             const intensity = Math.min(1, b.usd / maxUsd);
-            svg += `<rect x="${1000-w}" y="${y-2}" width="${w}" height="4" fill="rgba(184,255,47,${intensity*0.85})" />`;
+            svg += `<rect x="${1000-w}" y="${y-3}" width="${w}" height="6" fill="rgba(184,255,47,${0.3 + intensity*0.7})" />`;
         });
-        // Ask bars (above mid, red)
+        // Ask bars
         asks.forEach(a => {
             const y = priceToY(a.price);
             if (y < 0 || y > H) return;
             const w = (a.usd / maxUsd) * 800;
             const intensity = Math.min(1, a.usd / maxUsd);
-            svg += `<rect x="${1000-w}" y="${y-2}" width="${w}" height="4" fill="rgba(193,39,45,${intensity*0.85})" />`;
+            svg += `<rect x="${1000-w}" y="${y-3}" width="${w}" height="6" fill="rgba(193,39,45,${0.3 + intensity*0.7})" />`;
         });
         // Mid price line
         const midYLine = priceToY(mid);
         svg += `<line x1="0" y1="${midYLine}" x2="1000" y2="${midYLine}" stroke="rgba(200,204,212,0.5)" stroke-width="1" stroke-dasharray="4 4" />`;
         svg += `<text x="10" y="${midYLine-6}" fill="#c8ccd4" font-family="JetBrains Mono" font-size="11" letter-spacing="1">MID $${mid.toFixed(0)}</text>`;
-        // Price labels — top, bottom
-        svg += `<text x="10" y="16" fill="#c1272d" font-family="JetBrains Mono" font-size="10" opacity="0.6">+1% · $${priceMax.toFixed(0)}</text>`;
-        svg += `<text x="10" y="${H-6}" fill="#b8ff2f" font-family="JetBrains Mono" font-size="10" opacity="0.6">-1% · $${priceMin.toFixed(0)}</text>`;
-        // Side labels
+        // Price labels — top, mid-high, mid-low, bottom
+        const pctTop = ((priceMax-mid)/mid*100).toFixed(2);
+        const pctBot = ((mid-priceMin)/mid*100).toFixed(2);
+        svg += `<text x="10" y="16" fill="#c1272d" font-family="JetBrains Mono" font-size="10" opacity="0.7">+${pctTop}% · $${priceMax.toFixed(0)}</text>`;
+        svg += `<text x="10" y="${H-6}" fill="#b8ff2f" font-family="JetBrains Mono" font-size="10" opacity="0.7">-${pctBot}% · $${priceMin.toFixed(0)}</text>`;
+        // Quarter gridlines
+        for (let q = 0.25; q < 1; q += 0.25) {
+            const yq = H * q;
+            const pq = priceMax - (priceMax-priceMin)*q;
+            svg += `<line x1="0" y1="${yq}" x2="1000" y2="${yq}" stroke="rgba(200,204,212,0.08)" stroke-width="1" />`;
+            svg += `<text x="10" y="${yq-3}" fill="#c8ccd4" font-family="JetBrains Mono" font-size="9" opacity="0.4">$${pq.toFixed(0)}</text>`;
+        }
         svg += `<text x="985" y="${midYLine-20}" fill="#c1272d" font-family="JetBrains Mono" font-size="9" text-anchor="end" letter-spacing="2">ASKS ▲</text>`;
         svg += `<text x="985" y="${midYLine+28}" fill="#b8ff2f" font-family="JetBrains Mono" font-size="9" text-anchor="end" letter-spacing="2">BIDS ▼</text>`;
 
-        // Max wall annotation
-        const topWall = [...bids, ...asks].sort((a,b)=>b.usd-a.usd)[0];
-        if (topWall) {
-            const ty = priceToY(topWall.price);
-            const side = bids.includes(topWall) ? 'BID' : 'ASK';
+        // Top 3 walls annotated
+        const topWalls = [...bids, ...asks].sort((a,b)=>b.usd-a.usd).slice(0,3);
+        topWalls.forEach((w, idx) => {
+            const ty = priceToY(w.price);
+            const side = bids.includes(w) ? 'BID' : 'ASK';
             const color = side === 'BID' ? '#b8ff2f' : '#c1272d';
-            svg += `<circle cx="200" cy="${ty}" r="4" fill="${color}" />`;
-            svg += `<text x="215" y="${ty+3}" fill="${color}" font-family="JetBrains Mono" font-size="10" font-weight="600">$${(topWall.usd/1000).toFixed(0)}k @ ${topWall.price.toFixed(0)}</text>`;
-        }
+            svg += `<circle cx="200" cy="${ty}" r="${5-idx}" fill="${color}" />`;
+            svg += `<text x="215" y="${ty+3}" fill="${color}" font-family="JetBrains Mono" font-size="10" font-weight="600">$${(w.usd/1000).toFixed(0)}k @ ${w.price.toFixed(0)}</text>`;
+        });
         svg += '</svg>';
         document.getElementById('ob-heatmap').innerHTML = svg;
-        document.getElementById('ob-meta').textContent = `${d.venues||0} venues · ${bids.length}b / ${asks.length}a levels · mid $${mid.toFixed(0)}`;
+        document.getElementById('ob-meta').textContent = `${d.venues||0} venues · ${bids.length}b / ${asks.length}a · ±${pctTop}% · mid $${mid.toFixed(0)}`;
     } catch (e) {
         console.error(e);
     }
