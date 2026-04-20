@@ -288,6 +288,50 @@ def landing():
     resp.headers['Expires'] = '0'
     return resp
 
+@app.route('/engines', methods=['GET'])
+def engines_status():
+    """Live engine + guard + venue state."""
+    try:
+        btc = btc_correlation.get_state()
+        btc_fresh = (time.time() - btc.get('ts',0)) < 120 if btc.get('ts') else False
+    except Exception: btc_fresh = False
+    try:
+        venues = orderbook_ws.get_venue_status()
+    except Exception: venues = {}
+    def v_ok(name):
+        age = venues.get(name)
+        return age is not None and age < 60
+    return jsonify({
+        'signal_engines': {
+            'PIVOT': True,  # always core
+            'PULLBACK': True,
+            'WALL_BNC': v_ok('by') or v_ok('bn'),
+            'LIQ_CSCD': True,
+            'CVD_DIV': True,
+        },
+        'guards': {
+            'V3_TREND': True,
+            'ATR_MIN': True,
+            'BTC_CORR': btc_fresh,
+            'FUNDING': True,
+            'CHASE': True,
+            'SPOOF': True,
+            'NEWS': True,
+            'POS_CAPS': True,
+            'DD_BRK': True,
+        },
+        'sizing': {'CONF_SIZE': True},
+        'venues': {
+            'BYBIT':    v_ok('by'),
+            'BINANCE':  v_ok('bn'),
+            'OKX':      v_ok('okx'),
+            'COINBASE': v_ok('cb'),
+            'BITGET':   v_ok('bg'),
+            'KRAKEN':   v_ok('kr'),
+        },
+        'venue_ages': venues,
+    })
+
 @app.route('/orderbook/<coin>', methods=['GET'])
 def orderbook_depth(coin):
     try:

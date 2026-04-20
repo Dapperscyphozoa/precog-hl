@@ -38,7 +38,9 @@ _RUN = False
 BIN_TO_HL = {v[1]:k for k,v in HL_VENUES.items() if v[1]}
 BY_TO_HL  = {v[0]:k for k,v in HL_VENUES.items() if v[0]}
 
+_VENUE_LAST = {}  # venue -> last update ts
 def _update_levels(coin, bids, asks, venue):
+    _VENUE_LAST[venue] = time.time()
     with _LOCK:
         d = _DEPTH[coin]
         d['ts'] = time.time()
@@ -351,3 +353,8 @@ def start():
     threading.Thread(target=_runner_kraken, daemon=True, name='ob_kraken').start()
     threading.Thread(target=_wall_scanner, daemon=True, name='ob_scan').start()
     print("[ob_ws] started Bybit+Binance depth + wall scanner", flush=True)
+
+def get_venue_status():
+    """Return per-venue liveness: {venue: seconds_since_last_update}"""
+    now = time.time()
+    return {v: round(now - ts, 1) for v, ts in _VENUE_LAST.items()}

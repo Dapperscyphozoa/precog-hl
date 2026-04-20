@@ -411,26 +411,21 @@ body::after {
     <!-- ENGINES -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Engines</div>
-            <div class="panel-meta">5 signal · 9 guard</div>
+            <div class="panel-title">Engine Stack</div>
+            <div class="panel-meta">5 signal · 9 guard · 6 venue · 1 sizing</div>
         </div>
-        <div class="engine-grid">
-            <div class="engine active"><div class="engine-name">PIVOT</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">PULLBACK</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">WALL·BNC</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">LIQ·CSCD</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">CVD·DIV</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">V3 GATE</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">ATR·MIN</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">BTC CORR</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">FUNDING</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">CHASE</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">SPOOF</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">NEWS</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">POS·CAPS</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">DD·BRK</div><div class="engine-val">ON</div></div>
-            <div class="engine active"><div class="engine-name">CONF·SIZE</div><div class="engine-val">ON</div></div>
-        </div>
+
+        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// SIGNAL ENGINES</div>
+        <div class="engine-grid" id="eng-signal"></div>
+
+        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// GUARDS</div>
+        <div class="engine-grid" id="eng-guards"></div>
+
+        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// VENUE FEEDS (6-way orderbook)</div>
+        <div class="engine-grid" id="eng-venues"></div>
+
+        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// SIZING</div>
+        <div class="engine-grid" id="eng-sizing"></div>
     </div>
 </div>
 
@@ -722,6 +717,33 @@ async function loadHeatmap() {
         document.getElementById('heat-meta').textContent = entries.length + ' coins · 3+ trades';
     } catch (e) {}
 }
+
+async function loadEngines() {
+    try {
+        const r = await fetch('/engines');
+        const d = await r.json();
+        const ages = d.venue_ages || {};
+        const render = (container, obj, labels = {}, showAge = null) => {
+            document.getElementById(container).innerHTML = Object.entries(obj).map(([k, live]) => {
+                const name = labels[k] || k.replace(/_/g, '·');
+                const val = live ? 'LIVE' : 'OFF';
+                const cls = live ? 'engine active' : 'engine';
+                let age = '';
+                if (showAge && ages[showAge[k]] !== undefined) {
+                    age = `<div style="font-size:8px;opacity:0.5;margin-top:2px">${ages[showAge[k]]}s</div>`;
+                }
+                return `<div class="${cls}"><div class="engine-name">${name}</div><div class="engine-val">${val}</div>${age}</div>`;
+            }).join('');
+        };
+        render('eng-signal', d.signal_engines);
+        render('eng-guards', d.guards);
+        render('eng-venues', d.venues, {}, {BYBIT:'by', BINANCE:'bn', OKX:'okx', COINBASE:'cb', BITGET:'bg', KRAKEN:'kr'});
+        render('eng-sizing', d.sizing);
+    } catch (e) { console.error('engines', e); }
+}
+
+loadEngines();
+setInterval(loadEngines, 5000);
 
 loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); updateClock();
 setInterval(loadDash, 5000);
