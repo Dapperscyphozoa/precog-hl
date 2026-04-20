@@ -5,7 +5,8 @@
     "cloud": false,
     "body": 0,
     "glb": 15,
-    "tp": 0.0008
+    "tp": 0.0008,
+    "inverted": true
   },
   "AUDCHF": {
     "gb": true,
@@ -13,7 +14,8 @@
     "cloud": false,
     "body": 0.3,
     "glb": 15,
-    "tp": 0.0008
+    "tp": 0.0008,
+    "inverted": true
   },
   "AUDJPY": {
     "gb": true,
@@ -21,7 +23,8 @@
     "cloud": false,
     "body": 0,
     "glb": 15,
-    "tp": 0.001
+    "tp": 0.001,
+    "inverted": true
   },
   "AUDNZD": {
     "gb": true,
@@ -53,7 +56,8 @@
     "cloud": false,
     "body": 0.3,
     "glb": 15,
-    "tp": 0.001
+    "tp": 0.001,
+    "inverted": true
   },
   "CHFJPY": {
     "gb": true,
@@ -109,7 +113,8 @@
     "cloud": false,
     "body": 0.3,
     "glb": 20,
-    "tp": 0.0008
+    "tp": 0.0008,
+    "inverted": true
   },
   "EURGBP": {
     "gb": false,
@@ -153,7 +158,8 @@
     "cloud": true,
     "body": 0,
     "glb": 20,
-    "tp": 0.001
+    "tp": 0.001,
+    "inverted": true
   },
   "GBPNZD": {
     "gb": true,
@@ -161,7 +167,8 @@
     "cloud": false,
     "body": 0,
     "glb": 20,
-    "tp": 0.001
+    "tp": 0.001,
+    "inverted": true
   },
   "GBPUSD": {
     "gb": true,
@@ -210,7 +217,8 @@
     "cloud": false,
     "body": 0.3,
     "glb": 20,
-    "tp": 0.0008
+    "tp": 0.0008,
+    "inverted": true
   },
   "NZDUSD": {
     "gb": true,
@@ -218,7 +226,8 @@
     "cloud": true,
     "body": 0,
     "glb": 20,
-    "tp": 0.0008
+    "tp": 0.0008,
+    "inverted": true
   },
   "NatGas": {
     "gb": true,
@@ -347,7 +356,8 @@
     "cloud": true,
     "body": 0,
     "glb": 15,
-    "tp": 0.0008
+    "tp": 0.0008,
+    "inverted": true
   },
   "Wheat": {
     "gb": true,
@@ -387,6 +397,61 @@
     "cloud": false,
     "body": 0.3,
     "glb": 15,
-    "tp": 0.003
+    "tp": 0.003,
+    "inverted": true
+  },
+  "NATGAS": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "inverted": true
+  },
+  "COPPER": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "inverted": true
+  },
+  "WHEAT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "inverted": true
+  },
+  "SPOTBRENT": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "inverted": true
+  },
+  "SPOTCRUDE": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "inverted": true
+  },
+  "CORN": {
+    "gb": true,
+    "gs": true,
+    "cloud": false,
+    "body": 0,
+    "glb": 15,
+    "tp": null,
+    "inverted": true
   }
 }
