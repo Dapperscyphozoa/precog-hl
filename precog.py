@@ -167,12 +167,19 @@ try:
         MT4_TICKER_GATES = _json.load(_f)
 except Exception:
     MT4_TICKER_GATES = {}
+# v4.9: structural zone confluence (OB/FVG/key levels via Yahoo candles)
+try:
+    import zones as _zones
+    ZONES_ENABLED = True
+except Exception as _e:
+    _zones = None
+    ZONES_ENABLED = False
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
 MT4_BIAS = {'direction': '', 'ts': 0}
 
 # --- MT4 queue persistence (HL-isolated; writes /var/data/mt4_queue.json) ---
 MT4_QUEUE_FILE = '/var/data/mt4_queue.json'
-MT4_STALE_SEC = 300  # drop signals older than 5 min on serve
+MT4_STALE_SEC = 30   # v4.9: aggressive stale drop — signals older than 30s dropped
 
 # ===== Webhook filter (HL-isolated) =====
 MT4_FILTERS_ENABLED = os.environ.get('MT4_FILTERS_ENABLED', 'true').lower() == 'true'
@@ -953,6 +960,20 @@ def webhook():
             log(f"MT4 INVERTED {clean}: {action.upper()} → {direction}")
         # VIX sentiment size multiplier (scales, never blocks)
         size_mult = _mt4_vix_overlay_mult(clean)
+        # v4.9: zone confluence boost/reduce
+        zone_boost = 1.0
+        zone_info = {}
+        if ZONES_ENABLED and _zones:
+            try:
+                zone_info = _zones.zone_confluence(clean, direction, price)
+                zone_boost = zone_info.get('size_boost', 1.0)
+                if zone_info.get('aligned') == 'contradicted':
+                    log(f"MT4 ZONE CONTRA {clean} {direction} @ {price}: {zone_info.get('zones_hit',[])[:3]} — size×{zone_boost}")
+                elif zone_info.get('aligned') == 'aligned':
+                    log(f"MT4 ZONE ALIGN {clean} {direction} @ {price}: {zone_info.get('zones_hit',[])[:3]} — size×{zone_boost}")
+            except Exception as _ze:
+                log(f"MT4 zone err {clean}: {_ze}")
+        final_mult = round(size_mult * zone_boost, 2)
         rec = {
             'symbol': mt4_sym,
             'direction': direction,
@@ -962,12 +983,16 @@ def webhook():
             'trail_distance': gate.get('trail_distance', 0.2),
             'sl_pct': gate.get('sl_pct', 1.4),
             'time_cut_hours': gate.get('time_cut_hours'),
-            'size_mult': round(size_mult, 2),
+            'size_mult': final_mult,
+            'vix_mult': round(size_mult, 2),
+            'zone_boost': round(zone_boost, 2),
+            'zone_status': zone_info.get('aligned') if zone_info else None,
+            'max_slip_pct': 0.3,  # EA rejects market fallback if slip > this
         }
         MT4_QUEUE.append(rec)
         if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
         _mt4_save()
-        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price} trail={rec['trail_activate']}/{rec['trail_distance']} sl={rec['sl_pct']} vix_mult={size_mult}")
+        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price} trail={rec['trail_activate']}/{rec['trail_distance']} sl={rec['sl_pct']} vix×{size_mult} zone×{zone_boost}={rec['size_mult']} slip_max={rec['max_slip_pct']}%")
         log_trade('MT4', clean, direction, price, 0, 'webhook')
         return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':direction}), 200
 
@@ -1295,7 +1320,7 @@ FUNDING_CUT_RATIO = 0.50
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 TRAIL_TIGHTEN_AFTER_SEC = 7200  # 2h: tighten trail to 0.9% (OOS +77% PnL vs static)
 TRAIL_TIGHTEN_PCT = 0.009          # OOS winner: +250% vs +40% at 0.3%
-MAKER_FALLBACK_SEC = 30  # increased from 10s — patient maker fills, cut taker fees
+MAKER_FALLBACK_SEC = 10
 MAKER_OFFSET = 0.0015  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
 def _init_hl_with_retry(max_attempts=8):
@@ -1696,28 +1721,7 @@ def place(coin, is_buy, size):
     # Bybit-lead limit: capture HL lag using Bybit's current price
     side = 'BUY' if is_buy else 'SELL'
     edge = bybit_lead.compute_edge_price(coin, side, px)
-    # Try wall-anchored maker: place at wall price (own side) if within 0.3% of mid
-    # BUY: bid-side wall (support below) — rest just above it for queue priority
-    # SELL: ask-side wall (resistance above) — rest just below it
-    wall_px = None
-    try:
-        wall_side = 'bid' if is_buy else 'ask'
-        wall = orderbook_ws.get_nearest_wall(coin, wall_side)
-        if wall and wall.get('price'):
-            w_px = float(wall['price'])
-            dist_pct = abs(px - w_px) / px if px > 0 else 1
-            # Only use wall if within 0.3% of current mid (tight enough to be relevant)
-            if dist_pct <= 0.003:
-                # BUY: sit 1 tick above wall (join queue on our side, wall acts as support)
-                # SELL: sit 1 tick below wall
-                tick_adj = 0.0001  # 1 bp
-                wall_px = w_px * (1 + tick_adj) if is_buy else w_px * (1 - tick_adj)
-                log(f"WALL-ANCHOR {coin} {side}: wall @ {w_px} (${wall.get('usd',0)/1000:.0f}k, {dist_pct*100:.2f}% from mid) → resting @ {wall_px}")
-    except Exception:
-        pass
-    if wall_px:
-        maker_px = round_price(coin, wall_px)
-    elif edge:
+    if edge:
         maker_px = round_price(coin, edge)
     else:
         maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
@@ -2228,10 +2232,8 @@ def main():
 
             # DUST-SWEEP: close any position with |PnL| <= $0.10 to free margin for higher-tier signals
             # Rationale: holding a flat position occupies margin without generating edge.
-            # PURE tier: normally exempt (100% WR working toward TP), BUT if stalled >30min, sweep it
-            # (stuck margin > preserved theoretical edge).
+            # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
             DUST_THRESHOLD = 0.10  # $0.10
-            PURE_STALL_SEC = 30 * 60  # 30 minutes before PURE dust becomes sweepable
             swept = 0
             for k in list(live_positions.keys()):
                 try:
@@ -2240,27 +2242,21 @@ def main():
                     entry = lp.get('entry', 0)
                     if sz == 0 or not entry: continue
                     pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
-                    unrealized_usd = lp.get('pnl', 0)  # HL reported
-                    if abs(unrealized_usd) > DUST_THRESHOLD: continue
-                    # PURE exemption: only sweep if stalled > 30min
-                    stall_tag = ''
-                    if pos_tier == 'PURE':
-                        opened_at = state.get('positions', {}).get(k, {}).get('opened_at', 0)
-                        age_sec = now - opened_at
-                        if age_sec < PURE_STALL_SEC:
-                            continue  # PURE still within 30-min grace — let it work
-                        stall_tag = f' STALLED {age_sec/60:.0f}min'
-                    notional = abs(sz) * entry
-                    try:
-                        pnl = close(k)
-                        log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}{stall_tag}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
-                        state['positions'].pop(k, None)
-                        if pnl is not None:
-                            state['last_pnl_close'] = pnl
-                            if pnl > 0: state['consec_losses'] = 0
-                        swept += 1
-                    except Exception as e:
-                        log(f"dust-sweep err {k}: {e}")
+                    if pos_tier == 'PURE': continue  # don't sweep 100% WR coins
+                    # Use HL's reported PnL directly (no get_mid 429 issues)
+                    unrealized_usd = lp.get('pnl', 0)
+                    if abs(unrealized_usd) <= DUST_THRESHOLD:
+                        notional = abs(sz) * entry
+                        try:
+                            pnl = close(k)
+                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
+                            state['positions'].pop(k, None)
+                            if pnl is not None:
+                                state['last_pnl_close'] = pnl
+                                if pnl > 0: state['consec_losses'] = 0
+                            swept += 1
+                        except Exception as e:
+                            log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
             if swept: log(f"DUST-SWEEP: closed {swept} positions (|PnL|<=${DUST_THRESHOLD:.2f})")
