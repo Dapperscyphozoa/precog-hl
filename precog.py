@@ -30,6 +30,7 @@ import bybit_lead
 import funding_filter
 import btc_correlation
 import confidence
+import tier_filter
 import spoof_detection
 import session_scaler
 import whale_filter
@@ -364,6 +365,27 @@ def stats_reset():
                       'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
     save_state(state)
     return jsonify({'status':'stats reset'})
+
+@app.route('/tiers', methods=['GET'])
+def tiers_endpoint():
+    """Show current tier assignments for HL universe."""
+    try:
+        s = tier_filter.stats()
+        if not s:
+            tier_filter.refresh_tiers()
+            s = tier_filter.stats()
+        # Per-tier coin lists
+        out = {'stats': s, 'thresholds': {
+            'conf_min': tier_filter.TIER_CONF_MIN,
+            'size_mult': tier_filter.TIER_SIZE_MULT
+        }, 'coins': {1:[],2:[],3:[],4:[]}}
+        if tier_filter._state['tiers']:
+            for c, t in tier_filter._state['tiers'].items():
+                out['coins'][t].append(c)
+            for t in [1,2,3,4]: out['coins'][t].sort()
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/stats', methods=['GET'])
 def stats_endpoint():
@@ -1774,10 +1796,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
         size_mult = confidence.size_multiplier(conf_score)
+        # TIER GATING: per-tier minimum conf threshold + size dampener
+        tier = tier_filter.get_tier(coin)
+        tier_conf_min = tier_filter.conf_threshold(coin)
+        tier_size = tier_filter.tier_size_mult(coin)
+        if conf_score < tier_conf_min:
+            log(f"{coin} {sig} SKIP — tier {tier} requires conf>={tier_conf_min}, got {conf_score}")
+            return
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
-        risk_mult = risk_mult * size_mult * adapt
-        log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} {conf_breakdown}")
+        risk_mult = risk_mult * size_mult * adapt * tier_size
+        log(f"{coin} CONF={conf_score} T{tier} conf_mult={size_mult} adapt={adapt:.2f} tier_mult={tier_size} final={risk_mult:.2f} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
         conf_score = 0
