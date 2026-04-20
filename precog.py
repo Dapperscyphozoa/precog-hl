@@ -1785,69 +1785,63 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
             incoming_tier = percoin_configs.get_tier(coin)
             DUST_USD = 0.10
-            # Build two candidate lists:
-            # 1. DUST: any non-PURE position with |PnL|<=$0.10 (preferred — no edge being given up)
-            # 2. PROFIT: any non-PURE profitable position (give up small profit to take a bigger edge)
-            # PURE positions NEVER closed for margin (they're 100% WR, let them work)
+            # Tier priority for closing: SEVENTY_79 → EIGHTY_89 → NINETY_99 → PURE
+            # Higher-tier incoming signals can claim lower-tier positions.
+            # PURE: never close anything (100% WR needs room but don't sacrifice 90%+ edge)
+            # Rule: can close a tier STRICTLY LOWER than incoming tier, OR dust of any tier
+            TIER_RANK = {'PURE': 4, 'NINETY_99': 3, 'EIGHTY_89': 2, 'SEVENTY_79': 1}
+            incoming_rank = TIER_RANK.get(incoming_tier, 0)
+            # Categorize candidates
+            # dust_cands: list of (abs_pnl_usd, k, notional, pnl, tier) — can always close
+            # profit_by_tier: dict of tier -> list of (pnl_usd, k, notional) — tier-ranked sacrifice
             dust_cands = []
-            profit_cands = []
+            profit_by_tier = {'SEVENTY_79': [], 'EIGHTY_89': [], 'NINETY_99': [], 'PURE': []}
             for k, lp in live_positions.items():
                 if k == coin: continue
                 sz = lp.get('size', 0); entry = lp.get('entry', 0)
                 if sz == 0 or not entry: continue
-                pos_tier = percoin_configs.get_tier(k)
-                if pos_tier == 'PURE': continue  # never close PURE for margin
-                try:
-                    mid = get_mid(k)
-                    if not mid: continue
-                    pside = 'L' if sz > 0 else 'S'
-                    notional = abs(sz) * entry
-                    fav_k = (mid - entry) / entry if pside == 'L' else (entry - mid) / entry
-                    usd = fav_k * notional
-                    if abs(usd) <= DUST_USD:
-                        dust_cands.append((abs(usd), k, notional, fav_k))  # dust: sort ascending (tiniest first)
-                    elif fav_k > 0.003:
-                        profit_cands.append((fav_k, k, notional))
-                except Exception: pass
-            # PURE incoming signal: clear dust first, then profitable non-PURE
-            # NON-PURE incoming: only close profit (never disturb other trades for lower-tier signal)
+                pos_tier = percoin_configs.get_tier(k) or 'NONE'
+                pos_pnl = lp.get('pnl', 0)  # USD, from HL state (more reliable than get_mid which 429s)
+                notional = abs(sz) * entry
+                # DUST: |pnl| ≤ $0.10 — always close regardless of tier
+                if abs(pos_pnl) <= DUST_USD:
+                    dust_cands.append((abs(pos_pnl), k, notional, pos_pnl, pos_tier))
+                # PROFIT ≥ $0.10: tier-ranked
+                elif pos_pnl > DUST_USD and pos_tier in profit_by_tier:
+                    profit_by_tier[pos_tier].append((pos_pnl, k, notional))
+            
             closed_one = False
-            if incoming_tier == 'PURE':
-                # Priority 1: close all dust positions
-                for _, k, notional, fav_k in sorted(dust_cands):
-                    try:
-                        pnl = close(k); state['positions'].pop(k, None)
-                        log(f"DUST-CLOSE {k} pnl={fav_k*100:+.2f}% (for PURE {coin} {sig}, freed ${notional:.0f})")
-                        if pnl is not None: state['last_pnl_close'] = pnl
-                        closed_one = True
-                    except Exception as e:
-                        log(f"dust-close err {k}: {e}")
-                # If still tight, close best-profit non-PURE
-                total_locked = get_total_margin()
-                if (total_locked + proposed)/equity > MAX_TOTAL_RISK and profit_cands:
-                    profit_cands.sort(reverse=True)
-                    fav_k, k, notional = profit_cands[0]
-                    try:
-                        pnl = close(k); state['positions'].pop(k, None)
-                        log(f"MARGIN-CLOSE {k} +{fav_k*100:.2f}% (for PURE {coin} {sig}, freed ${notional:.0f})")
-                        if pnl is not None: state['last_pnl_close'] = pnl
-                        closed_one = True
-                    except Exception as e:
-                        log(f"margin-close err {k}: {e}")
-            else:
-                # Non-PURE incoming: only give up profit for it
-                if profit_cands:
-                    profit_cands.sort(reverse=True)
-                    fav_k, k, notional = profit_cands[0]
-                    try:
-                        pnl = close(k); state['positions'].pop(k, None)
-                        log(f"MARGIN-CLOSE {k} +{fav_k*100:.2f}% (for {incoming_tier} {coin} {sig}, freed ${notional:.0f})")
-                        if pnl is not None: state['last_pnl_close'] = pnl
-                        closed_one = True
-                    except Exception as e:
-                        log(f"margin-close err {k}: {e}")
-            if closed_one:
-                total_locked = get_total_margin()
+            # Phase 1: sweep ALL dust (no edge sacrificed)
+            for _, k, notional, pos_pnl, ptier in sorted(dust_cands):
+                try:
+                    pnl = close(k); state['positions'].pop(k, None)
+                    log(f"DUST-CLOSE {k} ({ptier}) pnl=${pos_pnl:+.3f} (for {incoming_tier} {coin} {sig}, freed ${notional:.0f})")
+                    if pnl is not None: state['last_pnl_close'] = pnl
+                    closed_one = True
+                except Exception as e:
+                    log(f"dust-close err {k}: {e}")
+            # Check if room now
+            total_locked = get_total_margin()
+            # Phase 2: tier-ranked profit close (only if STILL tight)
+            if (total_locked + proposed)/equity > MAX_TOTAL_RISK:
+                # Close in order: lowest-tier first, within tier smallest profit first (cheapest to give up)
+                # Only close tiers STRICTLY LOWER than incoming
+                close_order = ['SEVENTY_79', 'EIGHTY_89', 'NINETY_99']  # PURE never closed for margin
+                for ptier in close_order:
+                    if TIER_RANK[ptier] >= incoming_rank: break  # can't sacrifice equal or higher tier
+                    if (total_locked + proposed)/equity <= MAX_TOTAL_RISK: break
+                    cands = sorted(profit_by_tier[ptier])  # ascending: smallest profit first (cheapest sacrifice)
+                    for pos_pnl, k, notional in cands:
+                        try:
+                            pnl = close(k); state['positions'].pop(k, None)
+                            log(f"MARGIN-CLOSE {k} ({ptier}) +${pos_pnl:.3f} (for {incoming_tier} {coin} {sig}, freed ${notional:.0f})")
+                            if pnl is not None: state['last_pnl_close'] = pnl
+                            closed_one = True
+                            total_locked = get_total_margin()
+                            if (total_locked + proposed)/equity <= MAX_TOTAL_RISK: break
+                        except Exception as e:
+                            log(f"margin-close err {k}: {e}")
+            # Final check
             if (total_locked + proposed)/equity > MAX_TOTAL_RISK:
                 log(f"{coin} {sig} SKIP (margin still {total_locked:.0f}+{proposed:.0f} > {MAX_TOTAL_RISK*100:.0f}% after close attempt)")
                 return
@@ -2028,7 +2022,7 @@ def main():
                                              'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
 
-            # DUST-SWEEP: close any position with |PnL| <= $0.10 to free margin for PURE tier signals
+            # DUST-SWEEP: close any position with |PnL| <= $0.10 to free margin for higher-tier signals
             # Rationale: holding a flat position occupies margin without generating edge.
             # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
             DUST_THRESHOLD = 0.10  # $0.10
@@ -2039,19 +2033,15 @@ def main():
                     sz = lp.get('size', 0)
                     entry = lp.get('entry', 0)
                     if sz == 0 or not entry: continue
-                    # Fetch unrealized PnL from HL state directly (more accurate than mid-based calc)
                     pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
                     if pos_tier == 'PURE': continue  # don't sweep 100% WR coins
-                    mid = get_mid(k)
-                    if not mid: continue
-                    side = 'L' if sz > 0 else 'S'
-                    notional = abs(sz) * entry
-                    fav = (mid - entry) / entry if side == 'L' else (entry - mid) / entry
-                    unrealized_usd = fav * notional
+                    # Use HL's reported PnL directly (no get_mid 429 issues)
+                    unrealized_usd = lp.get('pnl', 0)
                     if abs(unrealized_usd) <= DUST_THRESHOLD:
+                        notional = abs(sz) * entry
                         try:
                             pnl = close(k)
-                            log(f"DUST-SWEEP {k} pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
+                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
                             state['positions'].pop(k, None)
                             if pnl is not None:
                                 state['last_pnl_close'] = pnl
@@ -2061,7 +2051,7 @@ def main():
                             log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
-            if swept: log(f"DUST-SWEEP summary: closed {swept} positions (|PnL|<=${DUST_THRESHOLD:.2f})")
+            if swept: log(f"DUST-SWEEP: closed {swept} positions (|PnL|<=${DUST_THRESHOLD:.2f})")
 
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
