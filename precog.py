@@ -421,7 +421,7 @@ def engines_status():
     """Live engine + guard + venue state."""
     try:
         btc = btc_correlation.get_state()
-        btc_fresh = (time.time() - btc.get('ts',0)) < 300 if btc.get('ts') else False
+        btc_fresh = (time.time() - btc.get('ts',0)) < 120 if btc.get('ts') else False
     except Exception: btc_fresh = False
     try:
         venues = orderbook_ws.get_venue_status()
@@ -834,6 +834,47 @@ def mt4_flatten_ack():
     log(f"MT4 FLATTEN ACK: closed={closed}, deleted={deleted}")
     MT4_FLATTEN_FLAG = {'pending': False, 'ts': time.time(), 'reason': ''}
     return jsonify({'status': 'acked'})
+
+@app.route('/mt4/trade-closed', methods=['POST'])
+def mt4_trade_closed():
+    """EA reports trail-stop exits. Server computes fib 0.382 retest zone and queues a LIMIT re-entry."""
+    try:
+        d = flask_request.get_json(force=True, silent=True) or {}
+        ticket = d.get('ticket')
+        symbol = (d.get('symbol') or '').replace('.a', '').upper()
+        side = (d.get('side') or '').upper()
+        entry = float(d.get('entry', 0))
+        peak_pct = float(d.get('peak_pct', 0))
+        reason = d.get('reason', '')
+        if reason != 'TRAIL' or entry <= 0 or peak_pct <= 0:
+            return jsonify({'ok': False, 'err': 'not a valid trail exit'}), 200
+        # Fib 0.382 retrace from peak back toward entry
+        if side == 'BUY':
+            peak_price = entry * (1 + peak_pct / 100.0)
+            retest = peak_price - (peak_price - entry) * 0.382
+        else:
+            peak_price = entry * (1 - peak_pct / 100.0)
+            retest = peak_price + (entry - peak_price) * 0.382
+        broker_sym = symbol + '.a'
+        rec = {
+            'symbol': broker_sym,
+            'direction': side,
+            'price': round(retest, 5),
+            'type': 'LIMIT',
+            'ts': int(time.time() * 1000),
+            'ttl_sec': 1800,
+            'is_retest': True,
+            'origin_ticket': ticket,
+            'origin_entry': entry,
+            'origin_peak_pct': peak_pct,
+        }
+        global MT4_LATEST_SIGNAL
+        MT4_LATEST_SIGNAL = rec
+        log(f"MT4 RETEST QUEUED: {side} {broker_sym} retest={retest:.5f} (peak was {peak_pct:.2f}% from entry {entry})")
+        return jsonify({'ok': True, 'retest_price': retest, 'ttl_sec': 1800})
+    except Exception as e:
+        log(f"MT4 trade-closed err: {e}")
+        return jsonify({'ok': False, 'err': str(e)}), 200
 
 COINS = [
     'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
