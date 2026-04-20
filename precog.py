@@ -33,6 +33,8 @@ import confidence
 import tier_filter
 import percoin_configs
 import tier_killswitch
+import coin_killswitch
+import coin_sizing
 import regime_detector
 import funding_arb
 import forward_walk
@@ -115,6 +117,29 @@ def record_close(pos, coin, pnl_pct, state):
                 print(f"[KILLSWITCH] Tier {tier_name} auto-disabled at 24h rolling PnL breach", flush=True)
     except Exception as e:
         print(f"[killswitch] err: {e}", flush=True)
+
+    # PER-COIN KILLSWITCH: auto-disable individual cold coins
+    try:
+        cfg = percoin_configs.get_config(coin)
+        if cfg:
+            # Expected WR — approximate from tier (PURE 100, NINETY_99 91, EIGHTY_89 83, SEVENTY_79 74)
+            tier_name = percoin_configs.get_tier(coin)
+            exp_wr = {'PURE':100, 'NINETY_99':91, 'EIGHTY_89':83, 'SEVENTY_79':74}.get(tier_name, 75)
+            was_off = coin_killswitch.record_trade_close(coin, pnl_pct, expected_wr_pct=exp_wr)
+            if was_off:
+                print(f"[COIN-KILLSWITCH] {coin} auto-disabled", flush=True)
+    except Exception: pass
+
+    # DYNAMIC COIN SIZING: scale up hot coins, down cold coins
+    try:
+        cfg = percoin_configs.get_config(coin)
+        if cfg:
+            tier_name = percoin_configs.get_tier(coin)
+            # OOS expected trades/day varies per coin; use rough per-tier avg
+            tpd_expected = {'PURE':0.4, 'NINETY_99':0.9, 'EIGHTY_89':0.6, 'SEVENTY_79':1.9}.get(tier_name, 0.5)
+            exp_wr = {'PURE':100, 'NINETY_99':91, 'EIGHTY_89':83, 'SEVENTY_79':74}.get(tier_name, 75)
+            coin_sizing.record_trade(coin, pnl_pct > 0, pnl_pct, tpd_expected, exp_wr)
+    except Exception: pass
 
     # FORWARD WALK: log every closed trade with full context for weekly validation
     try:
@@ -407,6 +432,32 @@ def stats_reset():
                       'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
     save_state(state)
     return jsonify({'status':'stats reset'})
+
+@app.route('/coin_killswitch', methods=['GET'])
+def coin_killswitch_endpoint():
+    """Show per-coin killswitch status."""
+    try:
+        return jsonify(coin_killswitch.status())
+    except Exception as e:
+        return jsonify({'err': str(e)})
+
+@app.route('/coin_killswitch/enable/<coin>', methods=['POST'])
+def coin_killswitch_enable(coin):
+    ok = coin_killswitch.manual_enable(coin)
+    return jsonify({'coin': coin, 'enabled': ok})
+
+@app.route('/coin_killswitch/disable/<coin>', methods=['POST'])
+def coin_killswitch_disable(coin):
+    ok = coin_killswitch.manual_disable(coin, 'manual via API')
+    return jsonify({'coin': coin, 'disabled': ok})
+
+@app.route('/coin_sizing', methods=['GET'])
+def coin_sizing_endpoint():
+    """Show dynamic per-coin size multipliers."""
+    try:
+        return jsonify(coin_sizing.status())
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/killswitch', methods=['GET'])
 def killswitch_endpoint():
@@ -1819,6 +1870,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
+            # LIQUIDATION CASCADE in-position check: if cascade AGAINST our position while in profit, secure gains
+            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin) and fav > 0:
+                try:
+                    cascade = liquidation_ws.get_cascade(coin, max_age_sec=180)
+                    if cascade:
+                        # Our LONG + cascade BUY (shorts liq'd = spike up is faked, reversal coming) = close
+                        # Our SHORT + cascade SELL (longs liq'd = crash is faked, bounce coming) = close
+                        adverse = (side == 'L' and cascade.get('side') == 'BUY') or \
+                                  (side == 'S' and cascade.get('side') == 'SELL')
+                        if adverse:
+                            prev_pos = dict(cur)
+                            pnl_pct = close(coin)
+                            if pnl_pct is not None:
+                                record_close(prev_pos, coin, pnl_pct, state)
+                                state['last_pnl_close'] = pnl_pct
+                            log(f"{coin} CASCADE-CLOSE +{fav*100:.2f}% (adverse cascade ${cascade.get('total_usd',0)/1e6:.1f}M)")
+                            state['positions'].pop(coin, None)
+                            return
+                except Exception: pass
+
             # ELITE MODE: Fixed per-coin TP + 5% hard SL (overrides all other logic)
             if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
                 elite_cfg = percoin_configs.get_config(coin)
@@ -1959,19 +2030,50 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
         _, tier_risk = percoin_configs.get_sizing(coin)
         risk_pct = tier_risk
-        # KILL SWITCH: skip if this coin's tier is auto-disabled (24h PnL breach)
+        # TIER KILL SWITCH
         tier_name = percoin_configs.get_tier(coin)
         if tier_killswitch.is_disabled(tier_name):
             log(f"{coin} {sig} SKIP — tier {tier_name} KILLSWITCH ACTIVE")
+            return
+        # PER-COIN KILL SWITCH (surgical shutoff for a single cold coin)
+        if coin_killswitch.is_disabled(coin):
+            log(f"{coin} {sig} SKIP — COIN KILLSWITCH ACTIVE")
             return
         # REGIME: apply global risk multiplier based on BTC market regime
         try:
             regime_mult = regime_detector.get_risk_mult()
             risk_pct *= regime_mult
             if regime_mult < 0.9:
-                log(f"{coin} regime={regime_detector.get_regime().get('regime')} risk dampened x{regime_mult}")
+                log(f"{coin} regime={regime_detector.get_regime().get('regime')} risk x{regime_mult}")
         except Exception as e:
             log(f"{coin} regime err: {e}")
+        # DYNAMIC PER-COIN SIZING — scales up hot coins, down cold coins
+        try:
+            coin_mult = coin_sizing.get_mult(coin)
+            risk_mult = risk_mult * coin_mult
+            if coin_mult < 0.9 or coin_mult > 1.1:
+                log(f"{coin} coin_sizing mult={coin_mult:.2f}")
+        except Exception as e:
+            log(f"{coin} sizing err: {e}")
+        # LIQUIDATION CASCADE CONFLUENCE: cascade in our direction = boost, against us = skip
+        try:
+            cascade = liquidation_ws.get_cascade(coin, max_age_sec=300)
+            if cascade:
+                # cascade['side'] is the liquidated side: SELL = longs liquidated (price crashed, reversal buy signal)
+                #                                       BUY = shorts liquidated (price spiked, reversal sell signal)
+                # Our signal should fade the liquidated direction.
+                # If cascade SELL (longs liq'd) and we're BUYING → CONFLUENCE (fade down)
+                # If cascade BUY (shorts liq'd) and we're SELLING → CONFLUENCE (fade up)
+                favorable = (cascade.get('side')=='SELL' and sig=='BUY') or (cascade.get('side')=='BUY' and sig=='SELL')
+                if favorable:
+                    risk_mult *= 1.3
+                    log(f"{coin} LIQ CASCADE CONFLUENCE ${cascade.get('total_usd',0)/1e6:.1f}M → 1.3x boost")
+                else:
+                    # cascade AGAINST us - skip entry, likely chop/trap
+                    log(f"{coin} {sig} SKIP — liq cascade against ({cascade.get('side')})")
+                    return
+        except Exception as e:
+            pass  # liq_ws optional
     total_locked = get_total_margin()
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
