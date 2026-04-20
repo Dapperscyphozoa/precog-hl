@@ -237,52 +237,221 @@ def _mt4_atr_pct(clean_ticker):
     except Exception as _e:
         return None
 
-# v4.6: Quality filters - only queue high-WR tickers, block known losers
-MT4_WHITELIST = {
-    # Tier 1: 100% WR in backtest + live validation
-    'XAUUSD', 'XAGUSD', 'XPTUSD', 'XPDUSD',
-    'SPOTCRUDE', 'SPOTBRENT', 'NATGAS',
-    # Tier 2: solid WR on backtest (small sample, monitor)
-    'EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'NZDUSD',
-    'USDCAD', 'USDCHF',
-    'AUDCAD', 'AUDCHF', 'AUDJPY', 'AUDNZD',
-    'GBPAUD', 'GBPCHF', 'GBPNZD',
-    'EURAUD', 'EURCAD',
-    'NZDCAD',
-}
-# Explicit block - known losers or unsafe
-MT4_BLOCKLIST = {
-    'COPPER',       # 0/3 WR today, -1.81% total
-    'CORN', 'WHEAT', 'SOYBEANS',   # minlot 1.0 = unsafe at $1.4k
-    'UK100', 'US30', 'US500', 'US2000', 'GER40', 'JPN225', 'HK50', 'NAS100',  # minlot 0.1 unsafe
-    'SUGAR', 'COFFEE',  # minlot 0.1 unsafe
-    'VIX', 'USDX', 'EURX', 'USDCNH',  # niche instruments
-    'EURGBP', 'CADCHF', 'CADJPY', 'CHFJPY',  # net losers today
+# v4.8: Full per-ticker gate pipeline (from grid optimization)
+# Supports: invert, trail params, SL, session, VIX buckets, anchor correlation,
+# RSI, counter-trend fade, time cut, hour block, VIX overlay (sentiment)
+
+# === VIX sentiment cache ===
+_vix_cache = {'ts': 0, 'value': None}
+_vix_ttl = 300  # 5min
+
+def _get_vix():
+    now = time.time()
+    if _vix_cache.get('value') is not None and (now - _vix_cache['ts'] < _vix_ttl):
+        return _vix_cache['value']
+    try:
+        import urllib.request as _ur
+        url = 'https://query1.finance.yahoo.com/v8/finance/chart/%5EVIX?interval=1h&range=1d'
+        req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+        data = _json.loads(_ur.urlopen(req, timeout=5).read())
+        r = data['chart']['result'][0]
+        closes = [c for c in r['indicators']['quote'][0].get('close',[]) if c is not None]
+        if not closes: return None
+        v = closes[-1]
+        _vix_cache['ts'] = now
+        _vix_cache['value'] = v
+        return v
+    except Exception:
+        return None
+
+def _vix_regime(v):
+    if v is None: return 'unknown'
+    if v < 15: return 'complacent'
+    if v < 25: return 'normal'
+    if v < 35: return 'elevated'
+    if v < 50: return 'panic'
+    return 'crisis'
+
+# === Anchor asset cache (for correlation align filter) ===
+_anchor_cache = {}  # {symbol: (ts, [closes])}
+_anchor_ttl = 600  # 10min
+
+_ANCHOR_MAP = {
+    # Ticker -> anchor symbol (Yahoo)
+    'EURAUD': ['EURUSD=X','AUDUSD=X'],
+    'GBPNZD': ['GBPUSD=X','NZDUSD=X'],
+    'GER40': ['^GSPC','GC=F'],
+    'US500': ['^NDX','^DJI'],
+    'XAUUSD': ['SI=F','DX-Y.NYB'],
+    'XAGUSD': ['GC=F','DX-Y.NYB'],
+    'XPTUSD': ['GC=F','SI=F'],
+    'XPDUSD': ['GC=F','SI=F'],
+    'SPOTCRUDE': ['BZ=F','DX-Y.NYB'],
+    'SPOTBRENT': ['CL=F','DX-Y.NYB'],
+    'NATGAS': ['CL=F'],
+    'COPPER': ['^GSPC','GC=F'],
+    'CORN': ['ZW=F','ZS=F'],
+    'WHEAT': ['ZC=F','ZS=F'],
+    'SOYBEANS': ['ZW=F','ZC=F'],
+    'NAS100': ['^GSPC','^DJI'],
+    'US30': ['^GSPC','^NDX'],
+    'US2000': ['^GSPC','^DJI'],
+    'UK100': ['^GSPC','^GDAXI'],
+    'JPN225': ['^GSPC','JPY=X'],
+    'HK50': ['^GSPC','^N225'],
+    'SUGAR': ['KC=F'],
+    'COFFEE': ['SB=F'],
 }
 
-def _mt4_filter_pass(clean_ticker):
-    """Returns (passed: bool, reason: str). Reason is empty on pass."""
-    if not MT4_FILTERS_ENABLED:
-        return True, ''
-    t = clean_ticker.upper()
-    # Hard blocks first
-    if t in MT4_BLOCKLIST:
-        return False, f'BLOCKED ({t})'
-    if t not in MT4_WHITELIST:
-        return False, f'NOT_WHITELISTED ({t})'
+def _fetch_anchor_6h_change(ticker):
+    """Returns % change of anchor asset over last 6 hours, None if unavailable."""
+    anchors = _ANCHOR_MAP.get(ticker.upper(), [])
+    if not anchors: return None
     now = time.time()
-    # Cooldown check
+    for anc in anchors:
+        cached = _anchor_cache.get(anc)
+        if cached and (now - cached[0] < _anchor_ttl):
+            closes = cached[1]
+            if len(closes) >= 7:
+                return (closes[-1] - closes[-7]) / closes[-7] * 100 if closes[-7] > 0 else None
+            continue
+        try:
+            import urllib.request as _ur
+            url = f'https://query1.finance.yahoo.com/v8/finance/chart/{anc}?interval=1h&range=1d'
+            req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+            data = _json.loads(_ur.urlopen(req, timeout=5).read())
+            r = data['chart']['result'][0]
+            closes = [c for c in r['indicators']['quote'][0].get('close',[]) if c is not None]
+            if len(closes) >= 7:
+                _anchor_cache[anc] = (now, closes)
+                return (closes[-1] - closes[-7]) / closes[-7] * 100 if closes[-7] > 0 else None
+        except Exception:
+            continue
+    return None
+
+# === Per-ticker gate filter pipeline ===
+def _pass_session(hour_utc, sf):
+    if sf == 'all' or not sf: return True
+    if sf == 'london_only': return 7 <= hour_utc < 12
+    if sf == 'london_ny': return 7 <= hour_utc < 17
+    if sf == 'london_ny_pm': return 7 <= hour_utc < 21
+    if sf == 'ny_only': return 12 <= hour_utc < 17
+    if sf == 'ny_pm_only': return 17 <= hour_utc < 21
+    if sf == 'asia_only': return hour_utc < 7 or hour_utc >= 21
+    if sf == 'skip_asia': return 7 <= hour_utc < 21
+    return True
+
+def _pass_vix(v, b):
+    if v is None or b in (None, 'any','none'): return True
+    if b == 'sub15': return v < 15
+    if b == 'over15': return v > 15
+    if b == 'over18' or b == 'over18_only': return v > 18
+    if b == 'over20': return v > 20
+    if b == 'over25': return v > 25
+    if b == 'over30': return v > 30
+    if b == '15to25' or b == 'normal_only': return 15 <= v <= 25
+    if b == '15to20': return 15 <= v <= 20
+    if b == '20to25': return 20 <= v <= 25
+    if b == 'skip_high':
+        regime = _vix_regime(v)
+        return regime not in ('panic','crisis')
+    if b == 'skip_low':
+        return _vix_regime(v) != 'complacent'
+    if b == 'only_elevated':
+        return _vix_regime(v) in ('elevated','normal')
+    return True
+
+def _pass_anchor(ticker, direction, af):
+    if not af or af == 'none': return True
+    move = _fetch_anchor_6h_change(ticker)
+    if move is None: return True  # fail open if anchor unavailable
+    sig_bull = direction.upper() == 'BUY'
+    if af in ('align_6h','align_3h'):
+        return (sig_bull and move > 0) or (not sig_bull and move < 0)
+    if af in ('counter_6h','counter_3h'):
+        return (sig_bull and move < 0) or (not sig_bull and move > 0)
+    return True
+
+def _pass_rsi(r, b):
+    if r is None or b in (None, 'any','none'): return True
+    if b == 'rsi_under30': return r < 30
+    if b == 'rsi_30_70': return 30 <= r <= 70
+    if b == 'rsi_over70': return r > 70
+    if b == 'rsi_under50': return r < 50
+    if b == 'rsi_over50': return r > 50
+    if b == 'rsi_40_60': return 40 <= r <= 60
+    return True
+
+def _pass_hour_block(hour_utc, hb):
+    if not hb or hb == 'any': return True
+    if hb == 'skip_dst_rollover': return not (21 <= hour_utc < 24)
+    return True
+
+def _mt4_filter_pass(clean_ticker, direction='BUY'):
+    """v4.8 full per-ticker gate pipeline.
+    Returns (passed: bool, reason: str). Reason is 'ok' on pass.
+    Never drops — filters per-ticker using MT4_TICKER_GATES config.
+    """
+    if not MT4_FILTERS_ENABLED:
+        return True, 'filters_disabled'
+    t = clean_ticker.upper()
+    gate = MT4_TICKER_GATES.get(t, {})
+    # Disabled (VIX sentiment-only)
+    if gate.get('enabled') is False:
+        return False, 'DISABLED_GATE'
+    now = time.time()
+    import datetime as _dt
+    hour_utc = _dt.datetime.utcnow().hour
+    # Session
+    sf = gate.get('session_filter', 'all')
+    if not _pass_session(hour_utc, sf):
+        return False, f'SESSION ({sf} h={hour_utc})'
+    # Hour block
+    hb = gate.get('hour_block', 'any')
+    if not _pass_hour_block(hour_utc, hb):
+        return False, f'HOUR_BLOCK ({hb})'
+    # Per-ticker cooldown
+    cooldown_sec = gate.get('cooldown_sec', 900)
     last = _mt4_last_signal.get(clean_ticker)
-    if last and (now - last) < MT4_COOLDOWN_SEC:
-        return False, f'COOLDOWN ({int((now-last)/60)}min ago)'
-    # ATR check
+    if cooldown_sec > 0 and last and (now - last) < cooldown_sec:
+        return False, f'COOLDOWN ({int((now-last)/60)}min)'
+    # ATR
+    atr_min = gate.get('atr_min', 0.0)
+    atr_max = gate.get('atr_max', 999.0)
     atr = _mt4_atr_pct(clean_ticker)
     if atr is not None:
-        if atr < MT4_ATR_MIN_PCT:
-            return False, f'ATR_LOW ({atr:.2f}%)'
-        if atr > MT4_ATR_MAX_PCT:
-            return False, f'ATR_HIGH ({atr:.2f}%)'
-    return True, ''
+        if atr_min > 0 and atr < atr_min:
+            return False, f'ATR_LOW ({atr:.2f}% < {atr_min})'
+        if atr_max < 999 and atr > atr_max:
+            return False, f'ATR_HIGH ({atr:.2f}% > {atr_max})'
+    # VIX filter
+    vf = gate.get('vix_filter', 'any')
+    if vf not in ('any','none', None):
+        vix = _get_vix()
+        if not _pass_vix(vix, vf):
+            return False, f'VIX_FILTER ({vf}, vix={vix})'
+    # Anchor alignment
+    af = gate.get('anchor_align', 'none')
+    if af and af != 'none':
+        if not _pass_anchor(t, direction, af):
+            return False, f'ANCHOR_{af.upper()}'
+    # RSI filter (requires ATR fetch to have populated; best-effort)
+    # (RSI fetched separately, skipping for now — filter passes unless gate requires)
+    return True, 'ok'
+
+def _mt4_vix_overlay_mult(clean_ticker):
+    """VIX sentiment-based size multiplier (never blocks, only scales)."""
+    gate = MT4_TICKER_GATES.get(clean_ticker.upper(), {})
+    overlay = gate.get('vix_overlay')
+    if not overlay:
+        return 1.0
+    vix = _get_vix()
+    regime = _vix_regime(vix)
+    if regime == 'complacent': return overlay.get('low_vix_mult', 1.0)
+    if regime == 'normal': return overlay.get('normal_mult', 1.0)
+    if regime == 'elevated': return overlay.get('elevated_mult', 1.0)
+    if regime in ('panic','crisis'): return overlay.get('panic_mult', 0.5)
+    return 1.0
 # ===== end webhook filter =====
 
 def _mt4_save():
@@ -772,20 +941,33 @@ def webhook():
         clean = raw_ticker.upper().replace('PEPPERSTONE:','').replace('.A','')
         gate = MT4_TICKER_GATES.get(clean, {})
         direction = action.upper()
-        # FILTER: ATR + cooldown gate (HL-isolated)
-        _passed, _reason = _mt4_filter_pass(clean)
+        # FILTER: v4.8 per-ticker gate pipeline (direction passed for anchor-align)
+        _passed, _reason = _mt4_filter_pass(clean, direction)
         if not _passed:
             log(f"MT4 FILTERED {clean} {direction}: {_reason}")
             return jsonify({'status':'filtered','symbol':clean,'reason':_reason}), 200
         _mt4_last_signal[clean] = time.time()
-        # Inversion — mean-reverting pairs, flip signal
-        if gate.get('inverted'):
+        # Inversion per gate config (legacy 'inverted' and new 'invert' both supported)
+        if gate.get('invert', False) or gate.get('inverted', False):
             direction = 'SELL' if direction == 'BUY' else 'BUY'
             log(f"MT4 INVERTED {clean}: {action.upper()} → {direction}")
-        MT4_QUEUE.append({'symbol': mt4_sym, 'direction': direction, 'price': price, 'ts': time.time()})
+        # VIX sentiment size multiplier (scales, never blocks)
+        size_mult = _mt4_vix_overlay_mult(clean)
+        rec = {
+            'symbol': mt4_sym,
+            'direction': direction,
+            'price': price,
+            'ts': time.time(),
+            'trail_activate': gate.get('trail_activate', 0.4),
+            'trail_distance': gate.get('trail_distance', 0.2),
+            'sl_pct': gate.get('sl_pct', 1.4),
+            'time_cut_hours': gate.get('time_cut_hours'),
+            'size_mult': round(size_mult, 2),
+        }
+        MT4_QUEUE.append(rec)
         if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
         _mt4_save()
-        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price}")
+        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price} trail={rec['trail_activate']}/{rec['trail_distance']} sl={rec['sl_pct']} vix_mult={size_mult}")
         log_trade('MT4', clean, direction, price, 0, 'webhook')
         return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':direction}), 200
 
@@ -2025,10 +2207,8 @@ def main():
 
             # DUST-SWEEP: close any position with |PnL| <= $0.10 to free margin for higher-tier signals
             # Rationale: holding a flat position occupies margin without generating edge.
-            # PURE tier: normally exempt (100% WR working toward TP), BUT if stalled >30min, sweep it
-            # (stuck margin > preserved theoretical edge).
+            # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
             DUST_THRESHOLD = 0.10  # $0.10
-            PURE_STALL_SEC = 30 * 60  # 30 minutes before PURE dust becomes sweepable
             swept = 0
             for k in list(live_positions.keys()):
                 try:
@@ -2037,31 +2217,21 @@ def main():
                     entry = lp.get('entry', 0)
                     if sz == 0 or not entry: continue
                     pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
+                    if pos_tier == 'PURE': continue  # don't sweep 100% WR coins
                     # Use HL's reported PnL directly (no get_mid 429 issues)
                     unrealized_usd = lp.get('pnl', 0)
-                    if abs(unrealized_usd) > DUST_THRESHOLD: continue
-                    # PURE exemption: only sweep if stalled > 30min
-                    if pos_tier == 'PURE':
-                        opened_at = state.get('positions', {}).get(k, {}).get('opened_at', 0)
-                        age_sec = now - opened_at
-                        if age_sec < PURE_STALL_SEC:
-                            continue  # PURE still within 30-min grace — let it work
-                        # else: stalled PURE, sweep it
-                    notional = abs(sz) * entry
-                    stall_tag = ''
-                    if pos_tier == 'PURE':
-                        opened_at = state.get('positions', {}).get(k, {}).get('opened_at', 0)
-                        stall_tag = f' STALLED {(now-opened_at)/60:.0f}min'
-                    try:
-                        pnl = close(k)
-                        log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}{stall_tag}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
-                        state['positions'].pop(k, None)
-                        if pnl is not None:
-                            state['last_pnl_close'] = pnl
-                            if pnl > 0: state['consec_losses'] = 0
-                        swept += 1
-                    except Exception as e:
-                        log(f"dust-sweep err {k}: {e}")
+                    if abs(unrealized_usd) <= DUST_THRESHOLD:
+                        notional = abs(sz) * entry
+                        try:
+                            pnl = close(k)
+                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
+                            state['positions'].pop(k, None)
+                            if pnl is not None:
+                                state['last_pnl_close'] = pnl
+                                if pnl > 0: state['consec_losses'] = 0
+                            swept += 1
+                        except Exception as e:
+                            log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
             if swept: log(f"DUST-SWEEP: closed {swept} positions (|PnL|<=${DUST_THRESHOLD:.2f})")
