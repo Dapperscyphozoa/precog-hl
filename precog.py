@@ -272,19 +272,21 @@ app = Flask(__name__)
 
 _LANDING_HTML = None
 def _load_landing():
-    global _LANDING_HTML
-    if _LANDING_HTML is None:
-        try:
-            with open(os.path.join(os.path.dirname(__file__), 'landing.html'), 'r') as f:
-                _LANDING_HTML = f.read()
-        except Exception as e:
-            _LANDING_HTML = f"<h1>landing load err: {e}</h1>"
-    return _LANDING_HTML
+    # Always re-read so deploys pick up immediately
+    try:
+        with open(os.path.join(os.path.dirname(__file__), 'landing.html'), 'r') as f:
+            return f.read()
+    except Exception as e:
+        return f"<h1>landing load err: {e}</h1>"
 
 @app.route('/', methods=['GET'])
 @app.route('/landing', methods=['GET'])
 def landing():
-    return Response(_load_landing(), mimetype='text/html')
+    resp = Response(_load_landing(), mimetype='text/html')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 @app.route('/orderbook/<coin>', methods=['GET'])
 def orderbook_depth(coin):
