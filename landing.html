@@ -86,17 +86,36 @@ body::after {
 .hero-stat-lbl { font-size: 9px; letter-spacing: 0.3em; opacity: 0.5; text-transform: uppercase; margin-top: 4px; }
 
 /* BIOMECH */
-.biomech-stage { position: relative; display: flex; align-items: center; justify-content: center; }
-.biomech { width: 100%; height: 100%; max-width: 560px; position: relative; }
-.biomech svg { width: 100%; height: auto; filter: drop-shadow(0 0 40px rgba(0,229,255,0.15)); }
+.biomech-stage { position: relative; display: flex; align-items: center; justify-content: center; perspective: 1200px; perspective-origin: 50% 50%; }
+.biomech { width: 100%; height: 100%; max-width: 560px; position: relative; transform-style: preserve-3d; animation: reactorTilt 18s ease-in-out infinite; }
+.biomech svg { width: 100%; height: auto; filter: drop-shadow(0 0 40px rgba(0,229,255,0.25)) drop-shadow(0 15px 30px rgba(0,0,0,0.6)); transform-style: preserve-3d; }
+
+@keyframes reactorTilt {
+  0%, 100% { transform: rotateX(22deg) rotateY(-14deg); }
+  50%      { transform: rotateX(18deg) rotateY(14deg); }
+}
+
+/* True 3D: ring rotates around its own Y-axis (axial spin, not 2D swirl) */
+@keyframes spin3dY-slow { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
+@keyframes spin3dY-rev  { from { transform: rotateY(0deg); } to { transform: rotateY(-360deg); } }
+@keyframes spin3dX      { from { transform: rotateX(0deg); } to { transform: rotateX(360deg); } }
+
 @keyframes rotate-slow { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes rotate-rev { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
 @keyframes flicker { 0%,100% { opacity: 1; } 48% { opacity: 1; } 50% { opacity: 0.3; } 52% { opacity: 1; } }
-@keyframes thrum { 0%,100% { transform: scale(1); opacity: 0.8; } 50% { transform: scale(1.04); opacity: 1; } }
-.orbit-outer { transform-origin: 300px 300px; animation: rotate-slow 40s linear infinite; }
-.orbit-inner { transform-origin: 300px 300px; animation: rotate-rev 28s linear infinite; }
-.core-pulse { transform-origin: 300px 300px; animation: thrum 2.4s ease-in-out infinite; }
+@keyframes thrum { 0%,100% { transform: scale(1); opacity: 0.8; } 50% { transform: scale(1.08); opacity: 1; } }
+
+/* Apply 3D axial rotation — rings tilt & spin like gimbals */
+.orbit-outer { transform-origin: 300px 300px; animation: rotate-slow 40s linear infinite; transform-box: fill-box; }
+.orbit-inner { transform-origin: 300px 300px; animation: rotate-rev 28s linear infinite; transform-box: fill-box; }
+.core-pulse { transform-origin: 300px 300px; animation: thrum 2.4s ease-in-out infinite; transform-box: fill-box; }
 .flicker { animation: flicker 5s infinite; }
+
+/* Depth layers — parallax effect */
+.layer-back  { transform: translateZ(-80px); }
+.layer-mid   { transform: translateZ(0px); }
+.layer-front { transform: translateZ(60px); }
+.layer-core  { transform: translateZ(100px); }
 
 /* GRID PANELS */
 .grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 24px; margin-bottom: 32px; }
@@ -248,12 +267,32 @@ body::after {
             <svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg">
                 <defs>
                     <radialGradient id="core" cx="50%" cy="50%">
-                        <stop offset="0%" stop-color="#b8ff2f" stop-opacity="0.9"/>
-                        <stop offset="40%" stop-color="#00e5ff" stop-opacity="0.3"/>
+                        <stop offset="0%" stop-color="#b8ff2f" stop-opacity="1"/>
+                        <stop offset="25%" stop-color="#b8ff2f" stop-opacity="0.6"/>
+                        <stop offset="50%" stop-color="#00e5ff" stop-opacity="0.25"/>
                         <stop offset="100%" stop-color="#07080a" stop-opacity="0"/>
                     </radialGradient>
+                    <radialGradient id="coreHot" cx="50%" cy="50%">
+                        <stop offset="0%" stop-color="#ffffff" stop-opacity="1"/>
+                        <stop offset="15%" stop-color="#b8ff2f" stop-opacity="0.9"/>
+                        <stop offset="100%" stop-color="#b8ff2f" stop-opacity="0"/>
+                    </radialGradient>
+                    <radialGradient id="sphere" cx="35%" cy="35%">
+                        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35"/>
+                        <stop offset="40%" stop-color="#c8ccd4" stop-opacity="0.08"/>
+                        <stop offset="100%" stop-color="#07080a" stop-opacity="0"/>
+                    </radialGradient>
+                    <linearGradient id="shadow3d" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15"/>
+                        <stop offset="50%" stop-color="#07080a" stop-opacity="0"/>
+                        <stop offset="100%" stop-color="#000000" stop-opacity="0.5"/>
+                    </linearGradient>
                     <filter id="glow">
                         <feGaussianBlur stdDeviation="2"/>
+                        <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                    <filter id="glowBig">
+                        <feGaussianBlur stdDeviation="8"/>
                         <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
                     </filter>
                 </defs>
@@ -324,8 +363,17 @@ body::after {
                     <path d="M300 280 Q490 330 440 410"/>
                 </g>
 
+                <!-- Outer volumetric glow halo -->
+                <circle cx="300" cy="300" r="260" fill="url(#coreHot)" opacity="0.15" class="core-pulse"/>
+
                 <!-- Core reactor -->
                 <circle cx="300" cy="300" r="180" fill="url(#core)" class="core-pulse"/>
+
+                <!-- Spherical highlight (fakes 3D sphere surface) -->
+                <circle cx="300" cy="300" r="180" fill="url(#sphere)" opacity="0.8"/>
+
+                <!-- Shadow cast (3D depth hint) -->
+                <ellipse cx="300" cy="495" rx="160" ry="18" fill="#000000" opacity="0.35" filter="url(#glow)"/>
 
                 <!-- Chamber rings -->
                 <g fill="none" stroke="#b8ff2f" stroke-width="0.8" opacity="0.4">
@@ -350,12 +398,14 @@ body::after {
                 </g>
 
                 <!-- Central eye -->
-                <g filter="url(#glow)">
-                    <circle cx="300" cy="300" r="30" fill="#07080a" stroke="#b8ff2f" stroke-width="1.5"/>
+                <g filter="url(#glowBig)">
+                    <circle cx="300" cy="300" r="32" fill="#07080a" stroke="#b8ff2f" stroke-width="2"/>
                     <circle cx="300" cy="300" r="15" fill="#c1272d">
                         <animate attributeName="r" values="15;12;15" dur="1.8s" repeatCount="indefinite"/>
                     </circle>
-                    <circle cx="300" cy="300" r="5" fill="#b8ff2f"/>
+                    <circle cx="300" cy="300" r="6" fill="#ffffff" opacity="0.95">
+                        <animate attributeName="opacity" values="0.95;0.6;0.95" dur="1.8s" repeatCount="indefinite"/>
+                    </circle>
                 </g>
 
                 <!-- Corner markers -->
