@@ -2025,8 +2025,10 @@ def main():
 
             # DUST-SWEEP: close any position with |PnL| <= $0.10 to free margin for higher-tier signals
             # Rationale: holding a flat position occupies margin without generating edge.
-            # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
+            # PURE tier: normally exempt (100% WR working toward TP), BUT if stalled >30min, sweep it
+            # (stuck margin > preserved theoretical edge).
             DUST_THRESHOLD = 0.10  # $0.10
+            PURE_STALL_SEC = 30 * 60  # 30 minutes before PURE dust becomes sweepable
             swept = 0
             for k in list(live_positions.keys()):
                 try:
@@ -2035,21 +2037,31 @@ def main():
                     entry = lp.get('entry', 0)
                     if sz == 0 or not entry: continue
                     pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
-                    if pos_tier == 'PURE': continue  # don't sweep 100% WR coins
                     # Use HL's reported PnL directly (no get_mid 429 issues)
                     unrealized_usd = lp.get('pnl', 0)
-                    if abs(unrealized_usd) <= DUST_THRESHOLD:
-                        notional = abs(sz) * entry
-                        try:
-                            pnl = close(k)
-                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
-                            state['positions'].pop(k, None)
-                            if pnl is not None:
-                                state['last_pnl_close'] = pnl
-                                if pnl > 0: state['consec_losses'] = 0
-                            swept += 1
-                        except Exception as e:
-                            log(f"dust-sweep err {k}: {e}")
+                    if abs(unrealized_usd) > DUST_THRESHOLD: continue
+                    # PURE exemption: only sweep if stalled > 30min
+                    if pos_tier == 'PURE':
+                        opened_at = state.get('positions', {}).get(k, {}).get('opened_at', 0)
+                        age_sec = now - opened_at
+                        if age_sec < PURE_STALL_SEC:
+                            continue  # PURE still within 30-min grace — let it work
+                        # else: stalled PURE, sweep it
+                    notional = abs(sz) * entry
+                    stall_tag = ''
+                    if pos_tier == 'PURE':
+                        opened_at = state.get('positions', {}).get(k, {}).get('opened_at', 0)
+                        stall_tag = f' STALLED {(now-opened_at)/60:.0f}min'
+                    try:
+                        pnl = close(k)
+                        log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}{stall_tag}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
+                        state['positions'].pop(k, None)
+                        if pnl is not None:
+                            state['last_pnl_close'] = pnl
+                            if pnl > 0: state['consec_losses'] = 0
+                        swept += 1
+                    except Exception as e:
+                        log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
             if swept: log(f"DUST-SWEEP: closed {swept} positions (|PnL|<=${DUST_THRESHOLD:.2f})")
