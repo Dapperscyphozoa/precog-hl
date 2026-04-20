@@ -1864,7 +1864,38 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if not percoin_configs.check_filter(elite_cfg['flt'], ema200_val, ema50_val, adx_val, side, price):
             log(f"{coin} {sig} SKIP — failed filter {elite_cfg['flt']}")
             return
-        log(f"{coin} ELITE PASS — TP={elite_cfg['TP']*100:.2f}% SL={elite_cfg['SL']*100:.0f}% lev={percoin_configs.elite_leverage()}x")
+
+        # EXTRA FILTERS for SEVENTY_79 tier (73% WR → need precision)
+        # 3-layer stack: signal_persistence + wall_confluence HARD gate + BTC correlation strict
+        if percoin_configs.needs_extra_filters(coin):
+            # Filter 1: signal_persistence (2-bar confirm)
+            try:
+                if not signal_persistence.check(coin, sig, bar_ts):
+                    log(f"{coin} {sig} SKIP — signal_persistence (1st bar, staged)")
+                    return
+            except Exception as e:
+                log(f"{coin} persistence err: {e}")
+            # Filter 2: wall_confluence HARD gate — entry must be within 0.3% of verified wall
+            try:
+                wall_ctx = wall_confluence.wall_context(coin, sig, price)
+                if not wall_ctx or wall_ctx.get('dist_pct', 99) > 0.3:
+                    log(f"{coin} {sig} SKIP — no wall confluence (dist>{wall_ctx.get('dist_pct','N/A')}%)")
+                    return
+            except Exception as e:
+                log(f"{coin} wall gate err: {e}")
+            # Filter 3: BTC correlation STRICT — block any signal counter to BTC 1H direction
+            try:
+                btc_st = btc_correlation.get_state()
+                btc_1h = btc_st.get('btc_1h_dir', 0)
+                signal_dir = 1 if sig == 'BUY' else -1
+                if btc_1h != 0 and btc_1h != signal_dir:
+                    log(f"{coin} {sig} SKIP — counter BTC 1h ({btc_1h})")
+                    return
+            except Exception as e:
+                log(f"{coin} btc gate err: {e}")
+            log(f"{coin} {sig} PASSED 3-FILTER STACK (tier SEVENTY_79)")
+
+        log(f"{coin} ELITE PASS — TP={elite_cfg['TP']*100:.2f}% SL={elite_cfg['SL']*100:.0f}% lev={percoin_configs.elite_leverage(coin)}x")
 
     # Confidence scoring: 0-100 → sizing multiplier (0.5x / 1.0x / 1.5x / 2.0x)
     # OOS: every score tier profitable, use as SIZING not filter. Every signal trades.

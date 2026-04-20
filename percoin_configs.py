@@ -75,11 +75,41 @@ EIGHTY_89 = {
     'ZORA':    {'sigs':['PV'],          'flt':'ema200',     'RH':70,'RL':30,'TP':0.016,'SL':0.05},
 }
 
+
+# ─── TIER 4: 70-79% WR (12x × 5% risk + 3-FILTER STACK) ───
+# Filters required: signal_persistence (2-bar confirm) + wall_confluence HARD gate + BTC correlation strict
+SEVENTY_79 = {
+    'ANIME':  {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.031,'SL':0.05},
+    'APEX':   {'sigs':['BB','PV'],     'flt':'ema200+adx20','RH':70,'RL':30,'TP':0.021,'SL':0.05},
+    'AXS':    {'sigs':['IB','PV'],     'flt':'none',       'RH':70,'RL':30,'TP':0.027,'SL':0.05},
+    'BCH':    {'sigs':['BB'],          'flt':'ema200+adx20','RH':70,'RL':30,'TP':0.020,'SL':0.05},
+    'CC':     {'sigs':['BB','IB'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.033,'SL':0.05},
+    'CELO':   {'sigs':['PV'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.031,'SL':0.05},
+    'GMT':    {'sigs':['PV'],          'flt':'adx20',      'RH':70,'RL':30,'TP':0.027,'SL':0.05},
+    'HEMI':   {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.028,'SL':0.05},
+    'INIT':   {'sigs':['IB','PV'],     'flt':'ema200+adx20','RH':70,'RL':30,'TP':0.032,'SL':0.05},
+    'MANTA':  {'sigs':['IB','PV'],     'flt':'adx20',      'RH':70,'RL':30,'TP':0.025,'SL':0.05},
+    'MET':    {'sigs':['IB'],          'flt':'ema200',     'RH':70,'RL':30,'TP':0.029,'SL':0.05},
+    'NXPC':   {'sigs':['BB','PV'],     'flt':'adx25',      'RH':70,'RL':30,'TP':0.031,'SL':0.05},
+    'POPCAT': {'sigs':['BB','PV'],     'flt':'adx25',      'RH':70,'RL':30,'TP':0.026,'SL':0.05},
+    'RESOLV': {'sigs':['PV'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.030,'SL':0.05},
+    'REZ':    {'sigs':['IB'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.030,'SL':0.05},
+    'RUNE':   {'sigs':['IB'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.022,'SL':0.05},
+    'SNX':    {'sigs':['BB','PV'],     'flt':'adx20',      'RH':70,'RL':30,'TP':0.030,'SL':0.05},
+    'STABLE': {'sigs':['BB','PV'],     'flt':'adx25',      'RH':70,'RL':30,'TP':0.031,'SL':0.05},
+    'STBL':   {'sigs':['PV'],          'flt':'ema200+adx25','RH':70,'RL':30,'TP':0.036,'SL':0.05},
+    'STX':    {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.024,'SL':0.05},
+    'YZY':    {'sigs':['BB','IB','PV'],'flt':'none',       'RH':70,'RL':30,'TP':0.019,'SL':0.05},
+    'ZEC':    {'sigs':['BB'],          'flt':'adx20',      'RH':70,'RL':30,'TP':0.028,'SL':0.05},
+    'kNEIRO': {'sigs':['PV'],          'flt':'ema200',     'RH':70,'RL':30,'TP':0.033,'SL':0.05},
+}
+
 # Per-tier position sizing
 TIER_SIZING = {
     'PURE':      {'leverage': 20, 'risk_pct': 0.10},
     'NINETY_99': {'leverage': 15, 'risk_pct': 0.05},
     'EIGHTY_89': {'leverage': 12, 'risk_pct': 0.05},
+    'SEVENTY_79': {'leverage': 12, 'risk_pct': 0.05},
 }
 
 ELITE_MODE = True
@@ -89,6 +119,7 @@ def get_tier(coin):
     if coin in PURE_14: return 'PURE'
     if coin in NINETY_99: return 'NINETY_99'
     if coin in EIGHTY_89: return 'EIGHTY_89'
+    if coin in SEVENTY_79: return 'SEVENTY_79'
     return None
 
 def is_elite(coin):
@@ -100,6 +131,7 @@ def get_config(coin):
     if coin in PURE_14: return PURE_14[coin]
     if coin in NINETY_99: return NINETY_99[coin]
     if coin in EIGHTY_89: return EIGHTY_89[coin]
+    if coin in SEVENTY_79: return SEVENTY_79[coin]
     return None
 
 def get_sizing(coin):
@@ -132,6 +164,11 @@ def check_signal_allowed(coin, sig_type):
     sig_map = {'PIVOT':'PV','BB_REJ':'BB','INSIDE_BAR':'IB'}
     return sig_map.get(sig_type, sig_type) in cfg['sigs']
 
+
+def needs_extra_filters(coin):
+    """70-79% tier requires extra filter stack (signal_persistence + wall_confluence + btc_strict)."""
+    return get_tier(coin) == 'SEVENTY_79'
+
 def stats():
     return {
         'elite_mode': ELITE_MODE,
@@ -139,6 +176,7 @@ def stats():
             'PURE_14':    {'coins': sorted(PURE_14.keys()),    'count': len(PURE_14),    'lev': 20, 'risk': '10%'},
             'NINETY_99':  {'coins': sorted(NINETY_99.keys()),  'count': len(NINETY_99),  'lev': 15, 'risk': '5%'},
             'EIGHTY_89':  {'coins': sorted(EIGHTY_89.keys()),  'count': len(EIGHTY_89),  'lev': 12, 'risk': '5%'},
+            'SEVENTY_79': {'coins': sorted(SEVENTY_79.keys()), 'count': len(SEVENTY_79), 'lev': 12, 'risk': '5%', 'extra_filters': ['signal_persistence','wall_confluence','btc_corr_strict']},
         },
-        'total_coins': len(PURE_14) + len(NINETY_99) + len(EIGHTY_89),
+        'total_coins': len(PURE_14) + len(NINETY_99) + len(EIGHTY_89) + len(SEVENTY_79),
     }
