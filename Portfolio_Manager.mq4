@@ -22,6 +22,9 @@ extern bool   UseLocalEMAFilter = true;  // 2nd-gate webhook signals with local 
 extern bool   UseLimitOrders    = true;  // maker entries at webhook price (kills slippage)
 extern int    LimitExpiryMin    = 15;    // cancel unfilled limit after N min
 extern double LimitOffsetPips   = 2;     // offset limit N pips inside market (for safe fill)
+extern bool   FlattenOnInit     = false; // close all magic-matched on EA attach (one-shot)
+extern string FlattenURL        = "https://precog-hl-web.onrender.com/mt4/flatten/check";
+extern string FlattenAckURL     = "https://precog-hl-web.onrender.com/mt4/flatten/ack";
 
 datetime lastBarTime[256];
 string   syms[256];
@@ -84,6 +87,70 @@ double GetLot(string sym) {
    if (lot > mx) lot = mx;
    if (st > 0)   lot = MathFloor(lot / st) * st;
    return NormalizeDouble(lot, 2);
+}
+
+//+------------------------------------------------------------------+
+// Flatten: close all magic-matched + delete pendings. Returns (closed, deleted).
+//+------------------------------------------------------------------+
+int flattenClosed = 0, flattenDeleted = 0;
+void FlattenAll(string reason) {
+   flattenClosed = 0; flattenDeleted = 0;
+   for (int i = OrdersTotal() - 1; i >= 0; i--) {
+      if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if (OrderMagicNumber() != MagicNum) continue;
+      int typ = OrderType();
+      int tk = OrderTicket();
+      string sym = OrderSymbol();
+      if (typ == OP_BUY) {
+         double bid = MarketInfo(sym, MODE_BID);
+         if (OrderClose(tk, OrderLots(), bid, Slippage*5, clrYellow)) flattenClosed++;
+         else Print("FLATTEN close BUY err ", sym, " ", GetLastError());
+      } else if (typ == OP_SELL) {
+         double ask = MarketInfo(sym, MODE_ASK);
+         if (OrderClose(tk, OrderLots(), ask, Slippage*5, clrYellow)) flattenClosed++;
+         else Print("FLATTEN close SELL err ", sym, " ", GetLastError());
+      } else {
+         // pending order: BUYLIMIT/SELLLIMIT/BUYSTOP/SELLSTOP
+         if (OrderDelete(tk)) flattenDeleted++;
+         else Print("FLATTEN delete err ", sym, " ", GetLastError());
+      }
+   }
+   Print("FLATTEN DONE reason=", reason, " closed=", flattenClosed, " deleted=", flattenDeleted);
+   // Ack server
+   string cookie = "", headers = "";
+   char post[], result[];
+   string url = FlattenAckURL + "?closed=" + IntegerToString(flattenClosed) + "&deleted=" + IntegerToString(flattenDeleted);
+   WebRequest("GET", url, cookie, NULL, 3000, post, 0, result, headers);
+}
+
+datetime lastFlattenPoll = 0;
+datetime lastFlattenTs   = 0;
+void PollFlatten() {
+   if (TimeCurrent() - lastFlattenPoll < PollSec) return;
+   lastFlattenPoll = TimeCurrent();
+
+   string cookie = "", headers = "";
+   char post[], result[];
+   int res = WebRequest("GET", FlattenURL, cookie, NULL, 3000, post, 0, result, headers);
+   if (res < 0) return;
+   string body = CharArrayToString(result);
+   // Look for "pending":true
+   if (StringFind(body, "\"pending\":true") < 0) return;
+   // Get ts to prevent re-flatten on same flag
+   int ts_pos = StringFind(body, "\"ts\":");
+   if (ts_pos < 0) return;
+   int ts_start = ts_pos + 5;
+   string ts_str = "";
+   for (int i = ts_start; i < StringLen(body); i++) {
+      int ch = StringGetChar(body, i);
+      if ((ch >= '0' && ch <= '9') || ch == '.') ts_str += CharToStr(ch);
+      else break;
+   }
+   datetime flag_ts = (datetime)StrToInteger(ts_str);
+   if (flag_ts <= lastFlattenTs) return;  // already acted on this
+   lastFlattenTs = flag_ts;
+   Print("FLATTEN signal received from server (ts=", flag_ts, ")");
+   FlattenAll("server_broadcast");
 }
 
 //+------------------------------------------------------------------+
@@ -359,13 +426,18 @@ int OnInit() {
       return INIT_FAILED;
    }
    Print("WebRequest probe OK (", _probe, " bytes) — EA live");
-   Comment("Portfolio_Manager v4.2 — EA live, poll=", PollSec, "s, limits=", UseLimitOrders ? "ON" : "OFF");
+   if (FlattenOnInit) {
+      Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
+      FlattenAll("init");
+   }
+   Comment("Portfolio_Manager v4.3 — poll=", PollSec, "s, limits=", UseLimitOrders ? "ON" : "OFF", ", flatten_ready=YES");
    return INIT_SUCCEEDED;
 }
 
 void OnTick() {
    ManagePositions();
    CancelStaleLimits();
+   PollFlatten();
    PollDynaPro();
 
    static int ticks = 0;
