@@ -64,13 +64,13 @@ def update_coin_wr(coin, win, state):
             log(f"COIN KILL {coin}: rolling 10-trade WR {wr*100:.0f}% < {COIN_KILL_WR_THRESHOLD*100:.0f}% → disabled 12h")
 
 def record_close(pos, coin, pnl_pct, state):
-    """Record a closed trade across all stats buckets."""
+    """Record a closed trade. pnl_pct is already percent (e.g. -2.0 = -2%)."""
     if pnl_pct is None: return
+    # Clamp to sanity range — SL caps at -2%, but leveraged wild fills can blow through
+    pnl_pct = max(-10.0, min(50.0, float(pnl_pct)))
     win = pnl_pct > 0
     now = time.time()
-    # Rolling coin WR + kill logic
     update_coin_wr(coin, win, state)
-    # Broad stats buckets
     stats = state.setdefault('stats', {
         'by_engine': {}, 'by_hour': {}, 'by_side': {}, 'by_coin': {},
         'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0
@@ -79,7 +79,7 @@ def record_close(pos, coin, pnl_pct, state):
         b = stats[bucket_name].setdefault(str(key), {'w':0,'l':0,'pnl':0.0})
         if win: b['w'] += 1
         else: b['l'] += 1
-        b['pnl'] += pnl_pct
+        b['pnl'] += pnl_pct  # already percent
     engine = pos.get('engine') or 'UNKNOWN'
     side   = pos.get('side','?')
     utc_h  = pos.get('utc_h', time.gmtime(now).tm_hour)
@@ -356,6 +356,15 @@ def landing():
     resp.headers['Expires'] = '0'
     return resp
 
+@app.route('/stats/reset', methods=['GET'])
+def stats_reset():
+    if flask_request.args.get('k') != WEBHOOK_SECRET[:16]: return jsonify({'err':'unauthorized'}), 401
+    state = load_state()
+    state['stats'] = {'by_engine': {}, 'by_hour': {}, 'by_side': {}, 'by_coin': {},
+                      'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
+    save_state(state)
+    return jsonify({'status':'stats reset'})
+
 @app.route('/stats', methods=['GET'])
 def stats_endpoint():
     """Live stats: per-engine, per-hour, per-side, per-coin, per-conf."""
@@ -367,14 +376,14 @@ def stats_endpoint():
             for k, v in bucket.items():
                 w = v.get('w',0); l = v.get('l',0); n = w + l
                 wr = (w/n) if n else 0
-                out[k] = {'n': n, 'wr': round(wr*100,1), 'pnl_pct': round(v.get('pnl',0)*100,2)}
+                out[k] = {'n': n, 'wr': round(wr*100,1), 'pnl_pct': round(v.get('pnl',0),2)}
             return out
         return jsonify({
             'total_wins': stats.get('total_wins',0),
             'total_losses': stats.get('total_losses',0),
             'total_n': stats.get('total_wins',0) + stats.get('total_losses',0),
             'overall_wr': round(stats.get('total_wins',0) / max(1, stats.get('total_wins',0)+stats.get('total_losses',0)) * 100, 1),
-            'total_pnl_pct': round(stats.get('total_pnl',0)*100, 2),
+            'total_pnl_pct': round(stats.get('total_pnl',0), 2),
             'by_engine': summarize(stats.get('by_engine', {})),
             'by_hour':   summarize(stats.get('by_hour', {})),
             'by_side':   summarize(stats.get('by_side', {})),
