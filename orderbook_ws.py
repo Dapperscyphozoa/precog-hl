@@ -235,7 +235,7 @@ def _coinbase_msg(ws, msg):
     try:
         m = json.loads(msg)
         t = m.get('type')
-        if t not in ('snapshot', 'l2update'): return
+        if t not in ('snapshot', 'l2update', 'l2update_batch'): return
         prod = m.get('product_id','')
         hl = None
         for h,v in HL_TO_COINBASE.items():
@@ -246,22 +246,27 @@ def _coinbase_msg(ws, msg):
             asks = m.get('asks',[])[:50]
             _update_levels(hl, bids, asks, 'cb')
         else:
-            # Convert delta to bid/ask lists
+            # l2update + l2update_batch: changes = [[side, price, size], ...]
             bids = []; asks = []
-            for side, p, s in m.get('changes', []):
+            for chg in m.get('changes', []):
+                if len(chg) < 3: continue
+                side, p, s = chg[0], chg[1], chg[2]
                 (bids if side == 'buy' else asks).append([p, s])
-            _update_levels(hl, bids, asks, 'cb')
+            if bids or asks:
+                _update_levels(hl, bids, asks, 'cb')
     except Exception: pass
 
 def _coinbase_open(ws):
-    ws.send(json.dumps({'type':'subscribe','product_ids':list(HL_TO_COINBASE.values()),'channels':['level2']}))
+    # level2_batch — no auth required, 50ms aggregated updates
+    ws.send(json.dumps({'type':'subscribe','product_ids':list(HL_TO_COINBASE.values()),'channels':['level2_batch']}))
 
 def _runner_coinbase():
     url = 'wss://ws-feed.exchange.coinbase.com'
     while _RUN:
         try:
             ws = websocket.WebSocketApp(url, on_message=_coinbase_msg, on_open=_coinbase_open,
-                on_error=lambda ws,e:None, on_close=lambda ws,c,m:None)
+                on_error=lambda ws,e: print(f"[ob cb err] {e}", flush=True),
+                on_close=lambda ws,c,m: print(f"[ob cb closed] {c}", flush=True))
             ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e: print(f"[ob coinbase] {e}", flush=True)
         if _RUN: time.sleep(5)
@@ -313,15 +318,24 @@ def _runner_bitget():
 def _kraken_msg(ws, msg):
     try:
         m = json.loads(msg)
-        if m.get('feed') not in ('book_snapshot','book'): return
+        feed = m.get('feed')
+        if feed not in ('book_snapshot', 'book'): return
         prod = m.get('product_id','')
         hl = None
         for h,k in HL_TO_KRAKEN.items():
             if k == prod: hl = h; break
         if not hl: return
-        # Kraken provides bids/asks as list of {price, qty}
-        bids = [[b['price'], b['qty']] for b in m.get('bids', [])[:50]] if m.get('bids') else []
-        asks = [[a['price'], a['qty']] for a in m.get('asks', [])[:50]] if m.get('asks') else []
+        if feed == 'book_snapshot':
+            bids = [[b['price'], b['qty']] for b in m.get('bids', [])[:50]]
+            asks = [[a['price'], a['qty']] for a in m.get('asks', [])[:50]]
+        else:
+            # delta: single field per msg
+            side = m.get('side')  # 'buy' or 'sell'
+            price = m.get('price'); qty = m.get('qty')
+            if price is None or qty is None: return
+            if side == 'buy': bids = [[price, qty]]; asks = []
+            elif side == 'sell': asks = [[price, qty]]; bids = []
+            else: return
         if bids or asks:
             _update_levels(hl, bids, asks, 'kr')
     except Exception: pass
@@ -334,7 +348,8 @@ def _runner_kraken():
         try:
             ws = websocket.WebSocketApp('wss://futures.kraken.com/ws/v1',
                 on_message=_kraken_msg, on_open=_kraken_open,
-                on_error=lambda ws,e:None, on_close=lambda ws,c,m:None)
+                on_error=lambda ws,e: print(f"[ob kr err] {e}", flush=True),
+                on_close=lambda ws,c,m: print(f"[ob kr closed] {c}", flush=True))
             ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e: print(f"[ob kraken] {e}", flush=True)
         if _RUN: time.sleep(5)
