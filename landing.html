@@ -502,7 +502,27 @@ body::after {
                         <ellipse cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.2"/>
                     </g>
                     <g class="ring-3d-3 ring-back">
-                        <ellipse cx="300" cy="300" rx="230" ry="28" stroke="#c1272d" stroke-width="0.6" opacity="0.18"/>
+                        <!-- Telemetry ring: signal engine markers -->
+                        <ellipse cx="300" cy="300" rx="250" ry="32" stroke="#b8ff2f" stroke-width="0.4" opacity="0.15"/>
+                        <!-- 5 signal-engine nodes spaced around ring -->
+                        <g fill="#b8ff2f" opacity="0.4">
+                            <circle cx="550" cy="300" r="3"/>
+                            <circle cx="377" cy="330" r="2.5"/>
+                            <circle cx="223" cy="330" r="2.5"/>
+                            <circle cx="50" cy="300" r="3"/>
+                            <circle cx="300" cy="270" r="2.5"/>
+                        </g>
+                        <!-- tick marks every 18° -->
+                        <g stroke="#c8ccd4" stroke-width="0.3" opacity="0.25">
+                            <line x1="545" y1="300" x2="555" y2="300"/>
+                            <line x1="500" y1="313" x2="508" y2="316"/>
+                            <line x1="425" y1="326" x2="430" y2="332"/>
+                            <line x1="330" y1="331" x2="332" y2="337"/>
+                            <line x1="270" y1="331" x2="268" y2="337"/>
+                            <line x1="175" y1="326" x2="170" y2="332"/>
+                            <line x1="100" y1="313" x2="92" y2="316"/>
+                            <line x1="55" y1="300" x2="45" y2="300"/>
+                        </g>
                     </g>
                     <ellipse class="ring-3d-6 ring-back" cx="300" cy="300" rx="170" ry="42" stroke="#b8ff2f" opacity="0.18"/>
                 </g>
@@ -556,7 +576,23 @@ body::after {
                         <ellipse cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.55"/>
                     </g>
                     <g class="ring-3d-3 ring-front">
-                        <ellipse cx="300" cy="300" rx="230" ry="28" stroke="#c1272d" stroke-width="0.7" opacity="0.5"/>
+                        <ellipse cx="300" cy="300" rx="250" ry="32" stroke="#b8ff2f" stroke-width="0.5" opacity="0.4"/>
+                        <!-- Active engine nodes (brighter when in front) -->
+                        <g fill="#b8ff2f" opacity="0.85">
+                            <circle cx="550" cy="300" r="3.5"/>
+                            <circle cx="377" cy="330" r="3"/>
+                            <circle cx="223" cy="330" r="3"/>
+                            <circle cx="50" cy="300" r="3.5"/>
+                            <circle cx="300" cy="270" r="3"/>
+                        </g>
+                        <!-- Engine labels (only visible on front half) -->
+                        <g font-family="JetBrains Mono" font-size="7" fill="#b8ff2f" opacity="0.55" letter-spacing="1.5">
+                            <text x="562" y="303">PIVOT</text>
+                            <text x="388" y="344" text-anchor="start">PULL</text>
+                            <text x="212" y="344" text-anchor="end">WALL</text>
+                            <text x="38" y="303" text-anchor="end">LIQ</text>
+                            <text x="300" y="262" text-anchor="middle">CVD</text>
+                        </g>
                     </g>
                     <ellipse class="ring-3d-6 ring-front" cx="300" cy="300" rx="170" ry="42" stroke="#b8ff2f" opacity="0.5"/>
                 </g>
