@@ -38,6 +38,7 @@ import coin_sizing
 import regime_detector
 import funding_arb
 import forward_walk
+import leverage_resolver
 import spoof_detection
 import session_scaler
 import whale_filter
@@ -432,6 +433,26 @@ def stats_reset():
                       'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
     save_state(state)
     return jsonify({'status':'stats reset'})
+
+@app.route('/resolver', methods=['GET'])
+def resolver_endpoint():
+    """Show actual lev/risk per coin after HL cap resolution."""
+    try:
+        tier_cfg = {
+            'PURE':       {'target_lev': 20, 'target_risk': 0.10, 'coins': list(percoin_configs.PURE_14.keys())},
+            'NINETY_99':  {'target_lev': 15, 'target_risk': 0.05, 'coins': list(percoin_configs.NINETY_99.keys())},
+            'EIGHTY_89':  {'target_lev': 12, 'target_risk': 0.05, 'coins': list(percoin_configs.EIGHTY_89.keys())},
+            'SEVENTY_79': {'target_lev': 12, 'target_risk': 0.05, 'coins': list(percoin_configs.SEVENTY_79.keys())},
+        }
+        hl_max = leverage_map.get_cache()
+        resolved = leverage_resolver.resolve_all(tier_cfg, hl_max)
+        # Sort by tier then coin
+        return jsonify({
+            'resolved': resolved,
+            'ceilings': leverage_resolver.TIER_RISK_CEILING,
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/coin_killswitch', methods=['GET'])
 def coin_killswitch_endpoint():
@@ -1588,12 +1609,15 @@ def get_funding_rate(coin):
     return 0
 
 def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
-    # ELITE: per-tier sizing (PURE 20x×10%, NINETY_99 15x×5%, EIGHTY_89 12x×5%)
+    # ELITE: use leverage_resolver to find actual (lev, risk) that respects HL caps
+    #        while preserving tier target notional up to safety ceiling
     if percoin_configs.ELITE_MODE and coin and percoin_configs.is_elite(coin):
-        elite_lev, elite_risk = percoin_configs.get_sizing(coin)
-        max_hl = leverage_map.get_max(coin, default=elite_lev)
-        actual_lev = min(elite_lev, max_hl)
-        raw = equity * elite_risk * actual_lev / px
+        tier_name = percoin_configs.get_tier(coin)
+        target_lev, target_risk = percoin_configs.get_sizing(coin)
+        hl_max = leverage_map.get_max(coin, default=target_lev)
+        actual_lev, actual_risk, actual_notional, ceiling_hit = leverage_resolver.resolve(
+            coin, target_lev, target_risk, hl_max, tier_name)
+        raw = equity * actual_risk * risk_mult * actual_lev / px
         if raw>=100: return round(raw,0)
         if raw>=10:  return round(raw,1)
         if raw>=1:   return round(raw,2)
@@ -2026,10 +2050,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         return
 
     risk_pct = current_risk_pct(equity)
-    # ELITE: override risk per tier (PURE 10%, NINETY_99 5%, EIGHTY_89 5%, SEVENTY_79 5%)
+    # ELITE: use leverage_resolver for correct risk given HL leverage caps
     if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
-        _, tier_risk = percoin_configs.get_sizing(coin)
-        risk_pct = tier_risk
+        tier_name = percoin_configs.get_tier(coin)
+        target_lev, target_risk = percoin_configs.get_sizing(coin)
+        hl_max = leverage_map.get_max(coin, default=target_lev)
+        actual_lev, actual_risk, actual_notional, ceiling_hit = leverage_resolver.resolve(
+            coin, target_lev, target_risk, hl_max, tier_name)
+        risk_pct = actual_risk
+        log(f"{coin} resolver: tier={tier_name} target={target_lev}x/{target_risk*100:.0f}% → actual={actual_lev}x/{actual_risk*100:.1f}% notional={actual_notional*100:.0f}%{' CAPPED' if ceiling_hit else ''}")
         # TIER KILL SWITCH
         tier_name = percoin_configs.get_tier(coin)
         if tier_killswitch.is_disabled(tier_name):
