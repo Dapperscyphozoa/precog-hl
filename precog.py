@@ -1427,7 +1427,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 cur['hwm'] = hwm
             
             # Time-aware trail: tighten to 0.9% after 2h hold (OOS +77% PnL)
-            age = now - st['opened_at']
+            age = time.time() - st['opened_at']
             trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
             # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
             if hwm > trl and (hwm - fav) >= trl and fav >= trl * 0.5:
