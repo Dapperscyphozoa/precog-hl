@@ -32,6 +32,10 @@ import btc_correlation
 import confidence
 import tier_filter
 import percoin_configs
+import tier_killswitch
+import regime_detector
+import funding_arb
+import forward_walk
 import spoof_detection
 import session_scaler
 import whale_filter
@@ -95,6 +99,43 @@ def record_close(pos, coin, pnl_pct, state):
     if win: stats['total_wins'] += 1
     else: stats['total_losses'] += 1
     stats['total_pnl'] += pnl_pct
+
+    # TIER KILLSWITCH: track per-tier rolling PnL and auto-disable on breach
+    try:
+        tier_name = percoin_configs.get_tier(coin)
+        if tier_name:
+            equity_before = pos.get('equity_before', state.get('last_equity', 1000))
+            equity_after = state.get('last_equity', equity_before)
+            # equity_delta_pct reconstructed from pnl_pct + position notional if needed
+            notional_pct = pos.get('notional_pct', 0.5)  # fallback 50%
+            equity_delta = (pnl_pct / 100) * notional_pct
+            equity_after = equity_before * (1 + equity_delta)
+            was_disabled = tier_killswitch.record_trade_close(tier_name, pnl_pct, equity_before, equity_after)
+            if was_disabled:
+                print(f"[KILLSWITCH] Tier {tier_name} auto-disabled at 24h rolling PnL breach", flush=True)
+    except Exception as e:
+        print(f"[killswitch] err: {e}", flush=True)
+
+    # FORWARD WALK: log every closed trade with full context for weekly validation
+    try:
+        tier_name = percoin_configs.get_tier(coin) or 'NONE'
+        cfg_snap = percoin_configs.get_config(coin) or {}
+        forward_walk.record_trade(
+            coin=coin, tier=tier_name, side=side,
+            entry=pos.get('entry', 0), exit_price=pos.get('last_mid', 0),
+            pnl_pct=pnl_pct, entry_ts=pos.get('opened_at', now), exit_ts=now,
+            signal_engine=engine,
+            config_snapshot={'TP': cfg_snap.get('TP'), 'SL': cfg_snap.get('SL'),
+                             'sigs': cfg_snap.get('sigs'), 'flt': cfg_snap.get('flt'),
+                             'RH': cfg_snap.get('RH'), 'RL': cfg_snap.get('RL')},
+            leverage=pos.get('lev', 10),
+            notional_pct=pos.get('notional_pct', 0.5),
+            size_mult=pos.get('size_mult', 1.0),
+            equity_before=pos.get('equity_before', 0),
+            equity_after=state.get('last_equity', 0),
+        )
+    except Exception as e:
+        pass  # never block on log error
 
 def wr_to_mult(wr, n, min_n=5):
     """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
@@ -366,6 +407,45 @@ def stats_reset():
                       'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
     save_state(state)
     return jsonify({'status':'stats reset'})
+
+@app.route('/killswitch', methods=['GET'])
+def killswitch_endpoint():
+    """Show per-tier 24h rolling PnL + killswitch status."""
+    try:
+        return jsonify(tier_killswitch.status())
+    except Exception as e:
+        return jsonify({'err': str(e)})
+
+@app.route('/killswitch/enable/<tier>', methods=['POST'])
+def killswitch_enable(tier):
+    ok = tier_killswitch.manual_enable(tier)
+    return jsonify({'tier': tier, 'enabled': ok})
+
+@app.route('/killswitch/disable/<tier>', methods=['POST'])
+def killswitch_disable(tier):
+    ok = tier_killswitch.manual_disable(tier, 'manual via API')
+    return jsonify({'tier': tier, 'disabled': ok})
+
+@app.route('/regime', methods=['GET'])
+def regime_endpoint():
+    """Current market regime detection."""
+    try:
+        return jsonify(regime_detector.get_regime())
+    except Exception as e:
+        return jsonify({'err': str(e)})
+
+@app.route('/fwv', methods=['GET'])
+def fwv_endpoint():
+    """Forward-walk validation: actual live trade performance vs OOS expectations."""
+    try:
+        hours = int(request.args.get('hours', 168))
+        return jsonify({
+            'by_tier': forward_walk.tier_performance(hours_back=hours),
+            'by_coin': forward_walk.coin_performance(hours_back=hours),
+            'window_hours': hours,
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/elite', methods=['GET'])
 def elite_endpoint():
@@ -1517,7 +1597,7 @@ def set_isolated_leverage(coin):
         log(f"lev set err {coin}: {e}")
 
 def place(coin, is_buy, size):
-    """HL-compliant price rounding + maker/taker handling."""
+    """HL-compliant price rounding + smart maker/taker blend using Bybit directional bias."""
     px = get_mid(coin)
     if not px: return None
     set_isolated_leverage(coin)
@@ -1525,8 +1605,35 @@ def place(coin, is_buy, size):
     if size <= 0:
         log(f"{coin} size rounded to 0 — skip"); return None
 
-    # Bybit-lead limit: capture HL lag using Bybit's current price
     side = 'BUY' if is_buy else 'SELL'
+
+    # SMART ENTRY — Bybit leads HL by ~300ms on alts.
+    # If Bybit is moving hard in OUR direction, market's about to follow → TAKE IMMEDIATELY (taker)
+    # If Bybit is moving AGAINST us, we might catch better price → wait as maker
+    # If no Bybit signal, default to maker at edge price
+    try:
+        bias = bybit_lead.direction_bias(coin)  # +1 / 0 / -1
+    except Exception:
+        bias = 0
+    our_dir = 1 if is_buy else -1
+    force_taker = (bias == our_dir)  # Bybit pushing our way → don't wait
+
+    if force_taker:
+        # Immediate taker: HL hasn't caught up yet, enter at market + 0.3% slippage cap
+        slip_px = round_price(coin, px * (1.003 if is_buy else 0.997))
+        try:
+            r = exchange.order(coin, is_buy, size, slip_px, {'limit':{'tif':'Ioc'}}, reduce_only=False)
+            status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+            if 'filled' in status:
+                log(f"TAKER-LEAD {coin} {side} {size}@~{px} (Bybit bias aligned)")
+                return float(status['filled'].get('avgPx', slip_px))
+            if 'error' not in status:
+                log(f"TAKER-LEAD {coin} partial: {status}")
+        except Exception as e:
+            log(f"taker-lead err {coin}: {e}")
+        # Fall through to maker if taker-lead failed
+
+    # Bybit-lead limit: capture HL lag using Bybit's current price
     edge = bybit_lead.compute_edge_price(coin, side, px)
     if edge:
         maker_px = round_price(coin, edge)
@@ -1715,17 +1822,29 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             # ELITE MODE: Fixed per-coin TP + 5% hard SL (overrides all other logic)
             if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
                 elite_cfg = percoin_configs.get_config(coin)
+                age = time.time() - (cur.get('opened_at') or time.time())
                 # Fixed TP — exit as soon as profit >= TP
                 if fav >= elite_cfg['TP']:
-                    prev_pos = dict(cur)
-                    pnl_pct = close(coin)
-                    if pnl_pct is not None:
-                        record_close(prev_pos, coin, pnl_pct, state)
-                        state['consec_losses'] = 0
-                        state['last_pnl_close'] = pnl_pct
-                    log(f"{coin} ELITE TP HIT +{fav*100:.2f}% (target {elite_cfg['TP']*100:.2f}%)")
-                    state['positions'].pop(coin, None)
-                    return
+                    # FUNDING ARB: if funding is paying us & we're in profit, extend hold
+                    try:
+                        extend, reason = funding_arb.should_extend_hold(coin, side, age, fav * 100)
+                    except Exception:
+                        extend, reason = (False, "err")
+                    if extend:
+                        log(f"{coin} ELITE TP HIT +{fav*100:.2f}% but FUNDING HOLD: {reason}")
+                        # Promote trailing: move to tighter trail, hold until funding flips
+                        cur['funding_hold'] = True
+                        # Don't exit; fall through to trail logic below
+                    else:
+                        prev_pos = dict(cur)
+                        pnl_pct = close(coin)
+                        if pnl_pct is not None:
+                            record_close(prev_pos, coin, pnl_pct, state)
+                            state['consec_losses'] = 0
+                            state['last_pnl_close'] = pnl_pct
+                        log(f"{coin} ELITE TP HIT +{fav*100:.2f}% (target {elite_cfg['TP']*100:.2f}%)")
+                        state['positions'].pop(coin, None)
+                        return
                 # Fixed SL — 5%
                 if fav <= -elite_cfg['SL']:
                     prev_pos = dict(cur)
@@ -1737,6 +1856,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     log(f"{coin} ELITE SL HIT {fav*100:.2f}% (limit -{elite_cfg['SL']*100:.0f}%)")
                     state['positions'].pop(coin, None)
                     return
+                # If funding hold is active, implement micro-trail at current peak
+                if cur.get('funding_hold'):
+                    peak = cur.get('funding_peak', fav)
+                    if fav > peak: cur['funding_peak'] = fav; peak = fav
+                    # Trail 0.3% below peak — tight, let funding accumulate
+                    if peak > elite_cfg['TP'] and (peak - fav) >= 0.003:
+                        prev_pos = dict(cur)
+                        pnl_pct = close(coin)
+                        if pnl_pct is not None:
+                            record_close(prev_pos, coin, pnl_pct, state)
+                            state['consec_losses'] = 0
+                            state['last_pnl_close'] = pnl_pct
+                        log(f"{coin} FUNDING-HOLD EXIT +{fav*100:.2f}% (peak +{peak*100:.2f}%)")
+                        state['positions'].pop(coin, None)
+                        return
                 # Skip default trailing for elite — pure fixed TP/SL
                 return
 
@@ -1821,10 +1955,23 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         return
 
     risk_pct = current_risk_pct(equity)
-    # ELITE: override risk per tier (PURE 10%, NINETY_99 5%, EIGHTY_89 5%)
+    # ELITE: override risk per tier (PURE 10%, NINETY_99 5%, EIGHTY_89 5%, SEVENTY_79 5%)
     if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
         _, tier_risk = percoin_configs.get_sizing(coin)
         risk_pct = tier_risk
+        # KILL SWITCH: skip if this coin's tier is auto-disabled (24h PnL breach)
+        tier_name = percoin_configs.get_tier(coin)
+        if tier_killswitch.is_disabled(tier_name):
+            log(f"{coin} {sig} SKIP — tier {tier_name} KILLSWITCH ACTIVE")
+            return
+        # REGIME: apply global risk multiplier based on BTC market regime
+        try:
+            regime_mult = regime_detector.get_risk_mult()
+            risk_pct *= regime_mult
+            if regime_mult < 0.9:
+                log(f"{coin} regime={regime_detector.get_regime().get('regime')} risk dampened x{regime_mult}")
+        except Exception as e:
+            log(f"{coin} regime err: {e}")
     total_locked = get_total_margin()
     proposed = equity * risk_pct * risk_mult
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
@@ -1995,6 +2142,16 @@ def main():
     except Exception as e: log(f"oi_tracker err: {e}")
     try: threading.Timer(60.0, funding_arb.refresh).start()
     except Exception as e: log(f"funding_arb err: {e}")
+    # Regime detector: refresh every 5min from Binance klines
+    try:
+        def _regime_loop():
+            while True:
+                try: regime_detector.refresh()
+                except Exception as e: log(f"regime err: {e}")
+                time.sleep(300)
+        threading.Thread(target=_regime_loop, daemon=True).start()
+        log("regime_detector: 5min loop started")
+    except Exception as e: log(f"regime loop err: {e}")
     # Funding refresh deferred — first tick runs it after 30s delay
     threading.Timer(30.0, lambda: funding_filter.refresh_all(COINS)).start()
     try: news_filter.start()

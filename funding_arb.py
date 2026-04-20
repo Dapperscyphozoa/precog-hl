@@ -64,3 +64,40 @@ def status():
 def needs_refresh():
     with _LOCK:
         return time.time() - _CACHE['ts'] > REFRESH_SEC
+
+
+# ─── POSITION-LEVEL FUNDING COLLECTION (added Apr 20 2026) ───
+# When holding a position, check if funding is paying US. If yes, consider extended hold.
+
+def get_hl_funding_rate(coin):
+    """Return HL's current hourly funding rate for coin. Returns 0 if unavailable."""
+    with _LOCK:
+        return _CACHE.get('hl', {}).get(coin, 0)
+
+def should_extend_hold(coin, side, age_sec, pnl_pct):
+    """Should we HOLD past normal TP to collect funding?
+    Conditions:
+    - Position is in profit
+    - Funding favors us (paying our side)
+    - Age < 4h
+    - Rate magnitude > 0.01%/hr
+    Returns (extend: bool, reason: str)
+    """
+    if age_sec > 4 * 3600: return (False, "age_cap")
+    if pnl_pct <= 0: return (False, "not_in_profit")
+    rate = get_hl_funding_rate(coin)
+    if rate == 0: return (False, "no_funding_data")
+    # LONG receives when rate < 0 (shorts pay longs), SHORT receives when rate > 0
+    our_side_paid = (side == 'L' and rate < 0) or (side == 'S' and rate > 0)
+    if not our_side_paid: return (False, f"funding_unfavorable_{rate*100:.4f}%")
+    if abs(rate) < 0.0001: return (False, f"funding_too_small_{rate*100:.4f}%")
+    return (True, f"collecting_+{abs(rate)*100:.4f}%/hr")
+
+def funding_pnl_bonus(coin, side, notional_usd, hours_held):
+    """Compute cumulative funding PnL in USD for position held hours_held."""
+    rate = get_hl_funding_rate(coin)
+    if side == 'L' and rate < 0: return abs(rate) * notional_usd * hours_held
+    if side == 'S' and rate > 0: return rate * notional_usd * hours_held
+    if side == 'L' and rate > 0: return -rate * notional_usd * hours_held
+    if side == 'S' and rate < 0: return -abs(rate) * notional_usd * hours_held
+    return 0
