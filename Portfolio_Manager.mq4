@@ -1,31 +1,47 @@
 //+------------------------------------------------------------------+
-//| Portfolio_Manager.mq4 — EMA 9/21 Cross + DynaPro Webhook Signals |
-//| v4.0 — Polls precog-hl-web for DynaPro signals + own EMA logic   |
+//| Portfolio_Manager.mq4 v5.0 — COMPOUNDING + PER-SIGNAL GATES      |
+//| - Equity-scaled lot sizing (risk % per trade)                    |
+//| - Per-signal trail/SL params from precog v4.8 queue              |
+//| - Trail logic in ManagePositions (peak + retrace)                |
+//| - Broker-side SL on entry                                        |
+//| - GetLot SKIPs instead of rounding up to minlot                  |
+//| - Per-ticket state in GlobalVariables                            |
+//| - Time-cut exit per signal                                       |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "4.10"
+#property version   "5.00"
 #property strict
 
-extern double LotSize    = 0.01;
-extern int    EMAFast    = 9;
-extern int    EMASlow    = 21;
-extern int    Timeframe  = PERIOD_H1;
-extern int    MaxPos     = 10;
-extern int    MagicNum   = 20260416;
-extern int    Slippage   = 30;
-extern string SymFilter  = ".a";
-extern double TP_Pct     = 0.8;
-extern bool   EMA_Exit   = false;
-extern string SignalURL  = "https://precog-hl-web.onrender.com/mt4/signals";
-extern int    PollSec    = 2;        // was 10s — cut latency
-extern bool   UseLocalEMAFilter = true;  // 2nd-gate webhook signals with local EMA (was always-on in v4.0)
-extern bool   UseLimitOrders    = true;  // maker entries at webhook price (kills slippage)
-extern int    LimitExpiryMin    = 15;    // cancel unfilled limit after N min
-extern double LimitOffsetPips   = 2;     // offset limit N pips inside market (for safe fill)
-extern bool   FlattenOnInit     = false; // close all magic-matched on EA attach (one-shot)
-extern string FlattenURL        = "https://precog-hl-web.onrender.com/mt4/flatten/check";
-extern string FlattenAckURL     = "https://precog-hl-web.onrender.com/mt4/flatten/ack";
+// ===== INPUTS =====
+extern bool   UseEquityScaling = true;   // v5: scale lot to account
+extern double RiskPctPerTrade  = 1.0;    // v5: 1% of equity per trade (at SL_Pct loss)
+extern double LotSize          = 0.01;   // fallback if scaling off or minlot forces
+extern double MaxLotCap        = 5.0;    // hard cap on any single trade lot size
+extern int    EMAFast          = 9;
+extern int    EMASlow          = 21;
+extern int    Timeframe        = PERIOD_H1;
+extern int    MaxPos           = 10;
+extern int    MagicNum         = 20260416;
+extern int    Slippage         = 30;
+extern string SymFilter        = ".a";
+extern double TP_Pct           = 0.0;    // set 0 to disable (use trail instead)
+extern double SL_Pct_Default   = 1.4;    // fallback if signal has no sl_pct
+extern bool   UseTrailingStop  = true;
+extern double Trail_Activate_Default = 0.4;
+extern double Trail_Distance_Default = 0.2;
+extern bool   EMA_Exit         = false;
+extern string SignalURL        = "https://precog-hl-web.onrender.com/mt4/signals";
+extern int    PollSec          = 2;
+extern bool   UseLocalEMAFilter = true;
+extern bool   UseLimitOrders   = true;
+extern int    LimitExpiryMin   = 15;
+extern double LimitOffsetPips  = 2;
+extern bool   FlattenOnInit    = false;
+extern string FlattenURL       = "https://precog-hl-web.onrender.com/mt4/flatten/check";
+extern string FlattenAckURL    = "https://precog-hl-web.onrender.com/mt4/flatten/ack";
+extern string TradeClosedURL   = "https://precog-hl-web.onrender.com/mt4/trade-closed";
 
+// ===== STATE =====
 datetime lastBarTime[256];
 string   syms[256];
 int      symCount = 0;
@@ -78,19 +94,75 @@ void CloseBySymbol(string sym, int type) {
    }
 }
 
-double GetLot(string sym) {
+//+------------------------------------------------------------------+
+// v5: Equity-scaled lot sizing.
+// Risk = RiskPctPerTrade% of equity at SL_Pct loss.
+// lot = (equity * risk%) / (entry_px * sl% * contract_size)
+// Simpler approach: scale linearly from 0.01 at $1400 -> larger at higher equity
+//+------------------------------------------------------------------+
+double GetLot(string sym, double sl_pct) {
    double mn = MarketInfo(sym, MODE_MINLOT);
    double mx = MarketInfo(sym, MODE_MAXLOT);
    double st = MarketInfo(sym, MODE_LOTSTEP);
    double lot = LotSize;
-   if (lot < mn) lot = mn;
+
+   if (UseEquityScaling && sl_pct > 0) {
+      double eq = AccountEquity();
+      double risk_usd = eq * (RiskPctPerTrade / 100.0);
+      double tick_val = MarketInfo(sym, MODE_TICKVALUE);
+      double tick_sz  = MarketInfo(sym, MODE_TICKSIZE);
+      double px = MarketInfo(sym, MODE_ASK);
+      if (tick_val > 0 && tick_sz > 0 && px > 0) {
+         // Dollar-per-1lot-per-1% price move
+         double pct_move = sl_pct / 100.0;
+         double price_delta = px * pct_move;
+         double ticks_to_sl = price_delta / tick_sz;
+         double usd_per_lot_at_sl = ticks_to_sl * tick_val;
+         if (usd_per_lot_at_sl > 0) {
+            lot = risk_usd / usd_per_lot_at_sl;
+         }
+      }
+   }
+
+   // Cap
+   if (lot > MaxLotCap) lot = MaxLotCap;
    if (lot > mx) lot = mx;
-   if (st > 0)   lot = MathFloor(lot / st) * st;
+
+   // Skip if minlot is larger than our sized lot (avoid blowup)
+   if (mn > lot + 0.00001) {
+      Print("GetLot SKIP ", sym, ": minlot=", mn, " > sized_lot=", DoubleToStr(lot, 4));
+      return 0;
+   }
+
+   // Step-align
+   if (st > 0) lot = MathFloor(lot / st) * st;
+   if (lot < mn) lot = mn;
+
    return NormalizeDouble(lot, 2);
 }
 
 //+------------------------------------------------------------------+
-// Flatten: close all magic-matched + delete pendings. Returns (closed, deleted).
+// Per-ticket state: store trail/SL/peak/entry_time in GlobalVariables
+// Key format: "PM_<ticket>_<field>"
+//+------------------------------------------------------------------+
+void SetTicketParam(int ticket, string field, double val) {
+   GlobalVariableSet("PM_" + IntegerToString(ticket) + "_" + field, val);
+}
+double GetTicketParam(int ticket, string field, double def_val) {
+   string key = "PM_" + IntegerToString(ticket) + "_" + field;
+   if (GlobalVariableCheck(key)) return GlobalVariableGet(key);
+   return def_val;
+}
+void DeleteTicketParams(int ticket) {
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_trail_act");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_trail_dist");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_sl_pct");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_peak_pct");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_active_trail");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_entry_time");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_time_cut_h");
+}
+
 //+------------------------------------------------------------------+
 int flattenClosed = 0, flattenDeleted = 0;
 void FlattenAll(string reason) {
@@ -103,58 +175,67 @@ void FlattenAll(string reason) {
       string sym = OrderSymbol();
       if (typ == OP_BUY) {
          double bid = MarketInfo(sym, MODE_BID);
-         if (OrderClose(tk, OrderLots(), bid, Slippage*5, clrYellow)) flattenClosed++;
+         if (OrderClose(tk, OrderLots(), bid, Slippage*5, clrYellow)) { flattenClosed++; DeleteTicketParams(tk); }
          else Print("FLATTEN close BUY err ", sym, " ", GetLastError());
       } else if (typ == OP_SELL) {
          double ask = MarketInfo(sym, MODE_ASK);
-         if (OrderClose(tk, OrderLots(), ask, Slippage*5, clrYellow)) flattenClosed++;
+         if (OrderClose(tk, OrderLots(), ask, Slippage*5, clrYellow)) { flattenClosed++; DeleteTicketParams(tk); }
          else Print("FLATTEN close SELL err ", sym, " ", GetLastError());
       } else {
-         // pending order: BUYLIMIT/SELLLIMIT/BUYSTOP/SELLSTOP
          if (OrderDelete(tk)) flattenDeleted++;
          else Print("FLATTEN delete err ", sym, " ", GetLastError());
       }
    }
    Print("FLATTEN DONE reason=", reason, " closed=", flattenClosed, " deleted=", flattenDeleted);
-   // Ack server
    string cookie = "", headers = "";
    char post[], result[];
-   string url = FlattenAckURL + "?closed=" + IntegerToString(flattenClosed) + "&deleted=" + IntegerToString(flattenDeleted);
-   WebRequest("GET", url, cookie, NULL, 3000, post, 0, result, headers);
+   string body = "{\"closed\":" + IntegerToString(flattenClosed) + ",\"deleted\":" + IntegerToString(flattenDeleted) + "}";
+   StringToCharArray(body, post, 0, StringLen(body));
+   WebRequest("POST", FlattenAckURL, cookie, NULL, 3000, post, StringLen(body), result, headers);
 }
 
-datetime lastFlattenPoll = 0;
-datetime lastFlattenTs   = 0;
 void PollFlatten() {
-   if (TimeCurrent() - lastFlattenPoll < PollSec) return;
-   lastFlattenPoll = TimeCurrent();
-
    string cookie = "", headers = "";
    char post[], result[];
    int res = WebRequest("GET", FlattenURL, cookie, NULL, 3000, post, 0, result, headers);
    if (res < 0) return;
    string body = CharArrayToString(result);
-   // Look for "pending":true
-   if (StringFind(body, "\"pending\":true") < 0) return;
-   // Get ts to prevent re-flatten on same flag
-   int ts_pos = StringFind(body, "\"ts\":");
-   if (ts_pos < 0) return;
-   int ts_start = ts_pos + 5;
-   string ts_str = "";
-   for (int i = ts_start; i < StringLen(body); i++) {
-      int ch = StringGetChar(body, i);
-      if ((ch >= '0' && ch <= '9') || ch == '.') ts_str += CharToStr(ch);
-      else break;
+   if (StringFind(body, "\"pending\":true") >= 0) {
+      Print("FLATTEN SIGNAL received");
+      FlattenAll("webhook");
    }
-   datetime flag_ts = (datetime)StrToInteger(ts_str);
-   if (flag_ts <= lastFlattenTs) return;  // already acted on this
-   lastFlattenTs = flag_ts;
-   Print("FLATTEN signal received from server (ts=", flag_ts, ")");
-   FlattenAll("server_broadcast");
 }
 
 //+------------------------------------------------------------------+
-// v4: Poll /mt4/signals for DynaPro webhook signals
+// JSON helpers
+//+------------------------------------------------------------------+
+string ExtractJSON(string json, string key) {
+   string needle = "\"" + key + "\":\"";
+   int p = StringFind(json, needle);
+   if (p < 0) return "";
+   int start = p + StringLen(needle);
+   int end = StringFind(json, "\"", start);
+   if (end < 0) return "";
+   return StringSubstr(json, start, end - start);
+}
+
+double ExtractJSONNum(string json, string key) {
+   string needle = "\"" + key + "\":";
+   int p = StringFind(json, needle);
+   if (p < 0) return 0;
+   int start = p + StringLen(needle);
+   int end = start;
+   while (end < StringLen(json)) {
+      ushort ch = StringGetCharacter(json, end);
+      if ((ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '+') end++;
+      else break;
+   }
+   if (end == start) return 0;
+   return StrToDouble(StringSubstr(json, start, end - start));
+}
+
+//+------------------------------------------------------------------+
+// v5: Poll /mt4/signals — reads per-signal trail/SL params
 //+------------------------------------------------------------------+
 void PollDynaPro() {
    if (TimeCurrent() - lastPoll < PollSec) return;
@@ -162,10 +243,7 @@ void PollDynaPro() {
 
    string cookie = "", headers = "";
    char   post[], result[];
-   string url = SignalURL;
-
-   int timeout = 3000;
-   int res = WebRequest("GET", url, cookie, NULL, timeout, post, 0, result, headers);
+   int res = WebRequest("GET", SignalURL, cookie, NULL, 3000, post, 0, result, headers);
    if (res < 0) {
       int err = GetLastError();
       if (err != 4060) Print("DynaPro poll err=", err);
@@ -175,36 +253,52 @@ void PollDynaPro() {
    string body = CharArrayToString(result);
    if (StringLen(body) < 5) return;
 
-   // Parse JSON: {"symbol":"XAUUSD.a","direction":"BUY","price":4800}
    string sym = ExtractJSON(body, "symbol");
    string dir = ExtractJSON(body, "direction");
-
    if (StringLen(sym) < 2 || StringLen(dir) < 2) return;
 
-   double wh_price = ExtractJSONNum(body, "price");
-   Print("DYNAPRO SIGNAL: ", dir, " ", sym, " wh_price=", wh_price);
+   double wh_price    = ExtractJSONNum(body, "price");
+   double sig_trail_a = ExtractJSONNum(body, "trail_activate");
+   double sig_trail_d = ExtractJSONNum(body, "trail_distance");
+   double sig_sl      = ExtractJSONNum(body, "sl_pct");
+   double sig_mult    = ExtractJSONNum(body, "size_mult");
+   double sig_tcut    = ExtractJSONNum(body, "time_cut_hours");
 
-   // Check if symbol is tradeable
-   if (!MarketInfo(sym, MODE_TRADEALLOWED)) {
-      Print("DynaPro: ", sym, " not tradeable"); return;
-   }
-   if (MarketInfo(sym, MODE_BID) <= 0) {
-      Print("DynaPro: ", sym, " no price"); return;
+   // Apply defaults where signal didn't specify
+   if (sig_trail_a <= 0) sig_trail_a = Trail_Activate_Default;
+   if (sig_trail_d <= 0) sig_trail_d = Trail_Distance_Default;
+   if (sig_sl <= 0)      sig_sl      = SL_Pct_Default;
+   if (sig_mult <= 0)    sig_mult    = 1.0;
+
+   Print("DYNAPRO SIGNAL: ", dir, " ", sym, " wh=", wh_price,
+         " trail=", sig_trail_a, "/", sig_trail_d, " sl=", sig_sl,
+         " mult=", sig_mult, " tcut=", sig_tcut);
+
+   if (!MarketInfo(sym, MODE_TRADEALLOWED)) { Print("DynaPro: ", sym, " not tradeable"); return; }
+   if (MarketInfo(sym, MODE_BID) <= 0)       { Print("DynaPro: ", sym, " no price"); return; }
+
+   double lot = GetLot(sym, sig_sl);
+   if (lot <= 0) { Print("DynaPro: ", sym, " skip - minlot too large"); return; }
+   lot = NormalizeDouble(lot * sig_mult, 2);  // apply VIX overlay multiplier
+   double mn = MarketInfo(sym, MODE_MINLOT);
+   if (lot < mn) {
+      Print("DynaPro: ", sym, " sized-lot ", lot, " < minlot ", mn, " — skip");
+      return;
    }
 
-   // Margin check
-   double lot = GetLot(sym);
    double margin_needed = MarketInfo(sym, MODE_MARGINREQUIRED) * lot;
    if (margin_needed > AccountFreeMargin() * 0.15) {
-      Print("DynaPro: ", sym, " margin too high"); return;
+      Print("DynaPro: ", sym, " margin too high (", DoubleToStr(margin_needed,2), " vs ", DoubleToStr(AccountFreeMargin()*0.15,2), ")");
+      return;
    }
 
-   if (CountMyPositions() >= MaxPos) {
-      Print("DynaPro: max positions reached"); return;
-   }
+   if (CountMyPositions() >= MaxPos) { Print("DynaPro: max positions reached"); return; }
 
    double point = MarketInfo(sym, MODE_POINT);
-   double offset = LimitOffsetPips * point * 10;  // pips -> price units
+   double offset = LimitOffsetPips * point * 10;
+   int digits = (int)MarketInfo(sym, MODE_DIGITS);
+
+   int ticket = -1;
 
    if (dir == "BUY" || dir == "buy") {
       if (UseLocalEMAFilter) {
@@ -215,25 +309,24 @@ void PollDynaPro() {
       CloseBySymbol(sym, OP_SELL);
       if (!HasPosition(sym, OP_BUY)) {
          double ask = MarketInfo(sym, MODE_ASK);
-         int t = -1;
+         double sl_px = NormalizeDouble(ask * (1.0 - sig_sl/100.0), digits);
          if (UseLimitOrders && wh_price > 0) {
-            // Limit order at MIN(webhook, current ask - offset) so it's a maker
             double limit_px = MathMin(wh_price, ask - offset);
-            if (limit_px >= ask) limit_px = ask - offset;  // ensure below market
+            if (limit_px >= ask) limit_px = ask - offset;
+            double sl_limit = NormalizeDouble(limit_px * (1.0 - sig_sl/100.0), digits);
             datetime expiry = TimeCurrent() + LimitExpiryMin * 60;
-            t = OrderSend(sym, OP_BUYLIMIT, lot, NormalizeDouble(limit_px, (int)MarketInfo(sym, MODE_DIGITS)),
-                          Slippage, 0, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrLime);
-            if (t < 0) {
-               int err = GetLastError();
-               Print("DYNAPRO BUYLIMIT ", sym, " err=", err, " -> market fallback");
-               t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrLime);
+            ticket = OrderSend(sym, OP_BUYLIMIT, lot, NormalizeDouble(limit_px, digits),
+                          Slippage, sl_limit, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrLime);
+            if (ticket < 0) {
+               Print("DYNAPRO BUYLIMIT ", sym, " err=", GetLastError(), " → market fallback");
+               ticket = OrderSend(sym, OP_BUY, lot, ask, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrLime);
             } else {
-               Print("DYNAPRO BUYLIMIT ", sym, " @", limit_px, " (mkt=", ask, ") ticket=", t);
+               Print("DYNAPRO BUYLIMIT ", sym, " @", limit_px, " sl=", sl_limit, " lot=", lot, " ticket=", ticket);
             }
          } else {
-            t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrLime);
-            if (t < 0) Print("DYNAPRO BUY ", sym, " err=", GetLastError());
-            else Print("DYNAPRO BUY ", sym, " @", ask, " ticket=", t);
+            ticket = OrderSend(sym, OP_BUY, lot, ask, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrLime);
+            if (ticket > 0) Print("DYNAPRO BUY ", sym, " @", ask, " sl=", sl_px, " lot=", lot, " ticket=", ticket);
+            else            Print("DYNAPRO BUY ", sym, " err=", GetLastError());
          }
       }
    }
@@ -246,75 +339,74 @@ void PollDynaPro() {
       CloseBySymbol(sym, OP_BUY);
       if (!HasPosition(sym, OP_SELL)) {
          double bid = MarketInfo(sym, MODE_BID);
-         int t = -1;
+         double sl_px = NormalizeDouble(bid * (1.0 + sig_sl/100.0), digits);
          if (UseLimitOrders && wh_price > 0) {
-            // Limit order at MAX(webhook, current bid + offset) so it's a maker
             double limit_px = MathMax(wh_price, bid + offset);
-            if (limit_px <= bid) limit_px = bid + offset;  // ensure above market
+            if (limit_px <= bid) limit_px = bid + offset;
+            double sl_limit = NormalizeDouble(limit_px * (1.0 + sig_sl/100.0), digits);
             datetime expiry = TimeCurrent() + LimitExpiryMin * 60;
-            t = OrderSend(sym, OP_SELLLIMIT, lot, NormalizeDouble(limit_px, (int)MarketInfo(sym, MODE_DIGITS)),
-                          Slippage, 0, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrRed);
-            if (t < 0) {
-               int err = GetLastError();
-               Print("DYNAPRO SELLLIMIT ", sym, " err=", err, " -> market fallback");
-               t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrRed);
+            ticket = OrderSend(sym, OP_SELLLIMIT, lot, NormalizeDouble(limit_px, digits),
+                          Slippage, sl_limit, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrRed);
+            if (ticket < 0) {
+               Print("DYNAPRO SELLLIMIT ", sym, " err=", GetLastError(), " → market fallback");
+               ticket = OrderSend(sym, OP_SELL, lot, bid, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrRed);
             } else {
-               Print("DYNAPRO SELLLIMIT ", sym, " @", limit_px, " (mkt=", bid, ") ticket=", t);
+               Print("DYNAPRO SELLLIMIT ", sym, " @", limit_px, " sl=", sl_limit, " lot=", lot, " ticket=", ticket);
             }
          } else {
-            t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrRed);
-            if (t < 0) Print("DYNAPRO SELL ", sym, " err=", GetLastError());
-            else Print("DYNAPRO SELL ", sym, " @", bid, " ticket=", t);
+            ticket = OrderSend(sym, OP_SELL, lot, bid, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrRed);
+            if (ticket > 0) Print("DYNAPRO SELL ", sym, " @", bid, " sl=", sl_px, " lot=", lot, " ticket=", ticket);
+            else            Print("DYNAPRO SELL ", sym, " err=", GetLastError());
          }
       }
    }
-}
 
-string ExtractJSON(string json, string key) {
-   string search = "\"" + key + "\":\"";
-   int start = StringFind(json, search);
-   if (start < 0) return "";
-   start += StringLen(search);
-   int end = StringFind(json, "\"", start);
-   if (end < 0) return "";
-   return StringSubstr(json, start, end - start);
-}
-
-// Extract numeric JSON value (no quotes): "price":4800.5
-double ExtractJSONNum(string json, string key) {
-   string search = "\"" + key + "\":";
-   int start = StringFind(json, search);
-   if (start < 0) return 0;
-   start += StringLen(search);
-   // Skip whitespace
-   while (start < StringLen(json) && StringGetChar(json, start) == ' ') start++;
-   int end = start;
-   while (end < StringLen(json)) {
-      int ch = StringGetChar(json, end);
-      if ((ch >= '0' && ch <= '9') || ch == '.' || ch == '-') end++;
-      else break;
+   // Store per-ticket params for trail logic
+   if (ticket > 0) {
+      SetTicketParam(ticket, "trail_act", sig_trail_a);
+      SetTicketParam(ticket, "trail_dist", sig_trail_d);
+      SetTicketParam(ticket, "sl_pct", sig_sl);
+      SetTicketParam(ticket, "peak_pct", 0);
+      SetTicketParam(ticket, "active_trail", -999);
+      SetTicketParam(ticket, "entry_time", TimeCurrent());
+      SetTicketParam(ticket, "time_cut_h", sig_tcut);
    }
-   if (end <= start) return 0;
-   return StrToDouble(StringSubstr(json, start, end - start));
 }
 
-// Cancel stale pending limit orders (magic-matched)
+//+------------------------------------------------------------------+
+// Report trail/SL exit to server for retest re-entry
+//+------------------------------------------------------------------+
+void ReportExit(string sym, string exit_type, double entry, double peak_pct, double exit_pct, int ticket) {
+   string cookie = "", headers = "";
+   char post[], result[];
+   string body = "{\"symbol\":\"" + sym + "\",\"exit_type\":\"" + exit_type +
+                 "\",\"entry\":" + DoubleToStr(entry, 5) +
+                 ",\"peak_pct\":" + DoubleToStr(peak_pct, 2) +
+                 ",\"exit_pct\":" + DoubleToStr(exit_pct, 2) +
+                 ",\"ticket\":" + IntegerToString(ticket) + "}";
+   StringToCharArray(body, post, 0, StringLen(body));
+   WebRequest("POST", TradeClosedURL, cookie, NULL, 3000, post, StringLen(body), result, headers);
+}
+
+//+------------------------------------------------------------------+
+// Cancel stale limit orders
+//+------------------------------------------------------------------+
 void CancelStaleLimits() {
-   datetime expiry_sec = LimitExpiryMin * 60;
    for (int i = OrdersTotal() - 1; i >= 0; i--) {
       if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
       if (OrderMagicNumber() != MagicNum) continue;
       int typ = OrderType();
       if (typ != OP_BUYLIMIT && typ != OP_SELLLIMIT) continue;
-      if (TimeCurrent() - OrderOpenTime() > expiry_sec) {
-         bool ok = OrderDelete(OrderTicket());
-         if (ok) Print("LIMIT EXPIRED ", OrderSymbol(), " ticket=", OrderTicket());
+      datetime expiry = OrderExpiration();
+      if (expiry > 0 && TimeCurrent() > expiry) {
+         int tk = OrderTicket();
+         if (OrderDelete(tk)) DeleteTicketParams(tk);
       }
    }
 }
 
 //+------------------------------------------------------------------+
-// v3: TP exit — runs every tick on all open positions
+// v5 ManagePositions: per-ticket trail, time-cut, optional TP
 //+------------------------------------------------------------------+
 void ManagePositions() {
    for (int i = OrdersTotal() - 1; i >= 0; i--) {
@@ -323,114 +415,163 @@ void ManagePositions() {
 
       string sym = OrderSymbol();
       int    type = OrderType();
+      if (type != OP_BUY && type != OP_SELL) continue;
+
+      int    tk    = OrderTicket();
       double entry = OrderOpenPrice();
       double px = (type == OP_BUY) ? MarketInfo(sym, MODE_BID) : MarketInfo(sym, MODE_ASK);
       if (px <= 0) continue;
 
-      if (TP_Pct > 0) {
-         double pnl_pct = 0;
-         if (type == OP_BUY)  pnl_pct = (px - entry) / entry * 100.0;
-         if (type == OP_SELL) pnl_pct = (entry - px) / entry * 100.0;
-         if (pnl_pct >= TP_Pct) {
-            bool ok = OrderClose(OrderTicket(), OrderLots(), px, Slippage, clrGold);
-            if (ok) Print("TP EXIT ", sym, " +", DoubleToStr(pnl_pct, 2), "% ticket=", OrderTicket());
-            else    Print("TP close fail ", sym, " err=", GetLastError());
-            continue;
+      double pnl_pct = 0;
+      if (type == OP_BUY)  pnl_pct = (px - entry) / entry * 100.0;
+      if (type == OP_SELL) pnl_pct = (entry - px) / entry * 100.0;
+
+      // Load per-ticket params
+      double trail_act  = GetTicketParam(tk, "trail_act", Trail_Activate_Default);
+      double trail_dist = GetTicketParam(tk, "trail_dist", Trail_Distance_Default);
+      double peak_pct   = GetTicketParam(tk, "peak_pct", 0);
+      double active_t   = GetTicketParam(tk, "active_trail", -999);
+      double t_cut_h    = GetTicketParam(tk, "time_cut_h", 0);
+      double entry_time = GetTicketParam(tk, "entry_time", TimeCurrent());
+
+      // Update peak
+      if (pnl_pct > peak_pct) {
+         peak_pct = pnl_pct;
+         SetTicketParam(tk, "peak_pct", peak_pct);
+         if (UseTrailingStop && peak_pct >= trail_act) {
+            active_t = peak_pct - trail_dist;
+            SetTicketParam(tk, "active_trail", active_t);
          }
       }
 
+      // Trail exit
+      if (UseTrailingStop && active_t > -999 && pnl_pct <= active_t) {
+         bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrGold);
+         if (ok) {
+            Print("TRAIL EXIT ", sym, " peak=+", DoubleToStr(peak_pct,2), "% exit=+", DoubleToStr(pnl_pct,2), "% ticket=", tk);
+            ReportExit(sym, "trail", entry, peak_pct, pnl_pct, tk);
+            DeleteTicketParams(tk);
+         } else {
+            Print("TRAIL close fail ", sym, " err=", GetLastError());
+         }
+         continue;
+      }
+
+      // Time-cut exit
+      if (t_cut_h > 0 && (TimeCurrent() - entry_time) >= (int)(t_cut_h * 3600)) {
+         if (pnl_pct > 0) {
+            bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrBlue);
+            if (ok) {
+               Print("TIME_CUT EXIT ", sym, " +", DoubleToStr(pnl_pct,2), "% after ", DoubleToStr(t_cut_h,1), "h ticket=", tk);
+               ReportExit(sym, "time_cut", entry, peak_pct, pnl_pct, tk);
+               DeleteTicketParams(tk);
+               continue;
+            }
+         }
+      }
+
+      // Optional TP
+      if (TP_Pct > 0 && pnl_pct >= TP_Pct) {
+         bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrGold);
+         if (ok) {
+            Print("TP EXIT ", sym, " +", DoubleToStr(pnl_pct,2), "% ticket=", tk);
+            DeleteTicketParams(tk);
+         }
+         continue;
+      }
+
+      // EMA exit (legacy option)
       if (EMA_Exit) {
          double slowEMA = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 0);
          if (slowEMA > 0) {
-            if (type == OP_BUY && px < slowEMA) {
-               bool ok = OrderClose(OrderTicket(), OrderLots(), px, Slippage, clrOrange);
-               if (ok) Print("EMA EXIT ", sym, " ticket=", OrderTicket());
-               continue;
-            }
-            if (type == OP_SELL && px > slowEMA) {
-               bool ok = OrderClose(OrderTicket(), OrderLots(), px, Slippage, clrOrange);
-               if (ok) Print("EMA EXIT ", sym, " ticket=", OrderTicket());
-               continue;
+            if ((type == OP_BUY && px < slowEMA) || (type == OP_SELL && px > slowEMA)) {
+               bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrOrange);
+               if (ok) { Print("EMA EXIT ", sym, " ticket=", tk); DeleteTicketParams(tk); }
             }
          }
       }
    }
 }
 
+//+------------------------------------------------------------------+
+// EMA crossover on bar close (unchanged logic, just equity lot)
+//+------------------------------------------------------------------+
 void ProcessSymbol(string sym, int idx) {
-   if (!MarketInfo(sym, MODE_TRADEALLOWED)) return;
-   if (MarketInfo(sym, MODE_BID) <= 0) return;
+   datetime barTime = iTime(sym, Timeframe, 0);
+   if (barTime <= lastBarTime[idx]) return;
+   lastBarTime[idx] = barTime;
 
-   datetime bt = iTime(sym, Timeframe, 0);
-   if (bt == 0) return;
-   if (bt == lastBarTime[idx]) return;
-   lastBarTime[idx] = bt;
+   double fEMA = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double sEMA = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double fPrev = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 2);
+   double sPrev = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 2);
+   if (fEMA <= 0 || sEMA <= 0 || fPrev <= 0 || sPrev <= 0) return;
 
-   double f1 = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 1);
-   double s1 = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 1);
-   double f2 = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 2);
-   double s2 = iMA(sym, Timeframe, EMASlow, 0, MODE_EMA, PRICE_CLOSE, 2);
-
-   bool crossUp   = (f2 <= s2 && f1 >  s1);
-   bool crossDown = (f2 >= s2 && f1 <  s1);
-
-   if (crossUp)   CloseBySymbol(sym, OP_SELL);
-   if (crossDown) CloseBySymbol(sym, OP_BUY);
+   bool goLong  = (fPrev <= sPrev && fEMA > sEMA);
+   bool goShort = (fPrev >= sPrev && fEMA < sEMA);
+   if (!goLong && !goShort) return;
 
    if (CountMyPositions() >= MaxPos) return;
 
-   double lot = GetLot(sym);
+   double lot = GetLot(sym, SL_Pct_Default);
+   if (lot <= 0) return;
    double margin_needed = MarketInfo(sym, MODE_MARGINREQUIRED) * lot;
    if (margin_needed > AccountFreeMargin() * 0.15) return;
 
-   if (crossUp && !HasPosition(sym, OP_BUY)) {
-      double ask = MarketInfo(sym, MODE_ASK);
-      int t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0,
-                        "CPM_EMA", MagicNum, 0, clrLime);
-      if (t < 0) Print("BUY ", sym, " err=", GetLastError());
-      else       Print("BUY ", sym, " @", ask, " ticket=", t);
+   int digits = (int)MarketInfo(sym, MODE_DIGITS);
+   int ticket = -1;
+
+   if (goLong) {
+      CloseBySymbol(sym, OP_SELL);
+      if (!HasPosition(sym, OP_BUY)) {
+         double ask = MarketInfo(sym, MODE_ASK);
+         double sl_px = NormalizeDouble(ask * (1.0 - SL_Pct_Default/100.0), digits);
+         ticket = OrderSend(sym, OP_BUY, lot, ask, Slippage, sl_px, 0, "EMA_X", MagicNum, 0, clrLime);
+         if (ticket > 0) Print("BUY ", sym, " @", ask, " sl=", sl_px, " lot=", lot, " ticket=", ticket);
+      }
    }
-   if (crossDown && !HasPosition(sym, OP_SELL)) {
-      double bid = MarketInfo(sym, MODE_BID);
-      int t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0,
-                        "CPM_EMA", MagicNum, 0, clrRed);
-      if (t < 0) Print("SELL ", sym, " err=", GetLastError());
-      else       Print("SELL ", sym, " @", bid, " ticket=", t);
+   if (goShort) {
+      CloseBySymbol(sym, OP_BUY);
+      if (!HasPosition(sym, OP_SELL)) {
+         double bid = MarketInfo(sym, MODE_BID);
+         double sl_px = NormalizeDouble(bid * (1.0 + SL_Pct_Default/100.0), digits);
+         ticket = OrderSend(sym, OP_SELL, lot, bid, Slippage, sl_px, 0, "EMA_X", MagicNum, 0, clrRed);
+         if (ticket > 0) Print("SELL ", sym, " @", bid, " sl=", sl_px, " lot=", lot, " ticket=", ticket);
+      }
+   }
+
+   if (ticket > 0) {
+      SetTicketParam(ticket, "trail_act", Trail_Activate_Default);
+      SetTicketParam(ticket, "trail_dist", Trail_Distance_Default);
+      SetTicketParam(ticket, "sl_pct", SL_Pct_Default);
+      SetTicketParam(ticket, "peak_pct", 0);
+      SetTicketParam(ticket, "active_trail", -999);
+      SetTicketParam(ticket, "entry_time", TimeCurrent());
+      SetTicketParam(ticket, "time_cut_h", 0);
    }
 }
 
 //+------------------------------------------------------------------+
 int OnInit() {
    LoadSymbols();
-   Print("Portfolio_Manager v4.1 EMA ", EMAFast, "/", EMASlow,
-         " TF=", Timeframe, " TP=", TP_Pct, "% EMA_Exit=", EMA_Exit,
-         " LocalEMAFilter=", UseLocalEMAFilter,
-         " DynaPro=", SignalURL,
-         " filter='", SymFilter, "' symbols=", symCount);
-   for (int i = 0; i < symCount; i++) Print("  [", i, "] ", syms[i]);
+   Print("Portfolio_Manager v5.0 COMPOUNDING  EquityScale=", UseEquityScaling, " Risk%=", RiskPctPerTrade,
+         " MaxLot=", MaxLotCap, " SL=", SL_Pct_Default, "% TrailDefault=", Trail_Activate_Default, "/", Trail_Distance_Default,
+         " symbols=", symCount);
 
-   // --- FAIL-FAST: probe WebRequest once before entering OnTick loop ---
-   string _cookie = "", _headers = "";
-   char   _post[], _result[];
-   int _probe = WebRequest("GET", SignalURL, _cookie, NULL, 3000, _post, 0, _result, _headers);
-   if (_probe < 0) {
-      int _err = GetLastError();
-      string _msg = "";
-      if (_err == 4060) _msg = "URL NOT WHITELISTED — add '" + SignalURL + "' in Tools>Options>Expert Advisors>WebRequest";
-      else if (_err == 4014) _msg = "WebRequest function not allowed — check Tools>Options>Expert Advisors";
-      else if (_err == 5203) _msg = "HTTP request failed — no internet or server down";
-      else _msg = "WebRequest probe failed err=" + IntegerToString(_err);
-      Print("FATAL: ", _msg);
-      Alert("Portfolio_Manager: ", _msg);
-      Comment("ABORT: ", _msg);
+   // Probe WebRequest
+   string cookie = "", headers = "";
+   char post[], result[];
+   int probe = WebRequest("GET", SignalURL, cookie, NULL, 3000, post, 0, result, headers);
+   if (probe < 0) {
+      Print("WebRequest probe FAIL err=", GetLastError(), " — check MT4 Tools → Options → Expert Advisors → Allow WebRequest for ", SignalURL);
       return INIT_FAILED;
    }
-   Print("WebRequest probe OK (", _probe, " bytes) — EA live");
+   Print("WebRequest probe OK (", ArraySize(result), " bytes)  EA live");
+
    if (FlattenOnInit) {
       Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
       FlattenAll("init");
    }
-   Comment("Portfolio_Manager v4.3 — poll=", PollSec, "s, limits=", UseLimitOrders ? "ON" : "OFF", ", flatten_ready=YES");
    return INIT_SUCCEEDED;
 }
 
@@ -439,11 +580,7 @@ void OnTick() {
    CancelStaleLimits();
    PollFlatten();
    PollDynaPro();
-
-   static int ticks = 0;
-   if (++ticks % 500 == 0) LoadSymbols();
    for (int i = 0; i < symCount; i++) ProcessSymbol(syms[i], i);
 }
 
 void OnDeinit(const int r) { }
-//+------------------------------------------------------------------+
