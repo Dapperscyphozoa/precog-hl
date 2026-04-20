@@ -421,7 +421,7 @@ def engines_status():
     """Live engine + guard + venue state."""
     try:
         btc = btc_correlation.get_state()
-        btc_fresh = (time.time() - btc.get('ts',0)) < 120 if btc.get('ts') else False
+        btc_fresh = (time.time() - btc.get('ts',0)) < 300 if btc.get('ts') else False
     except Exception: btc_fresh = False
     try:
         venues = orderbook_ws.get_venue_status()
