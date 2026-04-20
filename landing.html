@@ -129,8 +129,10 @@ body::after {
 .flicker     { animation: flicker 5s infinite; }
 
 /* Back-half rings: dimmer (behind orb), keep spinning on own axis */
-.ring-back  { opacity: 0.25; }
-.ring-front { opacity: 0.85; }
+/* Back rings: ghosted (lighter stroke, thinner, dimmer) */
+.ring-back  { opacity: 0.18; stroke-width: 0.5 !important; }
+/* Front rings: solid + bold */
+.ring-front { opacity: 0.9;  stroke-width: 1.2 !important; }
 .ring-back.ring-3d-1,  .ring-front.ring-3d-1  { animation: spin-cw  22s linear infinite; }
 .ring-back.ring-3d-2,  .ring-front.ring-3d-2  { animation: spin-ccw 16s linear infinite; }
 .ring-back.ring-3d-3,  .ring-front.ring-3d-3  { animation: spin-cw  30s linear infinite; }
