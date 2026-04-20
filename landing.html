@@ -147,6 +147,31 @@ body::after {
 .core-pulse  { transform-origin: 300px 300px; transform-box: fill-box; animation: thrum 2.4s ease-in-out infinite; }
 .flicker     { animation: flicker 5s infinite; }
 
+/* Back/front ring visibility sync: back dims when ring rotates to front, front brightens */
+@keyframes ringBackFade {
+  0%, 100% { opacity: 1; }
+  25%, 75% { opacity: 0.3; }
+  50%      { opacity: 0.15; }
+}
+@keyframes ringFrontFade {
+  0%, 100% { opacity: 0.15; }
+  25%, 75% { opacity: 0.7; }
+  50%      { opacity: 1; }
+}
+.ring-back.ring-3d-1  { animation-name: gimbal1, ringBackFade; animation-duration: 22s, 22s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-back.ring-3d-2  { animation-name: gimbal2, ringBackFade; animation-duration: 16s, 16s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-back.ring-3d-3  { animation-name: gimbal3, ringBackFade; animation-duration: 30s, 30s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-back.ring-3d-4  { animation-name: gyroY, ringBackFade; animation-duration: 18s, 18s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-back.ring-3d-5  { animation-name: gyroXrev, ringBackFade; animation-duration: 24s, 24s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-back.ring-3d-6  { animation-name: gyroZ, ringBackFade; animation-duration: 40s, 40s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+
+.ring-front.ring-3d-1 { animation-name: gimbal1, ringFrontFade; animation-duration: 22s, 22s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-front.ring-3d-2 { animation-name: gimbal2, ringFrontFade; animation-duration: 16s, 16s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-front.ring-3d-3 { animation-name: gimbal3, ringFrontFade; animation-duration: 30s, 30s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-front.ring-3d-4 { animation-name: gyroY, ringFrontFade; animation-duration: 18s, 18s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-front.ring-3d-5 { animation-name: gyroXrev, ringFrontFade; animation-duration: 24s, 24s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+.ring-front.ring-3d-6 { animation-name: gyroZ, ringFrontFade; animation-duration: 40s, 40s; animation-iteration-count: infinite, infinite; animation-timing-function: linear, ease-in-out; }
+
 /* GRID PANELS */
 .grid { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 24px; margin-bottom: 32px; }
 .panel {
@@ -321,6 +346,13 @@ body::after {
                         <stop offset="100%" stop-color="#050a08" stop-opacity="0.8"/>
                     </radialGradient>
 
+                    <!-- ORB INNER: soft inner haze through translucent glass -->
+                    <radialGradient id="orbInner" cx="50%" cy="50%" r="50%">
+                        <stop offset="0%" stop-color="#b8ff2f" stop-opacity="0.25"/>
+                        <stop offset="50%" stop-color="#00e5ff" stop-opacity="0.1"/>
+                        <stop offset="100%" stop-color="#07080a" stop-opacity="0"/>
+                    </radialGradient>
+
                     <!-- ORB SHEEN: specular highlight top-left (off-center) -->
                     <radialGradient id="orbSheen" cx="32%" cy="28%" r="45%">
                         <stop offset="0%" stop-color="#b8ff2f" stop-opacity="0.55"/>
@@ -375,32 +407,110 @@ body::after {
                     </g>
                 </g>
 
-                <!-- Gyroscopic ring array — each on different 3D axis -->
-                <g fill="none" stroke="#b8ff2f" stroke-width="0.8" opacity="0.5">
-                    <!-- Horizontal ring (equator) -->
-                    <ellipse class="ring-3d-4" cx="300" cy="300" rx="200" ry="60"/>
-                    <!-- Vertical ring -->
-                    <ellipse class="ring-3d-5" cx="300" cy="300" rx="60" ry="200"/>
-                    <!-- Diagonal 45° — gimbal 1 -->
-                    <g class="ring-3d-1">
-                        <ellipse cx="300" cy="300" rx="210" ry="75" transform="rotate(45 300 300)" stroke="#c8ccd4" opacity="0.4"/>
+                <!-- ═══ BIOMECHANICAL CAGE (massively expanded) ═══ -->
+
+                <!-- Main spine with articulated vertebrae -->
+                <g opacity="0.55">
+                    <path d="M300 80 L300 520" stroke="#c8ccd4" stroke-width="0.6" opacity="0.3"/>
+                    <g fill="none" stroke="#c8ccd4" stroke-width="0.8" opacity="0.5">
+                        <ellipse cx="300" cy="110" rx="18" ry="6"/>
+                        <ellipse cx="300" cy="138" rx="22" ry="7"/>
+                        <ellipse cx="300" cy="168" rx="26" ry="8"/>
+                        <ellipse cx="300" cy="198" rx="30" ry="9"/>
+                        <ellipse cx="300" cy="228" rx="34" ry="10"/>
+                        <ellipse cx="300" cy="260" rx="36" ry="11"/>
+                        <ellipse cx="300" cy="300" rx="38" ry="11"/>
+                        <ellipse cx="300" cy="340" rx="36" ry="11"/>
+                        <ellipse cx="300" cy="372" rx="34" ry="10"/>
+                        <ellipse cx="300" cy="402" rx="30" ry="9"/>
+                        <ellipse cx="300" cy="432" rx="26" ry="8"/>
+                        <ellipse cx="300" cy="462" rx="22" ry="7"/>
+                        <ellipse cx="300" cy="490" rx="18" ry="6"/>
                     </g>
-                    <!-- Diagonal -45° — gimbal 2 -->
-                    <g class="ring-3d-2">
-                        <ellipse cx="300" cy="300" rx="210" ry="75" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.4"/>
+                    <!-- Spinal nerve threads -->
+                    <g stroke="#c1272d" stroke-width="0.3" opacity="0.35" fill="none">
+                        <path d="M285 90 Q275 300 285 510"/>
+                        <path d="M315 90 Q325 300 315 510"/>
                     </g>
-                    <!-- Precessing ring — Z rotation -->
-                    <g class="ring-3d-3">
-                        <ellipse cx="300" cy="300" rx="230" ry="30" stroke="#c1272d" stroke-width="0.6" opacity="0.35"/>
+                </g>
+
+                <!-- Rib cage (expanded — 12 ribs both sides) -->
+                <g stroke="#c8ccd4" stroke-width="0.6" fill="none" opacity="0.35">
+                    <path d="M300 170 Q170 200 185 260"/>
+                    <path d="M300 170 Q430 200 415 260"/>
+                    <path d="M300 195 Q150 225 170 300"/>
+                    <path d="M300 195 Q450 225 430 300"/>
+                    <path d="M300 220 Q130 255 160 335"/>
+                    <path d="M300 220 Q470 255 440 335"/>
+                    <path d="M300 250 Q110 290 150 370"/>
+                    <path d="M300 250 Q490 290 450 370"/>
+                    <path d="M300 285 Q100 325 150 400"/>
+                    <path d="M300 285 Q500 325 450 400"/>
+                    <path d="M300 320 Q115 360 165 425"/>
+                    <path d="M300 320 Q485 360 435 425"/>
+                </g>
+
+                <!-- Tendons / connective tissue -->
+                <g stroke="#00e5ff" stroke-width="0.4" fill="none" opacity="0.3">
+                    <path d="M200 180 Q250 260 230 350 Q210 440 250 480" class="flicker"/>
+                    <path d="M400 180 Q350 260 370 350 Q390 440 350 480" class="flicker" style="animation-delay:2s"/>
+                    <path d="M180 240 Q240 310 210 400" class="flicker" style="animation-delay:1s"/>
+                    <path d="M420 240 Q360 310 390 400" class="flicker" style="animation-delay:3s"/>
+                </g>
+
+                <!-- Ligament anchors at joints -->
+                <g fill="#b8ff2f" opacity="0.45">
+                    <circle cx="185" cy="260" r="2.5"/>
+                    <circle cx="415" cy="260" r="2.5"/>
+                    <circle cx="170" cy="300" r="2"/>
+                    <circle cx="430" cy="300" r="2"/>
+                    <circle cx="160" cy="335" r="2.5"/>
+                    <circle cx="440" cy="335" r="2.5"/>
+                    <circle cx="150" cy="370" r="2"/>
+                    <circle cx="450" cy="370" r="2"/>
+                </g>
+
+                <!-- Micro fiber bundles -->
+                <g stroke="#c8ccd4" stroke-width="0.25" opacity="0.22" fill="none">
+                    <path d="M220 200 L280 210 L220 220"/>
+                    <path d="M380 200 L320 210 L380 220"/>
+                    <path d="M215 340 L280 345 L215 350"/>
+                    <path d="M385 340 L320 345 L385 350"/>
+                    <path d="M230 260 L285 265 L230 270 L285 275 L230 280"/>
+                    <path d="M370 260 L315 265 L370 270 L315 275 L370 280"/>
+                </g>
+
+                <!-- Actuator joints -->
+                <g stroke="#c1272d" stroke-width="0.5" fill="none" opacity="0.5">
+                    <circle cx="170" cy="220" r="6"/>
+                    <circle cx="430" cy="220" r="6"/>
+                    <circle cx="150" cy="300" r="8"/>
+                    <circle cx="450" cy="300" r="8"/>
+                    <circle cx="170" cy="380" r="6"/>
+                    <circle cx="430" cy="380" r="6"/>
+                </g>
+
+                <!-- ═══ BACK HALF OF GYRO RINGS (behind orb) ═══ -->
+                <g fill="none" stroke-width="0.9">
+                    <!-- each ring has a back arc that hides when ball is in front -->
+                    <ellipse class="ring-3d-4 ring-back" cx="300" cy="300" rx="200" ry="56" stroke="#b8ff2f" opacity="0.25"/>
+                    <ellipse class="ring-3d-5 ring-back" cx="300" cy="300" rx="56" ry="200" stroke="#b8ff2f" opacity="0.25"/>
+                    <g class="ring-3d-1 ring-back">
+                        <ellipse cx="300" cy="300" rx="210" ry="70" transform="rotate(45 300 300)" stroke="#c8ccd4" opacity="0.2"/>
                     </g>
-                    <!-- Additional micro-ring for convexity -->
-                    <ellipse class="ring-3d-6" cx="300" cy="300" rx="170" ry="45" stroke="#b8ff2f" opacity="0.3"/>
+                    <g class="ring-3d-2 ring-back">
+                        <ellipse cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.2"/>
+                    </g>
+                    <g class="ring-3d-3 ring-back">
+                        <ellipse cx="300" cy="300" rx="230" ry="28" stroke="#c1272d" stroke-width="0.6" opacity="0.18"/>
+                    </g>
+                    <ellipse class="ring-3d-6 ring-back" cx="300" cy="300" rx="170" ry="42" stroke="#b8ff2f" opacity="0.18"/>
                 </g>
 
                 <!-- Mid ring with gear teeth -->
                 <g class="orbit-inner">
-                    <circle cx="300" cy="300" r="220" fill="none" stroke="#c8ccd4" stroke-width="1" opacity="0.35"/>
-                    <g stroke="#b8ff2f" stroke-width="1" opacity="0.4">
+                    <circle cx="300" cy="300" r="220" fill="none" stroke="#c8ccd4" stroke-width="1" opacity="0.3"/>
+                    <g stroke="#b8ff2f" stroke-width="1" opacity="0.35">
                         <line x1="300" y1="75" x2="300" y2="95"/>
                         <line x1="459" y1="141" x2="445" y2="155"/>
                         <line x1="525" y1="300" x2="505" y2="300"/>
@@ -412,69 +522,66 @@ body::after {
                     </g>
                 </g>
 
-                <!-- Spine structure -->
-                <g opacity="0.5">
-                    <path d="M300 100 L300 500" stroke="#c8ccd4" stroke-width="0.5" opacity="0.25"/>
-                    <g fill="none" stroke="#c8ccd4" stroke-width="0.8" opacity="0.4">
-                        <ellipse cx="300" cy="140" rx="24" ry="8"/>
-                        <ellipse cx="300" cy="180" rx="28" ry="9"/>
-                        <ellipse cx="300" cy="225" rx="32" ry="10"/>
-                        <ellipse cx="300" cy="270" rx="36" ry="11"/>
-                        <ellipse cx="300" cy="330" rx="36" ry="11"/>
-                        <ellipse cx="300" cy="375" rx="32" ry="10"/>
-                        <ellipse cx="300" cy="420" rx="28" ry="9"/>
-                        <ellipse cx="300" cy="460" rx="24" ry="8"/>
-                    </g>
-                </g>
-
-                <!-- Ribs / cage -->
-                <g stroke="#c8ccd4" stroke-width="0.6" fill="none" opacity="0.28">
-                    <path d="M300 200 Q160 230 180 300"/>
-                    <path d="M300 200 Q440 230 420 300"/>
-                    <path d="M300 240 Q130 280 170 360"/>
-                    <path d="M300 240 Q470 280 430 360"/>
-                    <path d="M300 280 Q110 330 160 410"/>
-                    <path d="M300 280 Q490 330 440 410"/>
-                </g>
-
-                <!-- ═══ CORE ORB (true 3D sphere via layered gradients) ═══ -->
+                <!-- ═══ ORB (translucent glass sphere, 10% smaller: r=126) ═══ -->
 
                 <!-- Deep outer glow halo -->
-                <circle cx="300" cy="300" r="240" fill="url(#coreHot)" opacity="0.1" class="core-pulse"/>
+                <circle cx="300" cy="300" r="210" fill="url(#coreHot)" opacity="0.08" class="core-pulse"/>
 
-                <!-- Orb body: radial gradient from core outward -->
-                <circle cx="300" cy="300" r="140" fill="url(#orbBody)"/>
+                <!-- Glass body: 20% translucent surface -->
+                <circle cx="300" cy="300" r="126" fill="url(#orbBody)" opacity="0.2"/>
 
-                <!-- Sphere highlight top-left (simulates light source) -->
-                <circle cx="300" cy="300" r="140" fill="url(#orbSheen)"/>
+                <!-- Inner volumetric haze (gives depth through glass) -->
+                <circle cx="300" cy="300" r="126" fill="url(#orbInner)" opacity="0.35"/>
 
-                <!-- Sphere rim darkening (limb shadow) -->
-                <circle cx="300" cy="300" r="140" fill="url(#orbRim)"/>
+                <!-- Specular sheen (top-left highlight) -->
+                <circle cx="300" cy="300" r="126" fill="url(#orbSheen)" opacity="0.55"/>
+
+                <!-- Rim refraction (edge catches light, inside darkens) -->
+                <circle cx="300" cy="300" r="126" fill="url(#orbRim)" opacity="0.4"/>
+
+                <!-- Thin glass edge outline -->
+                <circle cx="300" cy="300" r="126" fill="none" stroke="#b8ff2f" stroke-width="0.6" opacity="0.5"/>
 
                 <!-- Contact shadow on floor -->
-                <ellipse cx="300" cy="475" rx="120" ry="14" fill="#000000" opacity="0.3" filter="url(#glow)"/>
+                <ellipse cx="300" cy="455" rx="108" ry="12" fill="#000000" opacity="0.28" filter="url(#glow)"/>
 
-                <!-- Chamber rings (around orb) -->
-                <g fill="none" stroke="#b8ff2f" stroke-width="0.8" opacity="0.3">
-                    <ellipse cx="300" cy="300" rx="155" ry="155"/>
-                    <ellipse cx="300" cy="300" rx="175" ry="40" opacity="0.4"/>
+                <!-- ═══ FRONT HALF OF GYRO RINGS (over orb — true 3D illusion) ═══ -->
+                <g fill="none" stroke-width="0.9">
+                    <ellipse class="ring-3d-4 ring-front" cx="300" cy="300" rx="200" ry="56" stroke="#b8ff2f" opacity="0.7"/>
+                    <ellipse class="ring-3d-5 ring-front" cx="300" cy="300" rx="56" ry="200" stroke="#b8ff2f" opacity="0.7"/>
+                    <g class="ring-3d-1 ring-front">
+                        <ellipse cx="300" cy="300" rx="210" ry="70" transform="rotate(45 300 300)" stroke="#c8ccd4" opacity="0.55"/>
+                    </g>
+                    <g class="ring-3d-2 ring-front">
+                        <ellipse cx="300" cy="300" rx="210" ry="70" transform="rotate(-45 300 300)" stroke="#00e5ff" opacity="0.55"/>
+                    </g>
+                    <g class="ring-3d-3 ring-front">
+                        <ellipse cx="300" cy="300" rx="230" ry="28" stroke="#c1272d" stroke-width="0.7" opacity="0.5"/>
+                    </g>
+                    <ellipse class="ring-3d-6 ring-front" cx="300" cy="300" rx="170" ry="42" stroke="#b8ff2f" opacity="0.5"/>
+                </g>
+
+                <!-- Chamber rings (tight around orb) -->
+                <g fill="none" stroke="#b8ff2f" stroke-width="0.7" opacity="0.25">
+                    <ellipse cx="300" cy="300" rx="142" ry="142"/>
+                    <ellipse cx="300" cy="300" rx="160" ry="36" opacity="0.35"/>
                 </g>
 
                 <!-- Data cables / tubes -->
-                <g stroke="#00e5ff" stroke-width="1" fill="none" opacity="0.4">
+                <g stroke="#00e5ff" stroke-width="0.9" fill="none" opacity="0.35">
                     <path d="M300 110 Q280 180 250 210" class="flicker"/>
                     <path d="M300 110 Q320 180 350 210" class="flicker" style="animation-delay: 1s"/>
                     <path d="M300 490 Q280 420 250 390" class="flicker" style="animation-delay: 2s"/>
                     <path d="M300 490 Q320 420 350 390" class="flicker" style="animation-delay: 3s"/>
                 </g>
 
-                <!-- Central eye (bright core of orb) -->
+                <!-- Central eye (bright core visible through glass) -->
                 <g filter="url(#glowBig)">
-                    <circle cx="300" cy="300" r="28" fill="#07080a" stroke="#b8ff2f" stroke-width="1.8"/>
-                    <circle cx="300" cy="300" r="13" fill="#c1272d">
-                        <animate attributeName="r" values="13;10;13" dur="1.8s" repeatCount="indefinite"/>
+                    <circle cx="300" cy="300" r="25" fill="#07080a" stroke="#b8ff2f" stroke-width="1.6"/>
+                    <circle cx="300" cy="300" r="12" fill="#c1272d">
+                        <animate attributeName="r" values="12;9;12" dur="1.8s" repeatCount="indefinite"/>
                     </circle>
-                    <circle cx="300" cy="300" r="5" fill="#ffffff" opacity="0.85">
+                    <circle cx="300" cy="300" r="4.5" fill="#ffffff" opacity="0.85">
                         <animate attributeName="opacity" values="0.85;0.5;0.85" dur="1.8s" repeatCount="indefinite"/>
                     </circle>
                 </g>
