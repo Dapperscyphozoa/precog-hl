@@ -17,8 +17,11 @@ extern string SymFilter  = ".a";
 extern double TP_Pct     = 0.8;
 extern bool   EMA_Exit   = false;
 extern string SignalURL  = "https://precog-hl-web.onrender.com/mt4/signals";
-extern int    PollSec    = 10;
+extern int    PollSec    = 2;        // was 10s — cut latency
 extern bool   UseLocalEMAFilter = true;  // 2nd-gate webhook signals with local EMA (was always-on in v4.0)
+extern bool   UseLimitOrders    = true;  // maker entries at webhook price (kills slippage)
+extern int    LimitExpiryMin    = 15;    // cancel unfilled limit after N min
+extern double LimitOffsetPips   = 2;     // offset limit N pips inside market (for safe fill)
 
 datetime lastBarTime[256];
 string   syms[256];
@@ -111,7 +114,8 @@ void PollDynaPro() {
 
    if (StringLen(sym) < 2 || StringLen(dir) < 2) return;
 
-   Print("DYNAPRO SIGNAL: ", dir, " ", sym);
+   double wh_price = ExtractJSONNum(body, "price");
+   Print("DYNAPRO SIGNAL: ", dir, " ", sym, " wh_price=", wh_price);
 
    // Check if symbol is tradeable
    if (!MarketInfo(sym, MODE_TRADEALLOWED)) {
@@ -132,6 +136,9 @@ void PollDynaPro() {
       Print("DynaPro: max positions reached"); return;
    }
 
+   double point = MarketInfo(sym, MODE_POINT);
+   double offset = LimitOffsetPips * point * 10;  // pips -> price units
+
    if (dir == "BUY" || dir == "buy") {
       if (UseLocalEMAFilter) {
          double fEMA = iMA(sym, Timeframe, EMAFast, 0, MODE_EMA, PRICE_CLOSE, 0);
@@ -141,10 +148,26 @@ void PollDynaPro() {
       CloseBySymbol(sym, OP_SELL);
       if (!HasPosition(sym, OP_BUY)) {
          double ask = MarketInfo(sym, MODE_ASK);
-         int t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0,
-                           "DYNAPRO", MagicNum, 0, clrLime);
-         if (t < 0) Print("DYNAPRO BUY ", sym, " err=", GetLastError());
-         else Print("DYNAPRO BUY ", sym, " @", ask, " ticket=", t);
+         int t = -1;
+         if (UseLimitOrders && wh_price > 0) {
+            // Limit order at MIN(webhook, current ask - offset) so it's a maker
+            double limit_px = MathMin(wh_price, ask - offset);
+            if (limit_px >= ask) limit_px = ask - offset;  // ensure below market
+            datetime expiry = TimeCurrent() + LimitExpiryMin * 60;
+            t = OrderSend(sym, OP_BUYLIMIT, lot, NormalizeDouble(limit_px, (int)MarketInfo(sym, MODE_DIGITS)),
+                          Slippage, 0, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrLime);
+            if (t < 0) {
+               int err = GetLastError();
+               Print("DYNAPRO BUYLIMIT ", sym, " err=", err, " -> market fallback");
+               t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrLime);
+            } else {
+               Print("DYNAPRO BUYLIMIT ", sym, " @", limit_px, " (mkt=", ask, ") ticket=", t);
+            }
+         } else {
+            t = OrderSend(sym, OP_BUY, lot, ask, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrLime);
+            if (t < 0) Print("DYNAPRO BUY ", sym, " err=", GetLastError());
+            else Print("DYNAPRO BUY ", sym, " @", ask, " ticket=", t);
+         }
       }
    }
    else if (dir == "SELL" || dir == "sell") {
@@ -156,10 +179,26 @@ void PollDynaPro() {
       CloseBySymbol(sym, OP_BUY);
       if (!HasPosition(sym, OP_SELL)) {
          double bid = MarketInfo(sym, MODE_BID);
-         int t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0,
-                           "DYNAPRO", MagicNum, 0, clrRed);
-         if (t < 0) Print("DYNAPRO SELL ", sym, " err=", GetLastError());
-         else Print("DYNAPRO SELL ", sym, " @", bid, " ticket=", t);
+         int t = -1;
+         if (UseLimitOrders && wh_price > 0) {
+            // Limit order at MAX(webhook, current bid + offset) so it's a maker
+            double limit_px = MathMax(wh_price, bid + offset);
+            if (limit_px <= bid) limit_px = bid + offset;  // ensure above market
+            datetime expiry = TimeCurrent() + LimitExpiryMin * 60;
+            t = OrderSend(sym, OP_SELLLIMIT, lot, NormalizeDouble(limit_px, (int)MarketInfo(sym, MODE_DIGITS)),
+                          Slippage, 0, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrRed);
+            if (t < 0) {
+               int err = GetLastError();
+               Print("DYNAPRO SELLLIMIT ", sym, " err=", err, " -> market fallback");
+               t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrRed);
+            } else {
+               Print("DYNAPRO SELLLIMIT ", sym, " @", limit_px, " (mkt=", bid, ") ticket=", t);
+            }
+         } else {
+            t = OrderSend(sym, OP_SELL, lot, bid, Slippage, 0, 0, "DYNAPRO", MagicNum, 0, clrRed);
+            if (t < 0) Print("DYNAPRO SELL ", sym, " err=", GetLastError());
+            else Print("DYNAPRO SELL ", sym, " @", bid, " ticket=", t);
+         }
       }
    }
 }
@@ -172,6 +211,39 @@ string ExtractJSON(string json, string key) {
    int end = StringFind(json, "\"", start);
    if (end < 0) return "";
    return StringSubstr(json, start, end - start);
+}
+
+// Extract numeric JSON value (no quotes): "price":4800.5
+double ExtractJSONNum(string json, string key) {
+   string search = "\"" + key + "\":";
+   int start = StringFind(json, search);
+   if (start < 0) return 0;
+   start += StringLen(search);
+   // Skip whitespace
+   while (start < StringLen(json) && StringGetChar(json, start) == ' ') start++;
+   int end = start;
+   while (end < StringLen(json)) {
+      int ch = StringGetChar(json, end);
+      if ((ch >= '0' && ch <= '9') || ch == '.' || ch == '-') end++;
+      else break;
+   }
+   if (end <= start) return 0;
+   return StrToDouble(StringSubstr(json, start, end - start));
+}
+
+// Cancel stale pending limit orders (magic-matched)
+void CancelStaleLimits() {
+   datetime expiry_sec = LimitExpiryMin * 60;
+   for (int i = OrdersTotal() - 1; i >= 0; i--) {
+      if (!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      if (OrderMagicNumber() != MagicNum) continue;
+      int typ = OrderType();
+      if (typ != OP_BUYLIMIT && typ != OP_SELLLIMIT) continue;
+      if (TimeCurrent() - OrderOpenTime() > expiry_sec) {
+         bool ok = OrderDelete(OrderTicket());
+         if (ok) Print("LIMIT EXPIRED ", OrderSymbol(), " ticket=", OrderTicket());
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -287,12 +359,13 @@ int OnInit() {
       return INIT_FAILED;
    }
    Print("WebRequest probe OK (", _probe, " bytes) — EA live");
-   Comment("Portfolio_Manager v4.1 — EA live, polling every ", PollSec, "s");
+   Comment("Portfolio_Manager v4.2 — EA live, poll=", PollSec, "s, limits=", UseLimitOrders ? "ON" : "OFF");
    return INIT_SUCCEEDED;
 }
 
 void OnTick() {
    ManagePositions();
+   CancelStaleLimits();
    PollDynaPro();
 
    static int ticks = 0;
