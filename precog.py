@@ -1295,7 +1295,7 @@ FUNDING_CUT_RATIO = 0.50
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 TRAIL_TIGHTEN_AFTER_SEC = 7200  # 2h: tighten trail to 0.9% (OOS +77% PnL vs static)
 TRAIL_TIGHTEN_PCT = 0.009          # OOS winner: +250% vs +40% at 0.3%
-MAKER_FALLBACK_SEC = 10
+MAKER_FALLBACK_SEC = 30  # increased from 10s — patient maker fills, cut taker fees
 MAKER_OFFSET = 0.0015  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
 def _init_hl_with_retry(max_attempts=8):
@@ -1696,7 +1696,28 @@ def place(coin, is_buy, size):
     # Bybit-lead limit: capture HL lag using Bybit's current price
     side = 'BUY' if is_buy else 'SELL'
     edge = bybit_lead.compute_edge_price(coin, side, px)
-    if edge:
+    # Try wall-anchored maker: place at wall price (own side) if within 0.3% of mid
+    # BUY: bid-side wall (support below) — rest just above it for queue priority
+    # SELL: ask-side wall (resistance above) — rest just below it
+    wall_px = None
+    try:
+        wall_side = 'bid' if is_buy else 'ask'
+        wall = orderbook_ws.get_nearest_wall(coin, wall_side)
+        if wall and wall.get('price'):
+            w_px = float(wall['price'])
+            dist_pct = abs(px - w_px) / px if px > 0 else 1
+            # Only use wall if within 0.3% of current mid (tight enough to be relevant)
+            if dist_pct <= 0.003:
+                # BUY: sit 1 tick above wall (join queue on our side, wall acts as support)
+                # SELL: sit 1 tick below wall
+                tick_adj = 0.0001  # 1 bp
+                wall_px = w_px * (1 + tick_adj) if is_buy else w_px * (1 - tick_adj)
+                log(f"WALL-ANCHOR {coin} {side}: wall @ {w_px} (${wall.get('usd',0)/1000:.0f}k, {dist_pct*100:.2f}% from mid) → resting @ {wall_px}")
+    except Exception:
+        pass
+    if wall_px:
+        maker_px = round_price(coin, wall_px)
+    elif edge:
         maker_px = round_price(coin, edge)
     else:
         maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
