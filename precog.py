@@ -63,6 +63,74 @@ def update_coin_wr(coin, win, state):
             state.setdefault('coin_kill', {})[coin] = {'until': time.time() + COIN_KILL_COOLDOWN_SEC, 'wr': wr}
             log(f"COIN KILL {coin}: rolling 10-trade WR {wr*100:.0f}% < {COIN_KILL_WR_THRESHOLD*100:.0f}% → disabled 12h")
 
+def record_close(pos, coin, pnl_pct, state):
+    """Record a closed trade across all stats buckets."""
+    if pnl_pct is None: return
+    win = pnl_pct > 0
+    now = time.time()
+    # Rolling coin WR + kill logic
+    update_coin_wr(coin, win, state)
+    # Broad stats buckets
+    stats = state.setdefault('stats', {
+        'by_engine': {}, 'by_hour': {}, 'by_side': {}, 'by_coin': {},
+        'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0
+    })
+    def bump(bucket_name, key):
+        b = stats[bucket_name].setdefault(str(key), {'w':0,'l':0,'pnl':0.0})
+        if win: b['w'] += 1
+        else: b['l'] += 1
+        b['pnl'] += pnl_pct
+    engine = pos.get('engine') or 'UNKNOWN'
+    side   = pos.get('side','?')
+    utc_h  = pos.get('utc_h', time.gmtime(now).tm_hour)
+    conf   = pos.get('conf', 0)
+    conf_bucket = '0-29' if conf<30 else '30-49' if conf<50 else '50-69' if conf<70 else '70+'
+    bump('by_engine', engine)
+    bump('by_hour',   utc_h)
+    bump('by_side',   side)
+    bump('by_coin',   coin)
+    bump('by_conf',   conf_bucket)
+    if win: stats['total_wins'] += 1
+    else: stats['total_losses'] += 1
+    stats['total_pnl'] += pnl_pct
+
+def wr_to_mult(wr, n, min_n=5):
+    """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
+    <40%: 0.4x | 40-55%: 0.7x | 55-70%: 1.0x | 70%+: 1.3x
+    Not enough data (<min_n): 1.0x (neutral)."""
+    if n < min_n: return 1.0
+    if wr < 0.40: return 0.4
+    if wr < 0.55: return 0.7
+    if wr < 0.70: return 1.0
+    return 1.3
+
+def adaptive_mult(coin, side, state):
+    """Compose multiplier from per-coin × per-hour × per-side stats."""
+    stats = state.get('stats', {})
+    mult = 1.0
+    # Per-coin
+    b = stats.get('by_coin', {}).get(coin)
+    if b:
+        n = b.get('w',0)+b.get('l',0)
+        wr = b.get('w',0)/n if n else 0
+        mult *= wr_to_mult(wr, n, min_n=10)
+    # Per-hour
+    utc_h = str(time.gmtime().tm_hour)
+    b = stats.get('by_hour', {}).get(utc_h)
+    if b:
+        n = b.get('w',0)+b.get('l',0)
+        wr = b.get('w',0)/n if n else 0
+        mult *= wr_to_mult(wr, n, min_n=15)
+    # Per-side
+    side_key = 'L' if side=='BUY' else 'S'
+    b = stats.get('by_side', {}).get(side_key)
+    if b:
+        n = b.get('w',0)+b.get('l',0)
+        wr = b.get('w',0)/n if n else 0
+        mult *= wr_to_mult(wr, n, min_n=20)
+    # Clamp 0.3-1.5
+    return max(0.3, min(1.5, mult))
+
 def log_trade(engine, coin, direction, entry, pnl, source, sl_pct=None):
     import csv
     try:
@@ -287,6 +355,57 @@ def landing():
     resp.headers['Pragma'] = 'no-cache'
     resp.headers['Expires'] = '0'
     return resp
+
+@app.route('/stats', methods=['GET'])
+def stats_endpoint():
+    """Live stats: per-engine, per-hour, per-side, per-coin, per-conf."""
+    try:
+        state = load_state()
+        stats = state.get('stats', {})
+        def summarize(bucket):
+            out = {}
+            for k, v in bucket.items():
+                w = v.get('w',0); l = v.get('l',0); n = w + l
+                wr = (w/n) if n else 0
+                out[k] = {'n': n, 'wr': round(wr*100,1), 'pnl_pct': round(v.get('pnl',0)*100,2)}
+            return out
+        return jsonify({
+            'total_wins': stats.get('total_wins',0),
+            'total_losses': stats.get('total_losses',0),
+            'total_n': stats.get('total_wins',0) + stats.get('total_losses',0),
+            'overall_wr': round(stats.get('total_wins',0) / max(1, stats.get('total_wins',0)+stats.get('total_losses',0)) * 100, 1),
+            'total_pnl_pct': round(stats.get('total_pnl',0)*100, 2),
+            'by_engine': summarize(stats.get('by_engine', {})),
+            'by_hour':   summarize(stats.get('by_hour', {})),
+            'by_side':   summarize(stats.get('by_side', {})),
+            'by_coin':   summarize(stats.get('by_coin', {})),
+            'by_conf':   summarize(stats.get('by_conf', {})),
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)})
+
+@app.route('/conf/test/<coin>', methods=['GET'])
+def conf_test(coin):
+    """Test confidence scoring on current coin state (no trade fired)."""
+    try:
+        candles = fetch(coin.upper())
+        if len(candles) < 50:
+            return jsonify({'err': f'insufficient candles: {len(candles)}'})
+        btc = btc_correlation.get_state()
+        btc_d = btc.get('btc_dir', 0)
+        buy_score, buy_brk = confidence.score(candles, [], coin.upper(), 'BUY', btc_d)
+        sell_score, sell_brk = confidence.score(candles, [], coin.upper(), 'SELL', btc_d)
+        return jsonify({
+            'coin': coin.upper(),
+            'n_candles': len(candles),
+            'btc_dir': btc_d,
+            'btc_move_15m': btc.get('btc_move', 0),
+            'btc_move_1h': btc.get('btc_1h_move', 0),
+            'BUY':  {'score': buy_score,  'mult': confidence.size_multiplier(buy_score),  'breakdown': buy_brk},
+            'SELL': {'score': sell_score, 'mult': confidence.size_multiplier(sell_score), 'breakdown': sell_brk},
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/engines', methods=['GET'])
 def engines_status():
@@ -1420,6 +1539,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     last_s=state['cooldowns'].get(coin+'_sell', 0)
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
+    signal_engine = 'PIVOT' if sig else None
     # Opposite-signal exit: if we hold opposite-side position, close it first
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
@@ -1435,6 +1555,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             pb_b = state['cooldowns'].get(coin+'_pb_buy', 0)
             sig, bar_ts = pullback_signal(coin, candles, pb_b, pb_s)
             if sig:
+                signal_engine = 'PULLBACK'
                 key = coin + ('_pb_buy' if sig=='BUY' else '_pb_sell')
                 state['cooldowns'][key] = bar_ts
         except Exception as e:
@@ -1449,7 +1570,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             cur_px = get_mid(coin)
             wb_side, wb_wall = wall_bounce.check(coin, cur_px, v3_dir)
             if wb_side:
-                sig = wb_side; bar_ts = int(time.time()*1000)
+                sig = wb_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_BNC'
                 state.setdefault('wall_entries', {})[coin] = {
                     'side': wb_side, 'wall_price': wb_wall['price'],
                     'wall_usd': wb_wall['usd'], 'entry_ts': time.time()}
@@ -1461,7 +1582,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         try:
             casc = liquidation_ws.get_cascade(coin, max_age_sec=180)
             if casc:
-                sig = casc['fade_direction']; bar_ts = int(time.time()*1000)
+                sig = casc['fade_direction']; bar_ts = int(time.time()*1000); signal_engine = 'LIQ_CSCD'
                 log(f"LIQ-CASCADE {coin} fade {sig} (${casc['total_usd']/1e6:.1f}M liqs)")
         except Exception as e:
             log(f"liq cascade err {coin}: {e}")
@@ -1470,7 +1591,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         try:
             sp = spoof_detection.get_spoof_signal(coin)
             if sp:
-                sig = sp['direction']; bar_ts = int(time.time()*1000)
+                sig = sp['direction']; bar_ts = int(time.time()*1000); signal_engine = 'SPOOF'
                 spoof_detection.mark_fired(coin)
                 log(f"SPOOF-FADE {coin} {sig} (wall ${sp['original_wall']/1000:.0f}k→${sp['remaining']/1000:.0f}k)")
         except Exception as e:
@@ -1489,8 +1610,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
             # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
             if fav <= -STOP_LOSS_PCT:
+                prev_pos = dict(cur)
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
+                    record_close(prev_pos, coin, pnl_pct, state)
                     state['consec_losses'] += 1
                     state['last_pnl_close'] = pnl_pct
                 log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{STOP_LOSS_PCT*100:.1f}%)")
@@ -1508,8 +1631,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
             # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
             if hwm > trl and (hwm - fav) >= trl and fav >= trl * 0.5:
+                prev_pos = dict(cur)
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
+                    record_close(prev_pos, coin, pnl_pct, state)
                     state['consec_losses'] = 0
                     state['last_pnl_close'] = pnl_pct
                 log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {trl*100:.2f}%, age {age/60:.0f}m)")
@@ -1589,22 +1714,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
         size_mult = confidence.size_multiplier(conf_score)
-        risk_mult = risk_mult * size_mult
-        log(f"{coin} CONF={conf_score} size_mult={size_mult} {conf_breakdown}")
+        # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
+        adapt = adaptive_mult(coin, sig, state)
+        risk_mult = risk_mult * size_mult * adapt
+        log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
         conf_score = 0
 
-    log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} (risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score})")
+    log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} engine={signal_engine} risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score}")
 
     now = time.time()
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar_ts
         if live and live['size']>0:
+            prev_pos = state.get('positions', {}).get(coin, {})
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state); risk_ladder.record_trade(False)
-                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state); risk_ladder.record_trade(True)
+                record_close(prev_pos, coin, pnl_pct, state)
+                if pnl_pct < 0: state['consec_losses'] += 1; risk_ladder.record_trade(False)
+                else: state['consec_losses'] = 0; risk_ladder.record_trade(True)
                 state['last_pnl_close'] = pnl_pct
         if not live or live['size']>0:
             px = get_mid(coin)
@@ -1615,14 +1744,18 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     place_native_sl(coin, False, fill_px, sz)
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
-                                                'stage':'initial', 'peak':fill_px}
+                                                'stage':'initial', 'peak':fill_px,
+                                                'engine':signal_engine, 'conf':conf_score,
+                                                'utc_h': time.gmtime(now).tm_hour}
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
+            prev_pos = state.get('positions', {}).get(coin, {})
             pnl_pct = close(coin)
             if pnl_pct is not None:
-                if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state); risk_ladder.record_trade(False)
-                else: state['consec_losses'] = 0; update_coin_wr(coin, True, state); risk_ladder.record_trade(True)
+                record_close(prev_pos, coin, pnl_pct, state)
+                if pnl_pct < 0: state['consec_losses'] += 1; risk_ladder.record_trade(False)
+                else: state['consec_losses'] = 0; risk_ladder.record_trade(True)
                 state['last_pnl_close'] = pnl_pct
         if not live or live['size']<0:
             px = get_mid(coin)
@@ -1633,7 +1766,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     place_native_sl(coin, True, fill_px, sz)
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
-                                                'stage':'initial', 'peak':fill_px}
+                                                'stage':'initial', 'peak':fill_px,
+                                                'engine':signal_engine, 'conf':conf_score,
+                                                'utc_h': time.gmtime(now).tm_hour}
 
 # ═══════════════════════════════════════════════════════
 
