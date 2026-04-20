@@ -1117,6 +1117,16 @@ def load_state():
             loaded['cd_format'] = 'ts'
         for k,v in default.items():
             if k not in loaded: loaded[k]=v
+        # Auto-scrub bogus stats (any bucket pnl > 100% is impossible, drop it)
+        s = loaded.get('stats', {})
+        if s:
+            for bucket_name in ['by_engine','by_hour','by_side','by_coin','by_conf']:
+                bucket = s.get(bucket_name, {})
+                for k,v in list(bucket.items()):
+                    if abs(v.get('pnl',0)) > 100:
+                        bucket.pop(k, None)
+            if abs(s.get('total_pnl',0)) > 200:
+                s['total_pnl'] = 0; s['total_wins'] = 0; s['total_losses'] = 0
         return loaded
     except Exception: return default
 
