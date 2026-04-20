@@ -1521,6 +1521,53 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
 
+def bb_signal(candles, coin=None):
+    """Bollinger Band rejection signal. Mirrors OOS tuner logic.
+    BUY: low breaks lower BB (2 SD), close back above lower BB, RSI near oversold
+    SELL: high breaks upper BB (2 SD), close back below upper BB, RSI near overbought
+    Returns (side, bar_ts) or (None, None)."""
+    if len(candles) < 40: return None, None
+    h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
+    N = len(cl); BB_P = 20
+    r14 = rsi_calc(cl, 14)
+    RL = BP['rsi_lo']; RH = SP['rsi_hi']
+    for i in range(max(BB_P+5, N-SCAN_BARS), N):
+        if r14[i] is None: continue
+        window = cl[i-BB_P:i]
+        mean = sum(window)/BB_P
+        var = sum((x-mean)**2 for x in window)/BB_P
+        sd = var**0.5
+        if sd <= 0: continue
+        upper = mean + 2*sd; lower = mean - 2*sd
+        bar_ts = candles[i][0]
+        # BUY: pierced lower BB, closed back above, RSI in oversold zone
+        if l[i] <= lower and cl[i] > lower and r14[i] < RL + 5:
+            return 'BUY', bar_ts
+        # SELL: pierced upper BB, closed back below, RSI in overbought zone
+        if h[i] >= upper and cl[i] < upper and r14[i] > RH - 5:
+            return 'SELL', bar_ts
+    return None, None
+
+def ib_signal(candles, coin=None):
+    """Inside Bar breakout signal. Two consecutive inside bars, then breakout.
+    BUY: close breaks above prior inner bar high
+    SELL: close breaks below prior inner bar low
+    Returns (side, bar_ts) or (None, None)."""
+    if len(candles) < 10: return None, None
+    h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
+    N = len(cl)
+    for i in range(max(5, N-SCAN_BARS), N):
+        # Two consecutive inside bars before current
+        if i < 4: continue
+        inside1 = h[i-1] < h[i-2] and l[i-1] > l[i-2]   # bar i-1 inside bar i-2
+        inside2 = h[i-2] < h[i-3] and l[i-2] > l[i-3]   # bar i-2 inside bar i-3
+        if not (inside1 and inside2): continue
+        bar_ts = candles[i][0]
+        # Breakout on current bar
+        if cl[i] > h[i-1]: return 'BUY', bar_ts
+        if cl[i] < l[i-1]: return 'SELL', bar_ts
+    return None, None
+
 # ═══════════════════════════════════════════════════════
 # HL INTERFACE
 # ═══════════════════════════════════════════════════════
@@ -1830,6 +1877,31 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
     signal_engine = 'PIVOT' if sig else None
+
+    # For ELITE coins: if PIVOT not allowed for this coin, try BB and IB engines
+    # Each coin's allowed sigs list comes from OOS tuning
+    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+        elite_cfg_check = percoin_configs.get_config(coin)
+        allowed = set(elite_cfg_check.get('sigs', [])) if elite_cfg_check else set()
+        # If PIVOT signal fired but coin doesn't allow PV, drop it
+        if sig == 'BUY' or sig == 'SELL':
+            if 'PV' not in allowed:
+                sig = None; signal_engine = None
+        # Try BB_REJ if allowed and nothing fired
+        if not sig and 'BB' in allowed:
+            try:
+                sig, bar_ts = bb_signal(candles, coin=coin)
+                if sig: signal_engine = 'BB_REJ'
+            except Exception as e:
+                log(f"bb_signal err {coin}: {e}")
+        # Try INSIDE_BAR if allowed and nothing fired
+        if not sig and 'IB' in allowed:
+            try:
+                sig, bar_ts = ib_signal(candles, coin=coin)
+                if sig: signal_engine = 'INSIDE_BAR'
+            except Exception as e:
+                log(f"ib_signal err {coin}: {e}")
+
     # Opposite-signal exit: if we hold opposite-side position, close it first
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
