@@ -1148,7 +1148,11 @@ def trend_gate(coin, side):
 USE_GRID_GATE = False  # overfit layer disabled; V3 + ATR-min do the filtering
 
 def apply_ticker_gate(coin, side, price, candles):
-    """V3 trend + ATR-min filter. Returns True if passes."""
+    """V3 trend + ATR-min filter. Returns True if passes.
+    ELITE coins bypass V3 gate (already OOS-validated, V3 blocks ~80% of their good setups)."""
+    # ELITE coins skip V3 — their per-coin filter (EMA200/ADX) is the validator
+    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+        return True
     # EMERGENCY: directional imbalance check — if 10+ shorts already open and BTC up, block new shorts
     try:
         if side == 'SELL':
