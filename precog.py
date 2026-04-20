@@ -2482,6 +2482,42 @@ def main():
                                              'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
 
+            # AUTO-CLOSE non-elite positions when elite_mode is ON
+            # Legacy positions from pre-elite code path hold margin that blocks new elite signals.
+            # Close when in profit, or if age > 2h (cut losses and free margin).
+            if percoin_configs.ELITE_MODE:
+                for k in list(live_positions.keys()):
+                    if percoin_configs.is_elite(k): continue  # elite coins managed by elite TP-Lock logic
+                    lp = live_positions[k]
+                    sz = lp.get('size', 0)
+                    if sz == 0: continue
+                    entry = lp.get('entry', 0)
+                    if not entry: continue
+                    try:
+                        mid = get_mid(k)
+                        if not mid: continue
+                        side = 'L' if sz > 0 else 'S'
+                        fav = (mid - entry) / entry if side == 'L' else (entry - mid) / entry
+                        pos_meta = state.get('positions', {}).get(k, {})
+                        age = now - pos_meta.get('opened_at', now)
+                        # Close if in profit OR age > 2h OR loss exceeds 3%
+                        reason = None
+                        if fav > 0.001: reason = f'non-elite in profit +{fav*100:.2f}%'
+                        elif age > 7200: reason = f'non-elite age {age/60:.0f}min'
+                        elif fav < -0.03: reason = f'non-elite cut-loss {fav*100:.2f}%'
+                        if reason:
+                            try:
+                                pnl = close(k)
+                                if pnl is not None:
+                                    state['last_pnl_close'] = pnl
+                                    state['consec_losses'] = 0 if pnl > 0 else state.get('consec_losses', 0) + 1
+                                log(f"AUTO-CLOSE {k} (elite mode, {reason}, pnl={pnl})")
+                                state['positions'].pop(k, None)
+                            except Exception as ce:
+                                log(f"auto-close err {k}: {ce}")
+                    except Exception as e:
+                        log(f"auto-close check err {k}: {e}")
+
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
                 try:
