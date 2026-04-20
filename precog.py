@@ -2133,10 +2133,59 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             log(f"{coin} {sig} SKIP — engine {signal_engine} not allowed for this coin (allowed: {elite_cfg['sigs']})")
             return
         # Apply filter (EMA200 / ADX20/25)
-        ema200_val = candles[-1].get('ema200') if candles else None
-        ema50_val = candles[-1].get('ema50') if candles else None
-        adx_val = candles[-1].get('adx') if candles else None
-        price = float(candles[-1]['c']) if candles else 0
+        # Candles are tuples: (ts, o, h, l, c, v). Compute indicators inline.
+        ema200_val = None; ema50_val = None; adx_val = None; price = 0
+        try:
+            if candles and len(candles) >= 50:
+                closes = [float(x[4]) for x in candles]
+                highs = [float(x[2]) for x in candles]
+                lows = [float(x[3]) for x in candles]
+                price = closes[-1]
+                # EMA50
+                k50 = 2/(50+1)
+                e50 = sum(closes[:50])/50
+                for v in closes[50:]:
+                    e50 = v*k50 + e50*(1-k50)
+                ema50_val = e50
+                # EMA200
+                if len(closes) >= 200:
+                    k200 = 2/(200+1)
+                    e200 = sum(closes[:200])/200
+                    for v in closes[200:]:
+                        e200 = v*k200 + e200*(1-k200)
+                    ema200_val = e200
+                # ADX(14) — simple Wilder
+                if len(closes) >= 30:
+                    period = 14
+                    plus_dm = []; minus_dm = []; trs = []
+                    for i in range(1, len(closes)):
+                        up = highs[i] - highs[i-1]
+                        dn = lows[i-1] - lows[i]
+                        plus_dm.append(up if up > dn and up > 0 else 0)
+                        minus_dm.append(dn if dn > up and dn > 0 else 0)
+                        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+                        trs.append(tr)
+                    if len(trs) >= period*2:
+                        def wilder(arr, n):
+                            s = sum(arr[:n])
+                            out = [s]
+                            for v in arr[n:]: s = s - s/n + v; out.append(s)
+                            return out
+                        atr = wilder(trs, period)
+                        pdm = wilder(plus_dm, period)
+                        mdm = wilder(minus_dm, period)
+                        dx = []
+                        for a, p, m in zip(atr, pdm, mdm):
+                            if a > 0:
+                                pdi = 100 * p / a; mdi = 100 * m / a
+                                s = pdi + mdi
+                                dx.append(100 * abs(pdi-mdi)/s if s > 0 else 0)
+                        if len(dx) >= period:
+                            adx_v = sum(dx[:period])/period
+                            for v in dx[period:]: adx_v = (adx_v*(period-1) + v)/period
+                            adx_val = adx_v
+        except Exception as e:
+            log(f"{coin} indicator calc err: {e}")
         side = 1 if sig == 'BUY' else -1
         if not percoin_configs.check_filter(elite_cfg['flt'], ema200_val, ema50_val, adx_val, side, price):
             log(f"{coin} {sig} SKIP — failed filter {elite_cfg['flt']}")
