@@ -263,6 +263,8 @@ void PollDynaPro() {
    double sig_sl      = ExtractJSONNum(body, "sl_pct");
    double sig_mult    = ExtractJSONNum(body, "size_mult");
    double sig_tcut    = ExtractJSONNum(body, "time_cut_hours");
+   double sig_maxslip = ExtractJSONNum(body, "max_slip_pct");
+   if (sig_maxslip <= 0) sig_maxslip = 0.3;
 
    // Apply defaults where signal didn't specify
    if (sig_trail_a <= 0) sig_trail_a = Trail_Activate_Default;
@@ -318,12 +320,23 @@ void PollDynaPro() {
             ticket = OrderSend(sym, OP_BUYLIMIT, lot, NormalizeDouble(limit_px, digits),
                           Slippage, sl_limit, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrLime);
             if (ticket < 0) {
-               Print("DYNAPRO BUYLIMIT ", sym, " err=", GetLastError(), " → market fallback");
+               int err_buy = GetLastError();
+               double slip = (wh_price > 0) ? MathAbs(ask - wh_price) / wh_price * 100.0 : 0;
+               if (slip > sig_maxslip) {
+                  Print("DYNAPRO BUY ", sym, " SKIP — slip ", DoubleToStr(slip,3), "% > max ", DoubleToStr(sig_maxslip,3), "% (limit err=", err_buy, ")");
+                  return;
+               }
+               Print("DYNAPRO BUYLIMIT ", sym, " err=", err_buy, " slip=", DoubleToStr(slip,3), "% → market");
                ticket = OrderSend(sym, OP_BUY, lot, ask, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrLime);
             } else {
                Print("DYNAPRO BUYLIMIT ", sym, " @", limit_px, " sl=", sl_limit, " lot=", lot, " ticket=", ticket);
             }
          } else {
+            double slip_mkt = (wh_price > 0) ? MathAbs(ask - wh_price) / wh_price * 100.0 : 0;
+            if (slip_mkt > sig_maxslip) {
+               Print("DYNAPRO BUY ", sym, " SKIP — market slip ", DoubleToStr(slip_mkt,3), "% > max ", DoubleToStr(sig_maxslip,3), "%");
+               return;
+            }
             ticket = OrderSend(sym, OP_BUY, lot, ask, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrLime);
             if (ticket > 0) Print("DYNAPRO BUY ", sym, " @", ask, " sl=", sl_px, " lot=", lot, " ticket=", ticket);
             else            Print("DYNAPRO BUY ", sym, " err=", GetLastError());
@@ -348,12 +361,23 @@ void PollDynaPro() {
             ticket = OrderSend(sym, OP_SELLLIMIT, lot, NormalizeDouble(limit_px, digits),
                           Slippage, sl_limit, 0, "DYNAPRO_LIMIT", MagicNum, expiry, clrRed);
             if (ticket < 0) {
-               Print("DYNAPRO SELLLIMIT ", sym, " err=", GetLastError(), " → market fallback");
+               int err_sell = GetLastError();
+               double slip = (wh_price > 0) ? MathAbs(bid - wh_price) / wh_price * 100.0 : 0;
+               if (slip > sig_maxslip) {
+                  Print("DYNAPRO SELL ", sym, " SKIP — slip ", DoubleToStr(slip,3), "% > max ", DoubleToStr(sig_maxslip,3), "% (limit err=", err_sell, ")");
+                  return;
+               }
+               Print("DYNAPRO SELLLIMIT ", sym, " err=", err_sell, " slip=", DoubleToStr(slip,3), "% → market");
                ticket = OrderSend(sym, OP_SELL, lot, bid, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrRed);
             } else {
                Print("DYNAPRO SELLLIMIT ", sym, " @", limit_px, " sl=", sl_limit, " lot=", lot, " ticket=", ticket);
             }
          } else {
+            double slip_mkt = (wh_price > 0) ? MathAbs(bid - wh_price) / wh_price * 100.0 : 0;
+            if (slip_mkt > sig_maxslip) {
+               Print("DYNAPRO SELL ", sym, " SKIP — market slip ", DoubleToStr(slip_mkt,3), "% > max ", DoubleToStr(sig_maxslip,3), "%");
+               return;
+            }
             ticket = OrderSend(sym, OP_SELL, lot, bid, Slippage, sl_px, 0, "DYNAPRO", MagicNum, 0, clrRed);
             if (ticket > 0) Print("DYNAPRO SELL ", sym, " @", bid, " sl=", sl_px, " lot=", lot, " ticket=", ticket);
             else            Print("DYNAPRO SELL ", sym, " err=", GetLastError());
@@ -554,7 +578,7 @@ void ProcessSymbol(string sym, int idx) {
 //+------------------------------------------------------------------+
 int OnInit() {
    LoadSymbols();
-   Print("Portfolio_Manager v5.0 COMPOUNDING  EquityScale=", UseEquityScaling, " Risk%=", RiskPctPerTrade,
+   Print("Portfolio_Manager v5.1 COMPOUNDING+ZONES  EquityScale=", UseEquityScaling, " Risk%=", RiskPctPerTrade,
          " MaxLot=", MaxLotCap, " SL=", SL_Pct_Default, "% TrailDefault=", Trail_Activate_Default, "/", Trail_Distance_Default,
          " symbols=", symCount);
 
