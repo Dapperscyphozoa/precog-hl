@@ -779,6 +779,52 @@ def _mt4_filter_pass(clean_ticker, direction='BUY'):
     # (RSI fetched separately, skipping for now — filter passes unless gate requires)
     return True, 'ok'
 
+def _mt4_max_spread_for(clean_ticker):
+    """Per-instrument-class max spread % for EA spread gate.
+    Pepperstone typical spreads (points / base price * 100):
+    - FX majors: 0.01-0.05%
+    - FX crosses (NZDJPY, GBPCAD): 0.05-0.12%
+    - Gold/Silver: 0.05-0.25%
+    - Platinum/Palladium: 0.3-0.8% (wide due to low liquidity)
+    - Oil: 0.15-0.35%
+    - Indices: 0.05-0.30%
+    - Exotics: 0.20-0.50%
+    Return value is CEILING; EA rejects if live spread exceeds this.
+    """
+    # Tight majors
+    if clean_ticker in {'EURUSD','GBPUSD','USDJPY','AUDUSD','USDCAD','USDCHF','NZDUSD'}:
+        return 0.05
+    # FX crosses
+    if clean_ticker in {'EURJPY','GBPJPY','EURGBP','EURAUD','AUDJPY','CADJPY','CHFJPY',
+                        'AUDCAD','AUDCHF','AUDNZD','CADCHF','EURCAD','EURCHF',
+                        'GBPAUD','GBPCHF','GBPNZD','NZDCAD','NZDJPY'}:
+        return 0.12
+    # Gold / Silver
+    if clean_ticker in {'XAUUSD','XAGUSD'}:
+        return 0.25
+    # Platinum / Palladium (low liquidity, wide spreads normal)
+    if clean_ticker in {'XPTUSD','XPDUSD'}:
+        return 0.80
+    # Oil
+    if clean_ticker in {'SPOTCRUDE','SPOTBRENT'}:
+        return 0.35
+    # NatGas
+    if clean_ticker in {'NATGAS'}:
+        return 0.50
+    # Major indices
+    if clean_ticker in {'US30','US500','NAS100','GER40','UK100','JPN225'}:
+        return 0.30
+    # Smaller indices
+    if clean_ticker in {'US2000','HK50'}:
+        return 0.40
+    # Soft commodities
+    if clean_ticker in {'COPPER','CORN','WHEAT','SOYBEANS','SUGAR','COFFEE'}:
+        return 0.50
+    # Vol/dollar index
+    if clean_ticker in {'VIX','USDX','EURX'}:
+        return 0.50
+    return 0.20  # default
+
 def _mt4_vix_overlay_mult(clean_ticker):
     """VIX sentiment-based size multiplier (never blocks, only scales)."""
     gate = MT4_TICKER_GATES.get(clean_ticker.upper(), {})
@@ -1330,6 +1376,7 @@ def webhook():
             'zone_status': zone_info.get('aligned') if zone_info else None,
             'sent_mult': round(sent_mult, 2),
             'pullback_meta': _pb_meta,
+            'max_spread_pct': _mt4_max_spread_for(clean),
             'max_slip_pct': 0.3,  # EA rejects market fallback if slip > this
         }
         MT4_QUEUE.append(rec)
