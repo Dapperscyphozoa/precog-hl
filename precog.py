@@ -1925,7 +1925,7 @@ def fetch(coin, n_bars=100, retries=3):
     return []
 
 SCAN_BARS = 12  # scan last 12 bars to catch signals after warmup
-CD_MS = 0  # cooldown killed — re-enter same direction on valid signal
+CD_MS = 30 * 60 * 1000  # 30 min cooldown — prevents rapid signal re-fire + opposite-exit storm
 
 def chase_gate_ok(side, price, candles, i):
     """Reject entries chasing extended moves.
