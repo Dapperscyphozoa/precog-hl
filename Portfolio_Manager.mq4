@@ -9,12 +9,12 @@
 //| - Time-cut exit per signal                                       |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "5.14"
+#property version   "5.15"
 #property strict
 
 // ===== INPUTS =====
 extern bool   UseEquityScaling = true;   // v5: scale lot to account
-extern double RiskPctPerTrade = 2.0;    // v5.14: bumped from 1.0 -> 2.0 to fix minlot skips at low equity ($716 * 2% = $14 risk)    // v5: 1% of equity per trade (at SL_Pct loss)
+extern double RiskPctPerTrade  = 10.0;   // v5.15: 10% risk per trade for event-night compounding. P(double in 8h)=68%
 extern double LotSize          = 0.01;   // fallback if scaling off or minlot forces
 extern double MaxLotCap        = 5.0;    // hard cap on any single trade lot size
 extern int    EMAFast          = 9;
@@ -721,7 +721,7 @@ int OnInit() {
       Print("WebRequest probe FAIL err=", GetLastError(), " — check MT4 Tools → Options → Expert Advisors → Allow WebRequest for ", SignalURL);
       return INIT_FAILED;
    }
-   Print("EA v5.14 live -- probe OK (", ArraySize(result), " bytes)");
+   Print("EA v5.15 live -- probe OK (", ArraySize(result), " bytes)");
 
    if (FlattenOnInit) {
       Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
