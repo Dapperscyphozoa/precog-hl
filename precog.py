@@ -728,10 +728,6 @@ def _pass_hour_block(hour_utc, hb):
     return True
 
 def _mt4_filter_pass(clean_ticker, direction='BUY'):
-    # v4.21: daily drawdown kill — if today's total PnL <= limit, refuse all new signals
-    _daily = _mt4_daily_pnl_pct()
-    if _daily <= MT4_DAILY_DD_LIMIT:
-        return False, f"DAILY_DD ({_daily:+.2f}% <= {MT4_DAILY_DD_LIMIT}%)"
     # v4.19: per-ticker kill switch — disabled tickers never trade
     _gate_check = MT4_TICKER_GATES.get(clean_ticker, {})
     if not _gate_check.get('enabled', True):
@@ -801,7 +797,7 @@ def _mt4_daily_pnl_pct():
             total += float(r.get('exit_pct', 0))
     return total
 
-MT4_DAILY_DD_LIMIT = float(os.environ.get('MT4_DAILY_DD_LIMIT', '-3.0'))  # -3% daily kill
+MT4_DAILY_DD_LIMIT = -9999.0  # v4.22: DISABLED — user directive: no kill switches
 
 def _mt4_live_wr_mult(clean_ticker):
     """v4.21: adaptive sizing from live WR. Reads last 20 trades from MT4_LIVE_STATS.
