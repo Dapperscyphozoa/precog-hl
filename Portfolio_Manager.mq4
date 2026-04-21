@@ -9,7 +9,7 @@
 //| - Time-cut exit per signal                                       |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "5.12"
+#property version   "5.13"
 #property strict
 
 // ===== INPUTS =====
@@ -32,7 +32,7 @@ extern double Trail_Distance_Default = 0.2;
 extern bool   EMA_Exit         = false;
 extern string SignalURL        = "https://precog-hl-web.onrender.com/mt4/signals";
 extern int    PollSec          = 2;
-extern bool   UseLocalEMAFilter = false; // v5.12: gates handle trend, local EMA was overfiltering
+extern bool   UseLocalEMAFilter = false; // v5.13: gates handle trend, local EMA was overfiltering
 extern bool   UseLimitOrders   = true;
 extern int    LimitExpiryMin   = 15;
 extern double LimitOffsetPips  = 2;
@@ -403,6 +403,7 @@ void PollDynaPro() {
    // Store per-ticket params for trail logic
    if (ticket > 0) {
       SetTicketParam(ticket, "trail_act", sig_trail_a);
+      SetTicketParam(ticket, "sl_pct", sig_sl);
       SetTicketParam(ticket, "trail_dist", sig_trail_d);
       SetTicketParam(ticket, "sl_pct", sig_sl);
       SetTicketParam(ticket, "peak_pct", 0);
@@ -538,6 +539,22 @@ void ManagePositions() {
       double trail_act  = GetTicketParam(tk, "trail_act", Trail_Activate_Default);
       double trail_dist = GetTicketParam(tk, "trail_dist", Trail_Distance_Default);
       double peak_pct   = GetTicketParam(tk, "peak_pct", 0);
+      double sig_sl_ticket = GetTicketParam(tk, "sl_pct", SL_Pct_Default);
+
+      // v5.13: EMERGENCY SL — if broker stripped SL and position is drawing down past configured SL, force close
+      double broker_sl = OrderStopLoss();
+      if (broker_sl == 0 && pnl_pct <= -sig_sl_ticket) {
+         bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrRed);
+         if (ok) {
+            Print("EMERGENCY SL ", sym, " pnl=", DoubleToStr(pnl_pct,2), "% (broker SL missing, configured ", DoubleToStr(sig_sl_ticket,2), "%) ticket=", tk);
+            ReportExit(sym, "SL", entry, peak_pct, pnl_pct, tk);
+            DeleteTicketParams(tk);
+         } else {
+            Print("EMERGENCY SL close fail ", sym, " err=", GetLastError());
+         }
+         continue;
+      }
+
       double active_t   = GetTicketParam(tk, "active_trail", -999);
       double t_cut_h    = GetTicketParam(tk, "time_cut_h", 0);
       double entry_time = GetTicketParam(tk, "entry_time", TimeCurrent());
@@ -675,7 +692,7 @@ int OnInit() {
       Print("WebRequest probe FAIL err=", GetLastError(), " — check MT4 Tools → Options → Expert Advisors → Allow WebRequest for ", SignalURL);
       return INIT_FAILED;
    }
-   Print("EA v5.12 live -- probe OK (", ArraySize(result), " bytes)");
+   Print("EA v5.13 live -- probe OK (", ArraySize(result), " bytes)");
 
    if (FlattenOnInit) {
       Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
