@@ -2263,6 +2263,95 @@ def set_isolated_leverage(coin):
     except Exception as e:
         log(f"lev set err {coin}: {e}")
 
+# ═══════════════════════════════════════════════════════
+# TIER-PRIORITY BUMP — free margin from lower-tier positions for higher-tier signals
+# ═══════════════════════════════════════════════════════
+TIER_PRIO = {'PURE': 4, 'NINETY_99': 3, 'EIGHTY_89': 2, 'SEVENTY_79': 1}
+
+def try_tier_bump(incoming_coin, state, live_positions):
+    """If margin would reject incoming trade, bump the lowest-priority active positions below incoming tier.
+    Only called when elite_mode and incoming coin is in whitelist.
+    Returns (freed_margin_estimate_usd, count_bumped). Closes positions as side effect.
+
+    Safety:
+    - Only bumps coins with STRICTLY LOWER tier than incoming (PURE never bumped)
+    - Stops bumping once enough margin freed
+    - Never bumps more than 3 positions per signal (cascade guard)
+    - Fail-safe on close() error — stops bumping, returns what was freed
+    """
+    if not percoin_configs.ELITE_MODE or not percoin_configs.is_elite(incoming_coin):
+        return 0, 0
+    incoming_tier = percoin_configs.get_tier(incoming_coin)
+    if not incoming_tier: return 0, 0
+    incoming_prio = TIER_PRIO.get(incoming_tier, 0)
+
+    # Check current margin state
+    try:
+        us = _cached_user_state()
+        total_margin = float(us['marginSummary'].get('totalMarginUsed', 0))
+        account_value = float(us['marginSummary'].get('accountValue', 0))
+        withdrawable = float(us.get('withdrawable', 0))
+    except Exception:
+        return 0, 0
+
+    # Rough size of what we want to open (use risk_pct × equity as margin proxy)
+    try:
+        risk_pct = current_risk_pct(account_value)
+        cfg = percoin_configs.get_config(incoming_coin) or {}
+        # Use tier target risk from resolver, fallback to 0.15
+        target_risk = {'PURE': 0.40, 'NINETY_99': 0.20, 'EIGHTY_89': 0.12, 'SEVENTY_79': 0.10}.get(incoming_tier, 0.15)
+        needed_margin = account_value * target_risk
+    except Exception:
+        needed_margin = account_value * 0.15
+
+    # If we have >= needed margin available, no bump needed
+    if withdrawable >= needed_margin * 1.05:
+        return 0, 0
+
+    # Find bump candidates: active positions with lower tier than incoming
+    candidates = []
+    for coin, lp in live_positions.items():
+        if coin == incoming_coin: continue
+        sz = lp.get('size', 0)
+        if sz == 0: continue
+        tier = percoin_configs.get_tier(coin)
+        if not tier: continue
+        prio = TIER_PRIO.get(tier, 0)
+        if prio >= incoming_prio: continue  # same or higher, skip
+        # Estimate margin freed by closing this position
+        entry = lp.get('entry', 0)
+        if not entry: continue
+        notional = abs(sz) * entry
+        margin_used = notional / 5  # assume 5x avg lev post-resolver
+        pnl = lp.get('pnl', 0)
+        # Prefer bumping losers first (rank: lowest prio first, then most negative pnl)
+        candidates.append((prio, pnl, margin_used, coin, tier))
+
+    if not candidates:
+        return 0, 0
+
+    candidates.sort(key=lambda x: (x[0], x[1]))  # lowest tier first, then worst pnl first
+
+    freed = 0
+    count = 0
+    MAX_BUMPS = 3
+    for prio, pnl, margin, coin, tier in candidates:
+        if count >= MAX_BUMPS: break
+        if freed + withdrawable >= needed_margin * 1.05: break
+        try:
+            close(coin, state_ref=state)
+            log(f"TIER-BUMP closed {coin} (tier={tier} pnl=${pnl:+.3f}) to free ~${margin:.0f} for incoming {incoming_coin} ({incoming_tier})")
+            state.get('positions', {}).pop(coin, None)
+            freed += margin
+            count += 1
+        except Exception as e:
+            log(f"tier-bump close err {coin}: {e}")
+            break
+
+    if count > 0:
+        log(f"TIER-BUMP: freed ~${freed:.0f} by closing {count} lower-tier positions for {incoming_coin}")
+    return freed, count
+
 def place(coin, is_buy, size):
     """HL-compliant price rounding + maker/taker handling."""
     px = get_mid(coin)
@@ -2694,6 +2783,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if not live or live['size']>0:
             px = get_mid(coin)
             if px:
+                # Tier-priority bump: if margin might reject, close lower-tier positions first
+                try_tier_bump(coin, state, live_positions)
                 fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
@@ -2716,6 +2807,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if not live or live['size']<0:
             px = get_mid(coin)
             if px:
+                # Tier-priority bump: if margin might reject, close lower-tier positions first
+                try_tier_bump(coin, state, live_positions)
                 fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
