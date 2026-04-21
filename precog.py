@@ -302,7 +302,9 @@ OANDA_PAIRS = {
 
 def _fetch_oanda_sentiment(clean_ticker):
     """Fetch retail sentiment. Returns (long_pct, short_pct) or None.
-    Uses ForexFactory-style public sentiment via MyFXBook community outlook HTML scrape.
+    Tries multiple sources:
+    1. MyFXBook community outlook HTML
+    2. DailyFX sentiment endpoint
     Falls back to None (neutral) on any failure — never blocks trades.
     """
     pair = OANDA_PAIRS.get(clean_ticker)
@@ -311,19 +313,22 @@ def _fetch_oanda_sentiment(clean_ticker):
     cached = _oanda_cache.get(pair)
     if cached and (now - cached[0] < _oanda_ttl):
         return cached[1]
+    pair_url = pair.replace("_","")  # EUR_USD → EURUSD
+    import urllib.request as _ur
+    import re as _re
+    # Source 1: MyFXBook
     try:
-        import urllib.request as _ur
-        import re as _re
-        # MyFXBook community outlook page - parse HTML for long/short percentages
-        pair_url = pair.replace("_","")  # EUR_USD → EURUSD
         url = f'https://www.myfxbook.com/community/outlook/{pair_url}'
         req = _ur.Request(url, headers={
-            'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            'Accept':'text/html',
+            'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Version/15.6.1 Safari/605.1.15',
+            'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9',
+            'Accept-Language':'en-US,en;q=0.5',
+            'DNT':'1',
+            'Connection':'keep-alive',
+            'Upgrade-Insecure-Requests':'1',
         })
-        resp = _ur.urlopen(req, timeout=4)
+        resp = _ur.urlopen(req, timeout=5)
         html = resp.read().decode('utf-8', errors='ignore')
-        # Parse "Short 65% / Long 35%" patterns from the outlook page
         m_short = _re.search(r'Short[^\d]*(\d+)\s*%', html)
         m_long  = _re.search(r'Long[^\d]*(\d+)\s*%', html)
         if m_short and m_long:
@@ -333,9 +338,34 @@ def _fetch_oanda_sentiment(clean_ticker):
                 result = (long_pct, short_pct)
                 _oanda_cache[pair] = (now, result)
                 return result
-        return None
+    except Exception as _e:
+        pass
+    # Source 2: DailyFX (different retail positioning feed, also free)
+    try:
+        # DailyFX uses OANDA client positioning feed
+        url = f'https://www.dailyfx.com/sentiment'
+        # More complex JSON endpoint — let's use the raw sentiment.json
+        url2 = 'https://www.dailyfx.com/api/market-overview/sentiment'
+        req = _ur.Request(url2, headers={
+            'User-Agent':'Mozilla/5.0',
+            'Accept':'application/json',
+        })
+        resp = _ur.urlopen(req, timeout=4)
+        data = _json.loads(resp.read())
+        for item in data.get('data', []):
+            symbol = item.get('symbol','').replace('/','').upper()
+            if symbol == pair_url:
+                long_pct = item.get('longPercent') or item.get('long_pct')
+                short_pct = item.get('shortPercent') or item.get('short_pct')
+                if long_pct and short_pct:
+                    result = (float(long_pct), float(short_pct))
+                    _oanda_cache[pair] = (now, result)
+                    return result
     except Exception:
-        return None
+        pass
+    return None
+
+_sent_log_throttle = {}  # {ticker: ts} — avoid log spam
 
 def _mt4_sentiment_mult(clean_ticker, direction):
     """Returns size multiplier based on retail sentiment.
@@ -343,7 +373,14 @@ def _mt4_sentiment_mult(clean_ticker, direction):
     Returns 1.0 if no data, >1 for contrarian alignment, <1 if trading with crowd extremes."""
     if not MT4_OANDA_ENABLED: return 1.0
     data = _fetch_oanda_sentiment(clean_ticker)
-    if not data: return 1.0
+    if not data:
+        # Throttled debug log — once per ticker per 60s
+        _now = time.time()
+        if _now - _sent_log_throttle.get(clean_ticker, 0) > 60:
+            _sent_log_throttle[clean_ticker] = _now
+            log(f"SENT no_data for {clean_ticker} (MyFXBook blocked or pair missing)")
+        return 1.0
+    log(f"SENT {clean_ticker} {direction}: long={data[0]:.0f}% short={data[1]:.0f}%")
     long_pct, short_pct = data
     # Normalize
     if long_pct + short_pct == 0: return 1.0
