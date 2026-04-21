@@ -728,6 +728,10 @@ def _pass_hour_block(hour_utc, hb):
     return True
 
 def _mt4_filter_pass(clean_ticker, direction='BUY'):
+    # v4.19: per-ticker kill switch — disabled tickers never trade
+    _gate_check = MT4_TICKER_GATES.get(clean_ticker, {})
+    if not _gate_check.get('enabled', True):
+        return False, f"DISABLED ({_gate_check.get('disabled_reason','manual_kill')})"
     """v4.8 full per-ticker gate pipeline.
     Returns (passed: bool, reason: str). Reason is 'ok' on pass.
     Never drops — filters per-ticker using MT4_TICKER_GATES config.
