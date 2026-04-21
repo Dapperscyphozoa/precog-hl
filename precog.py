@@ -1202,6 +1202,26 @@ def regime_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/monitor', methods=['GET'])
+def monitor_status():
+    """Live monitoring: rolling 50-trade WR/expectancy/avg$win/loss + alerts."""
+    try:
+        import monitor
+        return jsonify(monitor.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/alerts', methods=['GET'])
+def get_alerts():
+    """All pending alerts. Optional ?severity=CRITICAL|WARN filter."""
+    try:
+        import monitor
+        from flask import request
+        sev = request.args.get('severity')
+        return jsonify({'alerts': monitor.get_alerts(sev)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 LOG_BUFFER = []
 
 
@@ -1891,8 +1911,9 @@ LEV = 10
 LOOP_SEC = 2  # tight outer loop (Bybit WS push)
 USE_ISOLATED_MARGIN = True
 
-MAX_POSITIONS = 40  # OOS: ~27 avg concurrent, peak 40+
-MAX_SAME_SIDE = 15  # tighter — imbalanced books bleed
+TP_MULTIPLIER = 2.0  # Widen per-coin TPs ×2 — OOS 14d: $11 avg win@$35 margin, $25@$75. WR drops 87→50% but expectancy +$2/trade. Targets user's $5+ min win goal.
+MAX_POSITIONS = 80  # was 40 — with 5/3/3/3 risk we can support more concurrent
+MAX_SAME_SIDE = 40  # was 15 — let regime-aware system pick directions
 MAX_TOTAL_RISK = 0.92    # 8% reserve
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
@@ -2413,11 +2434,19 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     return round(raw,4)
 
 def set_isolated_leverage(coin):
-    """Set isolated margin + leverage before opening."""
+    """Set isolated margin + per-coin tier leverage before opening.
+    Uses TIER_SIZING from percoin_configs (not global LEV).
+    HL caps to coin's max leverage automatically."""
     try:
-        exchange.update_leverage(LEV, coin, is_cross=False)
+        # Get tier leverage (15 PURE / 12 NINETY_99 / 10 EIGHTY_89 / 10 SEVENTY_79)
+        tier_lev, _ = percoin_configs.get_sizing(coin)
+        # HL update_leverage(leverage, coin, is_cross). is_cross MUST be False for isolated.
+        exchange.update_leverage(tier_lev, coin, is_cross=False)
     except Exception as e:
         log(f"lev set err {coin}: {e}")
+        # Fallback: try global LEV if tier lookup fails
+        try: exchange.update_leverage(LEV, coin, is_cross=False)
+        except: pass
 
 # ═══════════════════════════════════════════════════════
 # TIER-PRIORITY BUMP — free margin from lower-tier positions for higher-tier signals
@@ -2593,6 +2622,11 @@ def close(coin, state_ref=None):
         log(f"CLOSE {coin} {size}@{slip} | entry={entry} exit={px} | {pct:+.2f}% | ${pnl_usd:+.3f}")
         log_trade('HL', coin, 'CLOSE', px, pnl_usd, 'close')
         cancel_trigger_orders(coin)  # Kill orphaned SL orders
+        # Monitor hook
+        try:
+            import monitor
+            monitor.record_close(coin, pct/100, pnl_usd, 0, 'close')
+        except Exception: pass
         return pct
     except Exception as e:
         log(f"close err {coin}: {e}")
@@ -2679,7 +2713,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         allowed = set(elite_cfg_check.get('sigs', [])) if elite_cfg_check else set()
         # If PIVOT signal fired but coin doesn't allow PV, drop it
         if sig and 'PV' not in allowed:
-            log(f"{coin} {sig} BLOCKED — PV not in allowed sigs {sorted(allowed)}")
+            # silent — per-coin filter intentionally blocks wrong sig engine
             sig = None; signal_engine = None
         # Try BB_REJ if allowed and nothing fired
         if not sig and 'BB' in allowed:
@@ -2814,12 +2848,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             # PER-COIN TP-LOCK — once TP reached, it becomes the new SL floor.
             # Price can run ABOVE TP freely, but if it retraces BELOW TP it exits with that locked profit.
             # This lets winners ride while guaranteeing minimum TP gain once reached.
+            # TP_MULTIPLIER widens TPs to hit $5+ avg win target (OOS validates ×2 = $25 avg win @ $75 margin).
             tp_pct = None
             try:
                 if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
                     _cfg = percoin_configs.get_config(coin)
                     if _cfg and 'TP' in _cfg:
-                        tp_pct = _cfg['TP']
+                        tp_pct = _cfg['TP'] * TP_MULTIPLIER
             except Exception: pass
 
             # HWM tracking for trail
@@ -3122,6 +3157,12 @@ def main():
             if equity > session_hwm:
                 state['session_hwm'] = equity
                 session_hwm = equity
+            # Monitor health check (non-blocking)
+            try:
+                import monitor
+                live_pos = get_all_positions_live() or {}
+                monitor.check_health(equity, session_hwm, live_pos)
+            except Exception: pass
             dd = (session_hwm - equity) / session_hwm if session_hwm > 0 else 0
             if dd >= 0.15:
                 log(f"!!! ACCOUNT DRAWDOWN {dd*100:.1f}% (hwm=${session_hwm:.2f} now=${equity:.2f}) — FLATTENING ALL")
