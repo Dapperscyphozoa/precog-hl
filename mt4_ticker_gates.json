@@ -69,7 +69,7 @@
     "sample_size": 3,
     "sl_pct": 1.0,
     "trail_activate": 0.2,
-    "trail_distance": 0.2,
+    "trail_distance": 0.1,
     "vix_filter": "none",
     "vix_overlay": {
       "elevated_mult": 0.9,
@@ -204,7 +204,7 @@
     "sl_pct": 0.6,
     "time_cut_hours": null,
     "trail_activate": 0.15,
-    "trail_distance": 0.2,
+    "trail_distance": 0.05,
     "vix_filter": "any",
     "vix_overlay": {
       "elevated_mult": 1.3,
@@ -646,7 +646,7 @@
     "sl_pct": 1.4,
     "time_cut_hours": null,
     "trail_activate": 0.15,
-    "trail_distance": 0.2,
+    "trail_distance": 0.05,
     "vix_filter": "any",
     "vix_overlay": {
       "elevated_mult": 0.9,
@@ -1012,7 +1012,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 0,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "safe_haven",
     "invert": false,
     "rsi_filter": "any",
@@ -1028,7 +1028,8 @@
       "low_vix_mult": 0.8,
       "normal_mult": 1.0,
       "panic_mult": 1.5
-    }
+    },
+    "disabled_reason": "margin too high for account size"
   },
   "VIX": {
     "_comment": "VIX used as sentiment overlay on all other trades, never traded directly",
