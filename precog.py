@@ -2689,8 +2689,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 state['positions'].pop(coin, None)
                 return
 
-            # PER-COIN TAKE PROFIT — exit when OOS-tuned TP reached
-            # This is the primary exit; matches OOS backtest conditions
+            # PER-COIN TP-LOCK — once TP reached, it becomes the new SL floor.
+            # Price can run ABOVE TP freely, but if it retraces BELOW TP it exits with that locked profit.
+            # This lets winners ride while guaranteeing minimum TP gain once reached.
             tp_pct = None
             try:
                 if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
@@ -2698,37 +2699,49 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     if _cfg and 'TP' in _cfg:
                         tp_pct = _cfg['TP']
             except Exception: pass
-            if tp_pct is not None and fav >= tp_pct:
-                prev_pos = dict(cur)
-                pnl_pct = close(coin)
-                if pnl_pct is not None:
-                    record_close(prev_pos, coin, pnl_pct, state)
-                    state['consec_losses'] = 0
-                    state['last_pnl_close'] = pnl_pct
-                log(f"{coin} TAKE PROFIT +{fav*100:.2f}% (target +{tp_pct*100:.2f}%)")
-                state['positions'].pop(coin, None)
-                return
 
-            # TRAILING STOP — lock gains, but only exit if still in meaningful profit
+            # HWM tracking for trail
             hwm = cur.get('hwm', fav)
             if fav > hwm:
                 hwm = fav
                 cur['hwm'] = hwm
-            
-            # Time-aware trail: tighten to 0.9% after 2h hold (OOS +77% PnL)
-            age = time.time() - (cur.get('opened_at') or time.time())
-            trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
-            # Trail: peaked above trail threshold AND retraced trail amount AND still +0.2% profit
-            if hwm > trl and (hwm - fav) >= trl and fav >= trl * 0.5:
+
+            # TP-LOCK state: once TP touched, mark the position as locked
+            tp_locked = cur.get('tp_locked', False)
+            if tp_pct is not None and not tp_locked and fav >= tp_pct:
+                cur['tp_locked'] = True
+                tp_locked = True
+                log(f"{coin} TP-LOCK armed at +{fav*100:.2f}% (TP={tp_pct*100:.2f}%). Floor locked.")
+
+            # If TP-locked, exit when price retraces back to TP level
+            if tp_locked and tp_pct is not None and fav < tp_pct:
                 prev_pos = dict(cur)
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     record_close(prev_pos, coin, pnl_pct, state)
                     state['consec_losses'] = 0
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {trl*100:.2f}%, age {age/60:.0f}m)")
+                log(f"{coin} TP-LOCK EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, TP floor {tp_pct*100:.2f}%)")
                 state['positions'].pop(coin, None)
                 return
+
+            # TRAIL (secondary): only active AFTER tp-lock, to capture runs past TP
+            # Uses tighter 0.8% trail to not give back too much.
+            # Before TP-lock: no trail exit (let it work toward TP or SL).
+            # After TP-lock: 0.8% trail from peak on top of locked TP floor.
+            if tp_locked and hwm > (tp_pct + TRAIL_PCT):
+                age = time.time() - (cur.get('opened_at') or time.time())
+                trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
+                if (hwm - fav) >= trl:
+                    prev_pos = dict(cur)
+                    pnl_pct = close(coin)
+                    if pnl_pct is not None:
+                        record_close(prev_pos, coin, pnl_pct, state)
+                        state['consec_losses'] = 0
+                        state['last_pnl_close'] = pnl_pct
+                    log(f"{coin} TRAIL EXIT +{fav*100:.2f}% (peak +{hwm*100:.2f}%, trail {trl*100:.2f}%, post-TP-lock)")
+                    state['positions'].pop(coin, None)
+                    return
 
     # 4h max hold check
     if cur and cur.get('opened_at'):
@@ -2898,7 +2911,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     place_native_sl(coin, False, fill_px, sz)
-                    place_native_tp(coin, False, fill_px, sz)
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px,
@@ -2923,7 +2935,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     place_native_sl(coin, True, fill_px, sz)
-                    place_native_tp(coin, True, fill_px, sz)
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px,
