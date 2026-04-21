@@ -96,10 +96,14 @@ def record_close(pos, coin, pnl_pct, state):
     stats['total_pnl'] += pnl_pct
 
 def wr_to_mult(wr, n, min_n=5):
-    """OOS validated fixed 1.0x sizing. Adaptive scaling was shrinking positions
-    when WR dipped below 40% (stale data from broken-cooldown period).
-    With audit fixes stabilizing WR, return neutral 1.0x. Revisit after 500+ trades."""
-    return 1.0
+    """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
+    <40%: 0.4x | 40-55%: 0.7x | 55-70%: 1.0x | 70%+: 1.3x
+    Not enough data (<min_n): 1.0x (neutral)."""
+    if n < min_n: return 1.0
+    if wr < 0.40: return 0.4
+    if wr < 0.55: return 0.7
+    if wr < 0.70: return 1.0
+    return 1.3
 
 def adaptive_mult(coin, side, state):
     """Compose multiplier from per-coin × per-hour × per-side stats."""
@@ -1122,11 +1126,6 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
-    cur_regime = None
-    try:
-        import regime_detector
-        cur_regime = regime_detector.get_regime()
-    except Exception: pass
     return jsonify({'status':'ok','version':'v8.28','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -1134,22 +1133,7 @@ def health():
                     'risk':INITIAL_RISK_PCT,
                     'trail':TRAIL_PCT,
                     'gates_loaded':len(TICKER_GATES),
-                    'regime':cur_regime,
                     'recent_logs':LOG_BUFFER[-20:]})
-
-@app.route('/regime', methods=['GET'])
-def regime_status():
-    """Return current regime detector state + per-coin coverage."""
-    try:
-        import regime_detector
-        import regime_configs
-        return jsonify({
-            'detector': regime_detector.status(),
-            'config_coverage': regime_configs.coverage_stats(),
-            'total_coins_with_regime_configs': len(regime_configs.REGIME_CONFIGS),
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 LOG_BUFFER = []
 
@@ -2045,30 +2029,31 @@ def chase_gate_ok(side, price, candles, i):
 
 
 # Trend-pullback signal engine (OOS: n=279 WR=84.9% PnL=+105.83% PF=9.83 on 14d)
-PB_EMA = 20
-PB_RSI_HI = 55
-PB_RSI_LO = 45
-PB_PROXIMITY = 0.003  # within 0.3% of 1H EMA20
+# HL-specific 5m-based constants (distinct from MT4 1h PB_* above)
+HL_PB_EMA = 20
+HL_PB_RSI_HI = 55
+HL_PB_RSI_LO = 45
+HL_PB_PROXIMITY = 0.003  # within 0.3% of 1H EMA20 derived from 5m resampled
 
 def pullback_signal(coin, candles5, last_pb_buy_ts, last_pb_sell_ts):
     """Returns (side, bar_ts) or (None, None). Entry: 5m near 1H EMA20 + cooled RSI + 4H trend aligned."""
     if len(candles5) < 150: return None, None
     # Resample last 150 5m bars to 1h (groups of 12)
     n1h = len(candles5) // 12
-    if n1h < PB_EMA + 3: return None, None
+    if n1h < HL_PB_EMA + 3: return None, None
     c1h = []
     for i in range(n1h):
         g = candles5[i*12:(i+1)*12]
         c1h.append(g[-1][4])
     # 1H EMA20
-    k = 2/(PB_EMA+1)
-    ema1h = sum(c1h[:PB_EMA])/PB_EMA
-    for cv in c1h[PB_EMA:]:
+    k = 2/(HL_PB_EMA+1)
+    ema1h = sum(c1h[:HL_PB_EMA])/HL_PB_EMA
+    for cv in c1h[HL_PB_EMA:]:
         ema1h = cv*k + ema1h*(1-k)
     last_c = candles5[-1][4]
     if ema1h<=0: return None, None
     dist = abs(last_c - ema1h) / ema1h
-    if dist > PB_PROXIMITY: return None, None
+    if dist > HL_PB_PROXIMITY: return None, None
     # RSI(14) on 5m
     closes = [b[4] for b in candles5]
     gains=[]; losses=[]
@@ -2085,8 +2070,8 @@ def pullback_signal(coin, candles5, last_pb_buy_ts, last_pb_sell_ts):
     # 4H trend — delegate to trend_gate (V3 already implements)
     trend_up = trend_gate(coin, 'SELL') == False  # if V3 blocks SELL, trend is up
     trend_dn = trend_gate(coin, 'BUY')  == False  # if V3 blocks BUY, trend is down
-    buy_ok  = trend_up and r_last < PB_RSI_HI and (bar_ts - last_pb_buy_ts) > CD_MS
-    sell_ok = trend_dn and r_last > PB_RSI_LO and (bar_ts - last_pb_sell_ts) > CD_MS
+    buy_ok  = trend_up and r_last < HL_PB_RSI_HI and (bar_ts - last_pb_buy_ts) > CD_MS
+    sell_ok = trend_dn and r_last > HL_PB_RSI_LO and (bar_ts - last_pb_sell_ts) > CD_MS
     if buy_ok:  return 'BUY', bar_ts
     if sell_ok: return 'SELL', bar_ts
     return None, None
@@ -2677,13 +2662,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             except Exception as e:
                 log(f"opp-exit err {coin}: {e}")
                 sig = None; signal_engine = None
-    # Secondary engines (PULLBACK, WALL_BNC, LIQ_CSCD, SPOOF) run ONLY on elite-whitelisted coins.
-    # These engines were added before the OOS tuning and need same gating as primary.
-    # Hard-skip all secondaries if coin isn't in the 139-coin whitelist.
-    secondary_allowed = (not percoin_configs.ELITE_MODE) or percoin_configs.is_elite(coin)
-
     # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
-    if not sig and secondary_allowed:
+    if not sig:
         try:
             pb_s = state['cooldowns'].get(coin+'_pb_sell', 0)
             pb_b = state['cooldowns'].get(coin+'_pb_buy', 0)
@@ -2695,7 +2675,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"pullback err {coin}: {e}")
     # Tertiary: wall-bounce retest engine (requires verified OB + V3 alignment)
-    if not sig and secondary_allowed:
+    if not sig:
         try:
             # Infer V3 direction from trend_gate checks
             v3_dir = 0
@@ -2712,7 +2692,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"wall_bounce err {coin}: {e}")
     # Quaternary: liquidation cascade fade
-    if not sig and secondary_allowed:
+    if not sig:
         try:
             casc = liquidation_ws.get_cascade(coin, max_age_sec=180)
             if casc:
@@ -2721,7 +2701,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"liq cascade err {coin}: {e}")
     # Quinary: spoof detection fade
-    if not sig and secondary_allowed:
+    if not sig:
         try:
             sp = spoof_detection.get_spoof_signal(coin)
             if sp:
