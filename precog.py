@@ -1372,7 +1372,7 @@ def mt4_signals():
         _mt4_save()
         log(f"MT4 SERVED: {sig['direction']} {sig['symbol']}")
         return jsonify(sig)
-    return jsonify({'symbol':'','direction':'','price':0})
+    return ('', 204)  # v4.16: empty body when no signal — EA's StringLen(body)<5 check bails cleanly
 
 @app.route('/mt4/status', methods=['GET'])
 def mt4_status():
