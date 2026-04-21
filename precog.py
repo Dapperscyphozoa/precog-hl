@@ -1804,6 +1804,112 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
 
+def bb_signal(candles, coin=None):
+    """Bollinger Band rejection signal. Mirrors OOS tuner logic.
+    BUY: low breaks lower BB (2 SD), close back above lower BB, RSI near oversold
+    SELL: high breaks upper BB (2 SD), close back below upper BB, RSI near overbought
+    Returns (side, bar_ts) or (None, None)."""
+    if len(candles) < 40: return None, None
+    h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
+    N = len(cl); BB_P = 20
+    r14 = rsi_calc(cl, 14)
+    # Per-coin RL/RH if available, else globals
+    RL = BP['rsi_lo']; RH = SP['rsi_hi']
+    try:
+        if coin and percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+            cfg = percoin_configs.get_config(coin)
+            if cfg:
+                RL = cfg.get('RL', RL); RH = cfg.get('RH', RH)
+    except Exception: pass
+    for i in range(max(BB_P+5, N-SCAN_BARS), N):
+        if r14[i] is None: continue
+        window = cl[i-BB_P:i]
+        mean = sum(window)/BB_P
+        var = sum((x-mean)**2 for x in window)/BB_P
+        sd = var**0.5
+        if sd <= 0: continue
+        upper = mean + 2*sd; lower = mean - 2*sd
+        bar_ts = candles[i][0]
+        # BUY: pierced lower BB, closed back above, RSI in oversold zone
+        if l[i] <= lower and cl[i] > lower and r14[i] < RL + 5:
+            return 'BUY', bar_ts
+        # SELL: pierced upper BB, closed back below, RSI in overbought zone
+        if h[i] >= upper and cl[i] < upper and r14[i] > RH - 5:
+            return 'SELL', bar_ts
+    return None, None
+
+def ib_signal(candles, coin=None):
+    """Inside Bar breakout signal. Two consecutive inside bars, then breakout.
+    BUY: close breaks above prior inner bar high
+    SELL: close breaks below prior inner bar low
+    Returns (side, bar_ts) or (None, None)."""
+    if len(candles) < 10: return None, None
+    h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
+    N = len(cl)
+    for i in range(max(5, N-SCAN_BARS), N):
+        if i < 4: continue
+        inside1 = h[i-1] < h[i-2] and l[i-1] > l[i-2]
+        inside2 = h[i-2] < h[i-3] and l[i-2] > l[i-3]
+        if not (inside1 and inside2): continue
+        bar_ts = candles[i][0]
+        if cl[i] > h[i-1]: return 'BUY', bar_ts
+        if cl[i] < l[i-1]: return 'SELL', bar_ts
+    return None, None
+
+def pass_per_coin_filter(coin, side, candles, i):
+    """Apply per-coin ema200/adx25/adx20 filter from percoin_configs.
+    Returns True if signal passes, False otherwise.
+    For non-elite coins or coins without filter configured, always returns True."""
+    try:
+        if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
+            return True
+        cfg = percoin_configs.get_config(coin)
+        if not cfg: return True
+        flt = cfg.get('flt', 'none')
+        if flt == 'none': return True
+        cl = [c[4] for c in candles]
+        h = [c[2] for c in candles]
+        l = [c[3] for c in candles]
+        N = len(cl)
+        if 'ema200' in flt and N >= 200:
+            k = 2/201
+            e = sum(cl[:200])/200
+            for j in range(200, i+1): e = cl[j]*k + e*(1-k)
+            if side == 'BUY' and cl[i] < e: return False
+            if side == 'SELL' and cl[i] > e: return False
+        if 'ema50' in flt and N >= 50:
+            k = 2/51
+            e = sum(cl[:50])/50
+            for j in range(50, i+1): e = cl[j]*k + e*(1-k)
+            if side == 'BUY' and cl[i] < e: return False
+            if side == 'SELL' and cl[i] > e: return False
+        if 'adx' in flt and N >= 28:
+            # Minimum ADX threshold (14-period Wilder's)
+            threshold = 25 if 'adx25' in flt else 20
+            P = 14
+            # Compute recent ADX at index i
+            tr_s = []; pdm_s = []; ndm_s = []
+            for j in range(1, i+1):
+                tr = max(h[j]-l[j], abs(h[j]-cl[j-1]), abs(l[j]-cl[j-1]))
+                up = h[j]-h[j-1]; dn = l[j-1]-l[j]
+                pdm = up if (up > dn and up > 0) else 0
+                ndm = dn if (dn > up and dn > 0) else 0
+                tr_s.append(tr); pdm_s.append(pdm); ndm_s.append(ndm)
+            if len(tr_s) < 2*P: return False
+            atr = sum(tr_s[:P])/P; spdm = sum(pdm_s[:P]); sndm = sum(ndm_s[:P])
+            for j in range(P, len(tr_s)):
+                atr = (atr*(P-1) + tr_s[j])/P
+                spdm = spdm - spdm/P + pdm_s[j]
+                sndm = sndm - sndm/P + ndm_s[j]
+            pdi = 100*spdm/atr if atr>0 else 0
+            ndi = 100*sndm/atr if atr>0 else 0
+            dx = 100*abs(pdi-ndi)/(pdi+ndi) if (pdi+ndi)>0 else 0
+            # Single-bar ADX approximation — compare DX vs threshold directly (noisy but fast)
+            if dx < threshold: return False
+        return True
+    except Exception:
+        return True  # fail-open to avoid blocking trades on filter bugs
+
 # ═══════════════════════════════════════════════════════
 # HL INTERFACE
 # ═══════════════════════════════════════════════════════
@@ -2072,6 +2178,46 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
     signal_engine = 'PIVOT' if sig else None
+
+    # PER-COIN FILTER: for ELITE coins, apply tuned sigs whitelist + filter
+    # Each coin's allowed sigs list and filter (ema200/adx25/etc) comes from OOS tuning
+    if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+        elite_cfg_check = percoin_configs.get_config(coin)
+        allowed = set(elite_cfg_check.get('sigs', [])) if elite_cfg_check else set()
+        # If PIVOT signal fired but coin doesn't allow PV, drop it
+        if sig and 'PV' not in allowed:
+            log(f"{coin} {sig} BLOCKED — PV not in allowed sigs {sorted(allowed)}")
+            sig = None; signal_engine = None
+        # Try BB_REJ if allowed and nothing fired
+        if not sig and 'BB' in allowed:
+            try:
+                sig, bar_ts = bb_signal(candles, coin=coin)
+                if sig: signal_engine = 'BB_REJ'
+            except Exception as e:
+                log(f"bb_signal err {coin}: {e}")
+        # Try INSIDE_BAR if allowed and nothing fired
+        if not sig and 'IB' in allowed:
+            try:
+                sig, bar_ts = ib_signal(candles, coin=coin)
+                if sig: signal_engine = 'INSIDE_BAR'
+            except Exception as e:
+                log(f"ib_signal err {coin}: {e}")
+        # Apply per-coin filter (ema200/adx20/adx25 as configured)
+        if sig:
+            # Find bar index for bar_ts
+            idx = len(candles) - 1
+            for j in range(len(candles)-1, -1, -1):
+                if candles[j][0] == bar_ts: idx = j; break
+            if not pass_per_coin_filter(coin, sig, candles, idx):
+                flt = elite_cfg_check.get('flt', 'none') if elite_cfg_check else 'none'
+                log(f"{coin} {sig} {signal_engine} FILTERED — failed {flt}")
+                sig = None; signal_engine = None
+    elif percoin_configs.ELITE_MODE and not percoin_configs.is_elite(coin):
+        # Coin not in 139-whitelist: hard-block. Do not trade.
+        if sig:
+            log(f"{coin} {sig} BLOCKED — not in 139-coin elite whitelist")
+        sig = None; signal_engine = None
+
     # Opposite-signal exit: if we hold opposite-side position, close it first
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
