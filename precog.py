@@ -1776,7 +1776,7 @@ MAX_TOTAL_RISK = 0.92    # 8% reserve
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
-MAX_HOLD_SEC = 4 * 3600  # stale exit after 4h
+MAX_HOLD_SEC = 99999 * 3600  # max hold disabled — OOS showed forced exits cost performance
 CB_CONSEC_LOSSES = 999  # disabled per user principle
 CB_PAUSE_SEC = 600  # 10min (was 60min — too long, cloud exit was triggering it)
 FUNDING_CUT_RATIO = 0.50
@@ -1803,9 +1803,25 @@ def _init_hl_with_retry(max_attempts=8):
             raise
     raise RuntimeError("Hyperliquid Info() init failed after retries")
 
+def _init_exchange_with_retry(account, max_attempts=8):
+    """Retry Exchange() init with exponential backoff — HL 429s on cold deploys."""
+    import time as _t
+    for attempt in range(max_attempts):
+        try:
+            return Exchange(account, constants.MAINNET_API_URL, account_address=WALLET)
+        except Exception as e:
+            msg = str(e)
+            if '429' in msg or 'rate' in msg.lower():
+                wait = min(60, 3 * (2 ** attempt))
+                print(f"[HL exch init] 429 rate-limited, retry {attempt+1}/{max_attempts} in {wait}s", flush=True)
+                _t.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("Hyperliquid Exchange() init failed after retries")
+
 info = _init_hl_with_retry()
 account = Account.from_key(PRIV_KEY)
-exchange = Exchange(account, constants.MAINNET_API_URL, account_address=WALLET)
+exchange = _init_exchange_with_retry(account)
 
 _META_CACHE = None
 def _get_sz_decimals(coin):
@@ -2033,11 +2049,12 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         if buy_ok:  return 'BUY',  bar_ts
     return None, None
 
-def bb_signal(candles, coin=None):
+def bb_signal(candles, coin=None, last_buy_ts=0, last_sell_ts=0):
     """Bollinger Band rejection signal. Mirrors OOS tuner logic.
     BUY: low breaks lower BB (2 SD), close back above lower BB, RSI near oversold
     SELL: high breaks upper BB (2 SD), close back below upper BB, RSI near overbought
-    Returns (side, bar_ts) or (None, None)."""
+    Returns (side, bar_ts) or (None, None).
+    Enforces CD_MS cooldown from last_buy_ts/last_sell_ts to prevent signal storms."""
     if len(candles) < 40: return None, None
     h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
     N = len(cl); BB_P = 20
@@ -2060,18 +2077,19 @@ def bb_signal(candles, coin=None):
         upper = mean + 2*sd; lower = mean - 2*sd
         bar_ts = candles[i][0]
         # BUY: pierced lower BB, closed back above, RSI in oversold zone
-        if l[i] <= lower and cl[i] > lower and r14[i] < RL + 5:
+        if l[i] <= lower and cl[i] > lower and r14[i] < RL + 5 and (bar_ts - last_buy_ts) > CD_MS:
             return 'BUY', bar_ts
         # SELL: pierced upper BB, closed back below, RSI in overbought zone
-        if h[i] >= upper and cl[i] < upper and r14[i] > RH - 5:
+        if h[i] >= upper and cl[i] < upper and r14[i] > RH - 5 and (bar_ts - last_sell_ts) > CD_MS:
             return 'SELL', bar_ts
     return None, None
 
-def ib_signal(candles, coin=None):
+def ib_signal(candles, coin=None, last_buy_ts=0, last_sell_ts=0):
     """Inside Bar breakout signal. Two consecutive inside bars, then breakout.
     BUY: close breaks above prior inner bar high
     SELL: close breaks below prior inner bar low
-    Returns (side, bar_ts) or (None, None)."""
+    Returns (side, bar_ts) or (None, None).
+    Enforces CD_MS cooldown from last_buy_ts/last_sell_ts to prevent signal storms."""
     if len(candles) < 10: return None, None
     h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
     N = len(cl)
@@ -2081,8 +2099,8 @@ def ib_signal(candles, coin=None):
         inside2 = h[i-2] < h[i-3] and l[i-2] > l[i-3]
         if not (inside1 and inside2): continue
         bar_ts = candles[i][0]
-        if cl[i] > h[i-1]: return 'BUY', bar_ts
-        if cl[i] < l[i-1]: return 'SELL', bar_ts
+        if cl[i] > h[i-1] and (bar_ts - last_buy_ts) > CD_MS: return 'BUY', bar_ts
+        if cl[i] < l[i-1] and (bar_ts - last_sell_ts) > CD_MS: return 'SELL', bar_ts
     return None, None
 
 def pass_per_coin_filter(coin, side, candles, i):
@@ -2469,10 +2487,19 @@ def flatten_all(reason='KILL'):
 # PROCESS — one coin per tick
 # ═══════════════════════════════════════════════════════
 def place_native_sl(coin, is_long, entry, size):
-    """Place HL native stop-loss order — executes server-side, no tick delay."""
+    """Place HL native stop-loss order — executes server-side, no tick delay.
+    Uses per-coin SL from percoin_configs if available (OOS-tuned), else global fallback."""
     try:
+        # Per-coin SL from OOS tuning (5% default — validated WR)
+        sl_pct = STOP_LOSS_PCT  # global fallback 2%
+        try:
+            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                cfg = percoin_configs.get_config(coin)
+                if cfg and 'SL' in cfg:
+                    sl_pct = cfg['SL']  # OOS-validated per-coin SL
+        except Exception: pass
         entry = float(entry); size = float(size)
-        trigger_px = entry * (1 - STOP_LOSS_PCT) if is_long else entry * (1 + STOP_LOSS_PCT)
+        trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
         trigger_px = float(round_price(coin, trigger_px))
         # Limit price: aggressive to ensure fill (2% past trigger for slippage room)
         limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
@@ -2485,9 +2512,35 @@ def place_native_sl(coin, is_long, entry, size):
         if 'error' in status:
             log(f"{coin} NATIVE SL REJECTED: {status['error']}")
         else:
-            log(f"{coin} NATIVE SL placed @ {trigger_px} (limit {limit_px})")
+            log(f"{coin} NATIVE SL placed @ {trigger_px} (sl_pct={sl_pct*100:.1f}%)")
     except Exception as e:
         log(f"{coin} native SL err: {e}")
+
+def place_native_tp(coin, is_long, entry, size):
+    """Place HL native take-profit order using per-coin TP from OOS tuning."""
+    try:
+        if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
+            return  # no per-coin TP for non-elite
+        cfg = percoin_configs.get_config(coin)
+        if not cfg or 'TP' not in cfg: return
+        tp_pct = cfg['TP']
+        entry = float(entry); size = float(size)
+        trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
+        trigger_px = float(round_price(coin, trigger_px))
+        # Limit: slightly worse to ensure fill
+        limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+        tp_size = float(round_size(coin, size))
+        tp_side = not is_long
+        r = exchange.order(coin, tp_side, tp_size, limit_px,
+                       {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
+                       reduce_only=True)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"{coin} NATIVE TP REJECTED: {status['error']}")
+        else:
+            log(f"{coin} NATIVE TP placed @ {trigger_px} (tp_pct={tp_pct*100:.2f}%)")
+    except Exception as e:
+        log(f"{coin} native TP err: {e}")
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
@@ -2509,14 +2562,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         # Try BB_REJ if allowed and nothing fired
         if not sig and 'BB' in allowed:
             try:
-                sig, bar_ts = bb_signal(candles, coin=coin)
+                sig, bar_ts = bb_signal(candles, coin=coin, last_buy_ts=last_b, last_sell_ts=last_s)
                 if sig: signal_engine = 'BB_REJ'
             except Exception as e:
                 log(f"bb_signal err {coin}: {e}")
         # Try INSIDE_BAR if allowed and nothing fired
         if not sig and 'IB' in allowed:
             try:
-                sig, bar_ts = ib_signal(candles, coin=coin)
+                sig, bar_ts = ib_signal(candles, coin=coin, last_buy_ts=last_b, last_sell_ts=last_s)
                 if sig: signal_engine = 'INSIDE_BAR'
             except Exception as e:
                 log(f"ib_signal err {coin}: {e}")
@@ -2536,14 +2589,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             log(f"{coin} {sig} BLOCKED — not in 139-coin elite whitelist")
         sig = None; signal_engine = None
 
-    # Opposite-signal exit: if we hold opposite-side position, close it first
+    # Opposite-signal exit: if we hold OPPOSITE-SIDE position AND it's profitable, close it first.
+    # Skip OPP-EXIT on losing positions — let native SL handle them.
+    # This prevents signal-storm from locking in small losses when signals oscillate mid-bar.
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
         if pos and ((pos.get('side')=='L' and sig=='SELL') or (pos.get('side')=='S' and sig=='BUY')):
+            # Check current PnL — only flip if we're in profit
             try:
-                close(coin)
-                log(f"{coin} OPP-EXIT on {sig} signal")
-            except Exception as e: log(f"opp-exit err {coin}: {e}")
+                live = live_positions.get(coin, {})
+                cur_pnl = live.get('pnl', 0) if live else 0
+                if cur_pnl > 0.10:  # only flip if at least $0.10 in profit
+                    close(coin)
+                    log(f"{coin} OPP-EXIT on {sig} signal (locking +${cur_pnl:.3f})")
+                else:
+                    # Don't flip a losing or flat position — let SL work
+                    log(f"{coin} OPP-EXIT skipped: pos at ${cur_pnl:+.3f} not profitable enough to flip")
+                    sig = None; signal_engine = None
+            except Exception as e:
+                log(f"opp-exit err {coin}: {e}")
+                sig = None; signal_engine = None
     # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
     if not sig:
         try:
@@ -2604,15 +2669,43 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             side = cur['side']
             fav = (mark - entry) / entry if side == 'L' else (entry - mark) / entry
 
-            # 2% HARD STOP LOSS — wide enough to survive noise, cuts real losers
-            if fav <= -STOP_LOSS_PCT:
+            # Per-coin hard stop — uses OOS-validated SL from percoin_configs if available
+            sl_pct = STOP_LOSS_PCT  # global 2% fallback
+            try:
+                if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                    _cfg = percoin_configs.get_config(coin)
+                    if _cfg and 'SL' in _cfg:
+                        sl_pct = _cfg['SL']  # OOS-validated per-coin SL (typically 5%)
+            except Exception: pass
+
+            if fav <= -sl_pct:
                 prev_pos = dict(cur)
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     record_close(prev_pos, coin, pnl_pct, state)
                     state['consec_losses'] += 1
                     state['last_pnl_close'] = pnl_pct
-                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{STOP_LOSS_PCT*100:.1f}%)")
+                log(f"{coin} STOP LOSS {fav*100:.2f}% (limit -{sl_pct*100:.1f}%)")
+                state['positions'].pop(coin, None)
+                return
+
+            # PER-COIN TAKE PROFIT — exit when OOS-tuned TP reached
+            # This is the primary exit; matches OOS backtest conditions
+            tp_pct = None
+            try:
+                if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                    _cfg = percoin_configs.get_config(coin)
+                    if _cfg and 'TP' in _cfg:
+                        tp_pct = _cfg['TP']
+            except Exception: pass
+            if tp_pct is not None and fav >= tp_pct:
+                prev_pos = dict(cur)
+                pnl_pct = close(coin)
+                if pnl_pct is not None:
+                    record_close(prev_pos, coin, pnl_pct, state)
+                    state['consec_losses'] = 0
+                    state['last_pnl_close'] = pnl_pct
+                log(f"{coin} TAKE PROFIT +{fav*100:.2f}% (target +{tp_pct*100:.2f}%)")
                 state['positions'].pop(coin, None)
                 return
 
@@ -2805,6 +2898,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     place_native_sl(coin, False, fill_px, sz)
+                    place_native_tp(coin, False, fill_px, sz)
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px,
@@ -2829,6 +2923,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     place_native_sl(coin, True, fill_px, sz)
+                    place_native_tp(coin, True, fill_px, sz)
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px,
