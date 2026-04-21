@@ -728,6 +728,10 @@ def _pass_hour_block(hour_utc, hb):
     return True
 
 def _mt4_filter_pass(clean_ticker, direction='BUY'):
+    # v4.21: daily drawdown kill — if today's total PnL <= limit, refuse all new signals
+    _daily = _mt4_daily_pnl_pct()
+    if _daily <= MT4_DAILY_DD_LIMIT:
+        return False, f"DAILY_DD ({_daily:+.2f}% <= {MT4_DAILY_DD_LIMIT}%)"
     # v4.19: per-ticker kill switch — disabled tickers never trade
     _gate_check = MT4_TICKER_GATES.get(clean_ticker, {})
     if not _gate_check.get('enabled', True):
@@ -782,6 +786,53 @@ def _mt4_filter_pass(clean_ticker, direction='BUY'):
     # RSI filter (requires ATR fetch to have populated; best-effort)
     # (RSI fetched separately, skipping for now — filter passes unless gate requires)
     return True, 'ok'
+
+def _mt4_daily_pnl_pct():
+    """v4.21: rolling today's total PnL % across all MT4 tickers.
+    Reads MT4_CLOSED_RING, sums exit_pct for trades closed in last 24h.
+    Used for daily drawdown kill switch.
+    """
+    import datetime
+    now = time.time()
+    cutoff_today_utc = now - (now % 86400)  # start of UTC day
+    total = 0.0
+    for r in MT4_CLOSED_RING:
+        if r['ts'] >= cutoff_today_utc:
+            total += float(r.get('exit_pct', 0))
+    return total
+
+MT4_DAILY_DD_LIMIT = float(os.environ.get('MT4_DAILY_DD_LIMIT', '-3.0'))  # -3% daily kill
+
+def _mt4_live_wr_mult(clean_ticker):
+    """v4.21: adaptive sizing from live WR. Reads last 20 trades from MT4_LIVE_STATS.
+    Returns size multiplier:
+      - WR >= 65% and PF >= 1.5 over 20+ trades → 1.3x (hot streak, scale up)
+      - WR 55-64% or PF 1.1-1.5 → 1.1x (decent)
+      - WR 45-54% or PF 0.9-1.1 → 1.0x (neutral)
+      - WR 35-44% or PF 0.6-0.9 → 0.7x (cold, scale down)
+      - WR < 35% or PF < 0.6 → 0.4x (very cold, barely size)
+    With < 5 trades returns 1.0 (insufficient data).
+    Trades counted: only last 20 entries in recent[] ring.
+    """
+    ss = MT4_LIVE_STATS.get(clean_ticker)
+    if not ss or not ss.get('recent'): return 1.0
+    recent = ss['recent'][-20:]
+    n = len(recent)
+    if n < 5: return 1.0  # insufficient sample
+    wins = sum(1 for r in recent if r['pnl'] > 0)
+    losses = n - wins
+    wr = wins / n * 100.0
+    gross_wins = sum(r['pnl'] for r in recent if r['pnl'] > 0)
+    gross_losses = abs(sum(r['pnl'] for r in recent if r['pnl'] <= 0))
+    pf = gross_wins / gross_losses if gross_losses > 0 else 9.0
+    # Combined gating
+    if wr >= 65 and pf >= 1.5: mult = 1.3
+    elif wr >= 55 or pf >= 1.1: mult = 1.1
+    elif wr >= 45 or pf >= 0.9: mult = 1.0
+    elif wr >= 35 or pf >= 0.6: mult = 0.7
+    else: mult = 0.4
+    log(f"MT4 LIVE_WR {clean_ticker}: n={n} wr={wr:.0f}% pf={pf:.2f} mult={mult}")
+    return mult
 
 def _mt4_max_spread_for(clean_ticker):
     """Per-instrument-class max spread % for EA spread gate.
@@ -1384,7 +1435,8 @@ def webhook():
                     log(f"MT4 ZONE ALIGN {clean} {direction} @ {price}: {zone_info.get('zones_hit',[])[:3]} — size×{zone_boost}")
             except Exception as _ze:
                 log(f"MT4 zone err {clean}: {_ze}")
-        final_mult = round(size_mult * zone_boost * sent_mult, 2)
+        live_wr_mult = _mt4_live_wr_mult(clean)
+        final_mult = round(size_mult * zone_boost * sent_mult * live_wr_mult, 2)
         rec = {
             'symbol': mt4_sym,
             'direction': direction,
@@ -1399,6 +1451,7 @@ def webhook():
             'zone_boost': round(zone_boost, 2),
             'zone_status': zone_info.get('aligned') if zone_info else None,
             'sent_mult': round(sent_mult, 2),
+            'live_wr_mult': round(live_wr_mult, 2),
             'pullback_meta': _pb_meta,
             'max_spread_pct': _mt4_max_spread_for(clean),
             'tp_pct': gate.get('tp_pct', round(gate.get('sl_pct', 1.0) * 2.0, 2)),
