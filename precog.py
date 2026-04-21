@@ -96,14 +96,10 @@ def record_close(pos, coin, pnl_pct, state):
     stats['total_pnl'] += pnl_pct
 
 def wr_to_mult(wr, n, min_n=5):
-    """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
-    <40%: 0.4x | 40-55%: 0.7x | 55-70%: 1.0x | 70%+: 1.3x
-    Not enough data (<min_n): 1.0x (neutral)."""
-    if n < min_n: return 1.0
-    if wr < 0.40: return 0.4
-    if wr < 0.55: return 0.7
-    if wr < 0.70: return 1.0
-    return 1.3
+    """OOS validated fixed 1.0x sizing. Adaptive scaling was shrinking positions
+    when WR dipped below 40% (stale data from broken-cooldown period).
+    With audit fixes stabilizing WR, return neutral 1.0x. Revisit after 500+ trades."""
+    return 1.0
 
 def adaptive_mult(coin, side, state):
     """Compose multiplier from per-coin × per-hour × per-side stats."""
@@ -1126,6 +1122,11 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
+    cur_regime = None
+    try:
+        import regime_detector
+        cur_regime = regime_detector.get_regime()
+    except Exception: pass
     return jsonify({'status':'ok','version':'v8.28','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -1133,7 +1134,22 @@ def health():
                     'risk':INITIAL_RISK_PCT,
                     'trail':TRAIL_PCT,
                     'gates_loaded':len(TICKER_GATES),
+                    'regime':cur_regime,
                     'recent_logs':LOG_BUFFER[-20:]})
+
+@app.route('/regime', methods=['GET'])
+def regime_status():
+    """Return current regime detector state + per-coin coverage."""
+    try:
+        import regime_detector
+        import regime_configs
+        return jsonify({
+            'detector': regime_detector.status(),
+            'config_coverage': regime_configs.coverage_stats(),
+            'total_coins_with_regime_configs': len(regime_configs.REGIME_CONFIGS),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 LOG_BUFFER = []
 
@@ -2661,8 +2677,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             except Exception as e:
                 log(f"opp-exit err {coin}: {e}")
                 sig = None; signal_engine = None
+    # Secondary engines (PULLBACK, WALL_BNC, LIQ_CSCD, SPOOF) run ONLY on elite-whitelisted coins.
+    # These engines were added before the OOS tuning and need same gating as primary.
+    # Hard-skip all secondaries if coin isn't in the 139-coin whitelist.
+    secondary_allowed = (not percoin_configs.ELITE_MODE) or percoin_configs.is_elite(coin)
+
     # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
-    if not sig:
+    if not sig and secondary_allowed:
         try:
             pb_s = state['cooldowns'].get(coin+'_pb_sell', 0)
             pb_b = state['cooldowns'].get(coin+'_pb_buy', 0)
@@ -2674,7 +2695,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"pullback err {coin}: {e}")
     # Tertiary: wall-bounce retest engine (requires verified OB + V3 alignment)
-    if not sig:
+    if not sig and secondary_allowed:
         try:
             # Infer V3 direction from trend_gate checks
             v3_dir = 0
@@ -2691,7 +2712,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"wall_bounce err {coin}: {e}")
     # Quaternary: liquidation cascade fade
-    if not sig:
+    if not sig and secondary_allowed:
         try:
             casc = liquidation_ws.get_cascade(coin, max_age_sec=180)
             if casc:
@@ -2700,7 +2721,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"liq cascade err {coin}: {e}")
     # Quinary: spoof detection fade
-    if not sig:
+    if not sig and secondary_allowed:
         try:
             sp = spoof_detection.get_spoof_signal(coin)
             if sp:

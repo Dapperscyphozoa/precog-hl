@@ -1,103 +1,93 @@
-"""Market regime detector — uses Binance 1H/4H data (no HL 17d limit).
-Detects: TREND_UP / TREND_DOWN / CHOP / HIGH_VOL / LOW_VOL
-Auto-adjusts per-tier risk multipliers based on regime."""
-import time, json, threading, urllib.request, urllib.parse
+"""Live regime detector. Determines current market regime from BTC 4h data.
+Caches result for 5 minutes (regime can't shift faster than that with hysteresis)."""
+import time, urllib.request, json
+import numpy as np
 
-_LOCK = threading.Lock()
-_state = {
-    'ts': 0,
-    'regime': 'UNKNOWN',
-    'btc_1h_trend': 0,
-    'btc_4h_trend': 0,
-    'btc_vol_24h': 0,
-    'risk_mult': 1.0,   # global risk multiplier based on regime
-    'altcoin_strength': 0,  # -1 to +1, BTC vs alts
-}
+_CACHE = {'regime': None, 'ts': 0, 'history': []}
+CACHE_SEC = 300  # 5 min
+TREND_BUFFER = 0.005  # ±0.5% from EMA9 = chop
+HYSTERESIS = 3  # bars
+VOL_MEDIAN = 0.00957  # from 90d historical (regenerate weekly)
 
-REFRESH_SEC = 300  # 5min
-
-def _fetch_binance_klines(symbol='BTCUSDT', interval='1h', limit=100):
-    """Returns list of [open_time, O, H, L, C, V, close_time, ...]"""
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0'})
-        r = urllib.request.urlopen(req, timeout=10).read()
-        return json.loads(r)
-    except Exception as e:
-        return None
-
-def _ema(values, period):
-    if len(values) < period: return None
-    k = 2/(period+1); e = sum(values[:period])/period
-    for v in values[period:]: e = v*k + e*(1-k)
+def _ema(vals, period):
+    if len(vals) < period: return None
+    e = sum(vals[:period])/period
+    k = 2/(period+1)
+    for v in vals[period:]:
+        e = v*k + e*(1-k)
     return e
 
-def refresh():
-    """Pull BTC 1H + 4H, compute regime."""
-    k_1h = _fetch_binance_klines('BTCUSDT', '1h', 100)
-    k_4h = _fetch_binance_klines('BTCUSDT', '4h', 50)
-    if not k_1h or not k_4h: return False
-    
-    # Close prices
-    closes_1h = [float(x[4]) for x in k_1h]
-    closes_4h = [float(x[4]) for x in k_4h]
-    highs_24h = [float(x[2]) for x in k_1h[-24:]]
-    lows_24h = [float(x[3]) for x in k_1h[-24:]]
-    
-    # 1H EMA 9 vs EMA 21 for short trend
-    ema_1h_fast = _ema(closes_1h, 9)
-    ema_1h_slow = _ema(closes_1h, 21)
-    trend_1h = 1 if ema_1h_fast and ema_1h_slow and ema_1h_fast > ema_1h_slow * 1.002 else (-1 if ema_1h_fast and ema_1h_slow and ema_1h_fast < ema_1h_slow * 0.998 else 0)
-    
-    # 4H EMA 9 vs EMA 21 for mid trend
-    ema_4h_fast = _ema(closes_4h, 9)
-    ema_4h_slow = _ema(closes_4h, 21)
-    trend_4h = 1 if ema_4h_fast and ema_4h_slow and ema_4h_fast > ema_4h_slow * 1.005 else (-1 if ema_4h_fast and ema_4h_slow and ema_4h_fast < ema_4h_slow * 0.995 else 0)
-    
-    # 24h vol: avg (high-low)/close
-    vol_24h = sum((h - l) / c for h,l,c in zip(highs_24h, lows_24h, closes_1h[-24:])) / 24 if closes_1h else 0
-    
-    # ETH strength (for altcoin regime proxy)
-    k_eth = _fetch_binance_klines('ETHUSDT', '1h', 24)
-    eth_strength = 0
-    if k_eth:
-        eth_closes = [float(x[4]) for x in k_eth]
-        btc_24h_change = (closes_1h[-1] - closes_1h[-24]) / closes_1h[-24] if len(closes_1h) >= 24 else 0
-        eth_24h_change = (eth_closes[-1] - eth_closes[-24]) / eth_closes[-24] if len(eth_closes) >= 24 else 0
-        eth_strength = max(-1, min(1, (eth_24h_change - btc_24h_change) * 50))
-    
-    # Determine regime
-    if trend_1h == 1 and trend_4h >= 0 and vol_24h < 0.03:
-        regime = 'TREND_UP'; risk_mult = 1.2
-    elif trend_1h == -1 and trend_4h <= 0 and vol_24h < 0.03:
-        regime = 'TREND_DOWN'; risk_mult = 1.0  # shorts work
-    elif vol_24h > 0.04:
-        regime = 'HIGH_VOL'; risk_mult = 0.6  # reduce risk
-    elif vol_24h < 0.01:
-        regime = 'LOW_VOL'; risk_mult = 0.8  # chop kills mean reversion
-    elif trend_1h == 0 and trend_4h == 0:
-        regime = 'CHOP'; risk_mult = 0.7
-    else:
-        regime = 'NEUTRAL'; risk_mult = 1.0
-    
-    with _LOCK:
-        _state['ts'] = time.time()
-        _state['regime'] = regime
-        _state['btc_1h_trend'] = trend_1h
-        _state['btc_4h_trend'] = trend_4h
-        _state['btc_vol_24h'] = round(vol_24h, 4)
-        _state['risk_mult'] = risk_mult
-        _state['altcoin_strength'] = round(eth_strength, 3)
-    return True
+def _fetch_btc_4h(n_bars=40):
+    """Fetch last n_bars of BTC 4h candles."""
+    end_ms = int(time.time()*1000)
+    start_ms = end_ms - n_bars*4*3600*1000
+    req = urllib.request.Request('https://api.hyperliquid.xyz/info',
+        data=json.dumps({"type":"candleSnapshot",
+                         "req":{"coin":"BTC","interval":"4h","startTime":start_ms,"endTime":end_ms}}).encode(),
+        headers={'Content-Type':'application/json'})
+    return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
-def get_regime():
-    with _LOCK:
-        if time.time() - _state['ts'] > REFRESH_SEC:
-            threading.Thread(target=refresh, daemon=True).start()
-        return dict(_state)
+def get_regime(force=False):
+    """Returns current regime: bull-calm/bull-storm/bear-calm/bear-storm/chop, or None on error."""
+    now = time.time()
+    if not force and _CACHE['regime'] and (now - _CACHE['ts']) < CACHE_SEC:
+        return _CACHE['regime']
+    
+    try:
+        bars = _fetch_btc_4h(40)
+        if len(bars) < 12: return _CACHE['regime']  # fallback to last known
+        closes = [float(b['c']) for b in bars]
+        ema9 = _ema(closes, 9)
+        if ema9 is None: return _CACHE['regime']
+        
+        last_px = closes[-1]
+        dist = (last_px - ema9) / ema9
+        
+        # Vol: stdev of last 30 returns (or what we have)
+        rets = [(closes[i]/closes[i-1]-1) for i in range(1, len(closes))]
+        if len(rets) < 5: return _CACHE['regime']
+        vol = float(np.std(rets[-min(30,len(rets)):]))
+        
+        # Classify
+        if abs(dist) < TREND_BUFFER:
+            raw = 'chop'
+        else:
+            trend = 'bull' if dist > 0 else 'bear'
+            vol_label = 'storm' if vol > VOL_MEDIAN else 'calm'
+            raw = f"{trend}-{vol_label}"
+        
+        # Hysteresis: don't flip unless persistent
+        history = _CACHE.get('history', [])
+        history.append(raw)
+        if len(history) > HYSTERESIS: history = history[-HYSTERESIS:]
+        
+        prev = _CACHE['regime']
+        if prev is None:
+            _CACHE['regime'] = raw
+        elif raw == prev:
+            pass  # confirm
+        elif len(history) >= HYSTERESIS and all(h == raw for h in history):
+            _CACHE['regime'] = raw  # flip
+        # else: keep previous regime (hysteresis active)
+        
+        _CACHE['ts'] = now
+        _CACHE['history'] = history
+        _CACHE['btc_dist'] = round(dist*100, 2)
+        _CACHE['btc_vol'] = round(vol*100, 3)
+        return _CACHE['regime']
+    
+    except Exception as e:
+        return _CACHE.get('regime')  # silent fallback to last known
 
-def get_risk_mult():
-    with _LOCK:
-        if time.time() - _state['ts'] > REFRESH_SEC:
-            threading.Thread(target=refresh, daemon=True).start()
-        return _state['risk_mult']
+def status():
+    """Return full regime status for /regime endpoint."""
+    return {
+        'current_regime': _CACHE.get('regime'),
+        'last_check_age_sec': int(time.time() - _CACHE.get('ts', 0)) if _CACHE.get('ts') else None,
+        'btc_dist_from_ema9_pct': _CACHE.get('btc_dist'),
+        'btc_vol_pct': _CACHE.get('btc_vol'),
+        'recent_history': _CACHE.get('history', []),
+        'vol_median_split': VOL_MEDIAN,
+        'trend_buffer_pct': TREND_BUFFER * 100,
+        'hysteresis_bars': HYSTERESIS,
+    }

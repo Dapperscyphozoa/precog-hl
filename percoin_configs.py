@@ -191,7 +191,30 @@ def is_elite(coin):
     return get_tier(coin) is not None
 
 def get_config(coin):
-    """Return per-coin config dict."""
+    """Return per-coin config dict, regime-aware if regime detector loaded.
+    
+    Tries regime-tuned config first (if regime_configs + regime_detector available),
+    falls back to base PURE_14/NINETY_99/EIGHTY_89/SEVENTY_79 config."""
+    # Try regime-aware first
+    try:
+        import regime_detector
+        import regime_configs
+        regime = regime_detector.get_regime()
+        if regime:
+            cfg, _ = regime_configs.get_config_with_fallback(coin, regime)
+            if cfg: return cfg
+    except Exception:
+        pass  # silent fallback to base config
+    
+    # Base config fallback
+    if coin in PURE_14: return PURE_14[coin]
+    if coin in NINETY_99: return NINETY_99[coin]
+    if coin in EIGHTY_89: return EIGHTY_89[coin]
+    if coin in SEVENTY_79: return SEVENTY_79[coin]
+    return None
+
+def get_config_static(coin):
+    """Original static config lookup (no regime). Used by tuner and OOS scripts."""
     if coin in PURE_14: return PURE_14[coin]
     if coin in NINETY_99: return NINETY_99[coin]
     if coin in EIGHTY_89: return EIGHTY_89[coin]
