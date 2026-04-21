@@ -2708,10 +2708,13 @@ def main():
                                              'stage':'initial', 'peak':entry_px}
                     log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
 
-            # DUST-SWEEP: close any position with |PnL| <= $0.10 to free margin for higher-tier signals
-            # Rationale: holding a flat position occupies margin without generating edge.
+            # DUST-SWEEP: close STALE positions (>30min old) with |PnL| <= $0.10 to free margin.
+            # Rationale: dust-sweep was killing fresh trades before they could develop edge.
+            # Only sweep positions that have had time to work and are going nowhere.
             # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
             DUST_THRESHOLD = 0.10  # $0.10
+            DUST_MIN_AGE_SEC = 1800  # 30 min — fresh positions get time to reach TP
+            now_ts = time.time()
             swept = 0
             for k in list(live_positions.keys()):
                 try:
@@ -2721,13 +2724,18 @@ def main():
                     if sz == 0 or not entry: continue
                     pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
                     if pos_tier == 'PURE': continue  # don't sweep 100% WR coins
+                    # Age gate — don't kill fresh trades (let them hit TP)
+                    pos_state = state.get('positions', {}).get(k, {})
+                    opened_at = pos_state.get('opened_at', now_ts)
+                    age_sec = now_ts - opened_at
+                    if age_sec < DUST_MIN_AGE_SEC: continue  # too fresh, let it work
                     # Use HL's reported PnL directly (no get_mid 429 issues)
                     unrealized_usd = lp.get('pnl', 0)
                     if abs(unrealized_usd) <= DUST_THRESHOLD:
                         notional = abs(sz) * entry
                         try:
                             pnl = close(k)
-                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} notional=${notional:.0f} (freeing margin)")
+                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
                             state['positions'].pop(k, None)
                             if pnl is not None:
                                 state['last_pnl_close'] = pnl
@@ -2737,7 +2745,7 @@ def main():
                             log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
-            if swept: log(f"DUST-SWEEP: closed {swept} positions (|PnL|<=${DUST_THRESHOLD:.2f})")
+            if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=${DUST_THRESHOLD:.2f}, age>={DUST_MIN_AGE_SEC/60:.0f}min)")
 
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
