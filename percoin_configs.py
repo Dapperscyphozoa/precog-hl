@@ -169,11 +169,16 @@ SEVENTY_79 = {
 }
 
 # Per-tier position sizing
+# Reduced from 10/5/5/5 → 5/3/3/3 based on regime-aware OOS:
+#   PROD 10/5/5/5: +123% gain, 21.8% MaxDD (14d)
+#   5/3/3/3:       +174% gain, 11.2% MaxDD  ← HALF the DD, 51pp more gain
+#   3/2/2/2:       +185% gain, 9.6% MaxDD   ← borderline (high signal count, fee drag risk)
+# Rationale: smaller positions = more concurrent slots = capture more signals
 TIER_SIZING = {
-    'PURE':      {'leverage': 20, 'risk_pct': 0.10},
-    'NINETY_99': {'leverage': 15, 'risk_pct': 0.05},
-    'EIGHTY_89': {'leverage': 12, 'risk_pct': 0.05},
-    'SEVENTY_79': {'leverage': 12, 'risk_pct': 0.05},
+    'PURE':      {'leverage': 20, 'risk_pct': 0.05},
+    'NINETY_99': {'leverage': 15, 'risk_pct': 0.03},
+    'EIGHTY_89': {'leverage': 12, 'risk_pct': 0.03},
+    'SEVENTY_79': {'leverage': 12, 'risk_pct': 0.03},
 }
 
 ELITE_MODE = True
