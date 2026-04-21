@@ -24,7 +24,8 @@ extern int    MaxPos           = 10;
 extern int    MagicNum         = 20260416;
 extern int    Slippage         = 30;
 extern string SymFilter        = ".a";
-extern double TP_Pct           = 0.0;    // set 0 to disable (use trail instead)
+extern double TP_Pct           = 0.0;    // legacy; hard-close at this %. 0 = disabled
+extern double TP_Pct_Default   = 2.0;    // v5.13: TP lock floor. Price hits this -> SL moves to TP, trail runs above.
 extern double SL_Pct_Default   = 1.4;    // fallback if signal has no sl_pct
 extern bool   UseTrailingStop  = true;
 extern double Trail_Activate_Default = 0.4;
@@ -161,6 +162,8 @@ double GetTicketParam(int ticket, string field, double def_val) {
 }
 void DeleteTicketParams(int ticket) {
    GlobalVariableDel("PM_" + IntegerToString(ticket) + "_trail_act");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_tp_pct");
+   GlobalVariableDel("PM_" + IntegerToString(ticket) + "_tp_locked");
    GlobalVariableDel("PM_" + IntegerToString(ticket) + "_trail_dist");
    GlobalVariableDel("PM_" + IntegerToString(ticket) + "_sl_pct");
    GlobalVariableDel("PM_" + IntegerToString(ticket) + "_peak_pct");
@@ -273,6 +276,8 @@ void PollDynaPro() {
    if (sig_maxslip <= 0) sig_maxslip = 0.3;
    double sig_maxspread = ExtractJSONNum(body, "max_spread_pct");
    if (sig_maxspread <= 0) sig_maxspread = MaxSpreadPctDefault;
+   double sig_tp_pct = ExtractJSONNum(body, "tp_pct");
+   if (sig_tp_pct <= 0) sig_tp_pct = TP_Pct_Default;
 
    // v5.1: spread gate -- reject if broker spread too wide
    if (!SpreadOK(sym, sig_maxspread)) return;
@@ -403,6 +408,8 @@ void PollDynaPro() {
    // Store per-ticket params for trail logic
    if (ticket > 0) {
       SetTicketParam(ticket, "trail_act", sig_trail_a);
+      SetTicketParam(ticket, "tp_pct", sig_tp_pct);
+      SetTicketParam(ticket, "tp_locked", 0);
       SetTicketParam(ticket, "sl_pct", sig_sl);
       SetTicketParam(ticket, "trail_dist", sig_trail_d);
       SetTicketParam(ticket, "sl_pct", sig_sl);
@@ -559,22 +566,45 @@ void ManagePositions() {
       double t_cut_h    = GetTicketParam(tk, "time_cut_h", 0);
       double entry_time = GetTicketParam(tk, "entry_time", TimeCurrent());
 
-      // Update peak
+      // v5.13: TP LOCK — price hits tp_pct -> floor SL at TP, trail runs above.
+      // Exit triggers at max(tp_floor, peak - trail_dist). Profit locked, upside captured.
+      double tp_pct    = GetTicketParam(tk, "tp_pct", 0);
+      double tp_locked = GetTicketParam(tk, "tp_locked", 0);
+
+      // Lock the floor once TP is hit
+      if (tp_pct > 0 && tp_locked < 1 && pnl_pct >= tp_pct) {
+         tp_locked = 1;
+         SetTicketParam(tk, "tp_locked", 1);
+         // Floor active_trail at TP
+         if (active_t < tp_pct) {
+            active_t = tp_pct;
+            SetTicketParam(tk, "active_trail", active_t);
+         }
+         Print("TP LOCKED ", sym, " floor=+", DoubleToStr(tp_pct,2), "% pnl=+", DoubleToStr(pnl_pct,2), "% ticket=", tk);
+      }
+
+      // Update peak + dynamic trail
       if (pnl_pct > peak_pct) {
          peak_pct = pnl_pct;
          SetTicketParam(tk, "peak_pct", peak_pct);
          if (UseTrailingStop && peak_pct >= trail_act) {
-            active_t = peak_pct - trail_dist;
-            SetTicketParam(tk, "active_trail", active_t);
+            double new_trail = peak_pct - trail_dist;
+            // Floor at TP once locked — never lower than TP
+            if (tp_locked >= 1 && new_trail < tp_pct) new_trail = tp_pct;
+            if (new_trail > active_t) {
+               active_t = new_trail;
+               SetTicketParam(tk, "active_trail", active_t);
+            }
          }
       }
 
-      // Trail exit
+      // Trail/lock exit — fires when price falls to active_trail
       if (UseTrailingStop && active_t > -999 && pnl_pct <= active_t) {
          bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrGold);
          if (ok) {
-            Print("TRAIL EXIT ", sym, " peak=+", DoubleToStr(peak_pct,2), "% exit=+", DoubleToStr(pnl_pct,2), "% ticket=", tk);
-            ReportExit(sym, "TRAIL", entry, peak_pct, pnl_pct, tk);
+            string exit_kind = (tp_locked >= 1) ? "TP_LOCK" : "TRAIL";
+            Print(exit_kind, " EXIT ", sym, " peak=+", DoubleToStr(peak_pct,2), "% exit=+", DoubleToStr(pnl_pct,2), "% ticket=", tk);
+            ReportExit(sym, exit_kind, entry, peak_pct, pnl_pct, tk);
             DeleteTicketParams(tk);
          } else {
             Print("TRAIL close fail ", sym, " err=", GetLastError());
@@ -595,11 +625,11 @@ void ManagePositions() {
          }
       }
 
-      // Optional TP
+      // v5.13: legacy TP hard-close (only if TP_Pct>0; new flow uses tp_pct lock above)
       if (TP_Pct > 0 && pnl_pct >= TP_Pct) {
          bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrGold);
          if (ok) {
-            Print("TP EXIT ", sym, " +", DoubleToStr(pnl_pct,2), "% ticket=", tk);
+            Print("TP HARD EXIT ", sym, " +", DoubleToStr(pnl_pct,2), "% ticket=", tk);
             ReportExit(sym, "TP", entry, peak_pct, pnl_pct, tk);
             DeleteTicketParams(tk);
          }
