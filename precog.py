@@ -1918,7 +1918,7 @@ SP['rsi_hi'] = 70  # tight: quality over quantity in chop
 BP['rsi_lo'] = 35
 
 
-INITIAL_RISK_PCT = 0.02  # halved: 2x position slots      # 4% — aggressive (tuner-validated 68% WR)
+INITIAL_RISK_PCT = 0.03  # DIAL MODE: 1.5x base. Conf multiplier 0.2x-5.0x. Max conf = 15% equity at SL (hard cap).
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10

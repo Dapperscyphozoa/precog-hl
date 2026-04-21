@@ -121,8 +121,15 @@ def _rsi(c, p=14):
     return 100 - 100 / (1 + ag / np.where(al == 0, 1e-10, al))
 
 def size_multiplier(score_val):
-    """Map confidence score to position size multiplier."""
-    if score_val >= 70: return 2.0
-    if score_val >= 50: return 1.5
-    if score_val >= 30: return 1.0
-    return 0.5
+    """DIAL MODE: extreme size divergence by conviction.
+    <30:  0.2x (tiny probe — fees bigger than trade, barely participates)
+    30-49: 0.5x (small)
+    50-64: 1.5x (meaningful)
+    65-79: 3.0x (big — this is the bread and butter)
+    80+:   5.0x (conviction max — rare, huge)
+    Average effective size around 1.0-1.5x across distribution, but winners much bigger."""
+    if score_val < 30: return 0.2
+    if score_val < 50: return 0.5
+    if score_val < 65: return 1.5
+    if score_val < 80: return 3.0
+    return 5.0
