@@ -183,23 +183,27 @@ _pb_cache = {}  # {ticker: (ts, candles_5m)}
 _pb_ttl = 180  # 3min cache
 MT4_PULLBACK_ENABLED = os.environ.get('MT4_PULLBACK_ENABLED', 'true').lower() == 'true'
 PB_EMA = 20
-PB_PROXIMITY = 0.005   # within 0.5% of 1h EMA20 (wider than HL because spreads)
+PB_PROXIMITY = 0.015   # within 1.5% of 1h EMA20 (1h candles wider than 5m)
 PB_RSI_HI = 60         # BUY: RSI < this
 PB_RSI_LO = 40         # SELL: RSI > this
 
-def _fetch_5m_candles(clean_ticker):
-    """Fetch last ~2 days of 5m candles from Yahoo. Returns list of (ts,o,h,l,c) or None."""
-    YMAP = {
-        'XAUUSD':'GC=F','XAGUSD':'SI=F','XPTUSD':'PL=F','XPDUSD':'PA=F',
-        'SPOTCRUDE':'CL=F','SPOTBRENT':'BZ=F','NATGAS':'NG=F','COPPER':'HG=F',
-        'CORN':'ZC=F','WHEAT':'ZW=F','SOYBEANS':'ZS=F','SUGAR':'SB=F','COFFEE':'KC=F',
-        'US30':'^DJI','US500':'^GSPC','NAS100':'^NDX','US2000':'^RUT',
-        'GER40':'^GDAXI','UK100':'^FTSE','JPN225':'^N225','HK50':'^HSI',
-        'VIX':'^VIX','USDX':'DX-Y.NYB',
-    }
-    ysym = YMAP.get(clean_ticker)
+_YMAP_PB = {
+    'XAUUSD':'GC=F','XAGUSD':'SI=F','XPTUSD':'PL=F','XPDUSD':'PA=F',
+    'SPOTCRUDE':'CL=F','SPOTBRENT':'BZ=F','NATGAS':'NG=F','COPPER':'HG=F',
+    'CORN':'ZC=F','WHEAT':'ZW=F','SOYBEANS':'ZS=F','SUGAR':'SB=F','COFFEE':'KC=F',
+    'US30':'^DJI','US500':'^GSPC','NAS100':'^NDX','US2000':'^RUT',
+    'GER40':'^GDAXI','UK100':'^FTSE','JPN225':'^N225','HK50':'^HSI',
+    'VIX':'^VIX','USDX':'DX-Y.NYB',
+}
+
+def _fetch_pb_candles(clean_ticker):
+    """Fetch 1h candles from Yahoo (7 days, always enough for EMA20).
+    Returns list of (ts_ms, o, h, l, c) or None.
+    NOTE: switched from 5m to 1h because Yahoo 5m is sparse over weekends/gaps,
+    and EMA20 on 1h is what pullback_signal actually needs anyway.
+    """
+    ysym = _YMAP_PB.get(clean_ticker)
     if not ysym:
-        # Standard FX
         if len(clean_ticker) == 6 and clean_ticker.isalpha():
             ysym = f"{clean_ticker}=X"
         else:
@@ -211,8 +215,8 @@ def _fetch_5m_candles(clean_ticker):
     try:
         import urllib.request as _ur
         end_ts = int(now)
-        start_ts = end_ts - 86400 * 3  # 3 days — enough for EMA20 on 1h
-        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ysym}?period1={start_ts}&period2={end_ts}&interval=5m'
+        start_ts = end_ts - 86400 * 7  # 7 days — robust across weekends
+        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ysym}?period1={start_ts}&period2={end_ts}&interval=1h'
         req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0'})
         data = _json.loads(_ur.urlopen(req, timeout=5).read())
         r = data['chart']['result'][0]
@@ -222,57 +226,51 @@ def _fetch_5m_candles(clean_ticker):
         for i, t in enumerate(ts_arr):
             c = q['close'][i] if i < len(q.get('close',[])) else None
             if c is None: continue
-            o = q['open'][i] or c
-            h = q['high'][i] or c
-            l = q['low'][i] or c
+            o = q['open'][i] if q.get('open') and q['open'][i] is not None else c
+            h = q['high'][i] if q.get('high') and q['high'][i] is not None else c
+            l = q['low'][i]  if q.get('low')  and q['low'][i]  is not None else c
             candles.append((t*1000, o, h, l, c))
-        if len(candles) > 50:
+        if len(candles) >= 25:
             _pb_cache[clean_ticker] = (now, candles)
             return candles
+        return None
     except Exception as _e:
         return None
-    return None
 
 def _mt4_pullback_check(clean_ticker, direction):
-    """Returns (passed: bool, reason: str, meta: dict). Non-blocking on data fetch fail."""
+    """Returns (passed: bool, reason: str, meta: dict). Non-blocking on data fetch fail.
+    Uses 1h candles directly (v4.11). Computes EMA20 + RSI14 on 1h close."""
     if not MT4_PULLBACK_ENABLED: return True, 'pullback_disabled', {}
-    candles5 = _fetch_5m_candles(clean_ticker)
-    if not candles5 or len(candles5) < 100:
-        return True, 'no_candles', {}  # fail open
-    # Resample last N 5m bars to 1h (groups of 12)
-    n1h = len(candles5) // 12
-    if n1h < PB_EMA + 3: return True, 'insufficient_1h', {}
-    c1h = []
-    for i in range(n1h):
-        g = candles5[i*12:(i+1)*12]
-        if g: c1h.append(g[-1][4])
+    candles = _fetch_pb_candles(clean_ticker)
+    if not candles or len(candles) < PB_EMA + 3:
+        return True, f'no_candles (got {len(candles) if candles else 0})', {'candles': len(candles) if candles else 0}
+    closes = [c[4] for c in candles]
     # 1H EMA20
     k = 2 / (PB_EMA + 1)
-    ema1h = sum(c1h[:PB_EMA]) / PB_EMA
-    for cv in c1h[PB_EMA:]:
-        ema1h = cv*k + ema1h*(1-k)
-    last_c = candles5[-1][4]
-    if ema1h <= 0: return True, 'bad_ema', {}
-    dist = abs(last_c - ema1h) / ema1h
-    # RSI(14) on 5m
-    closes = [b[4] for b in candles5]
+    ema = sum(closes[:PB_EMA]) / PB_EMA
+    for cv in closes[PB_EMA:]:
+        ema = cv*k + ema*(1-k)
+    last_c = closes[-1]
+    if ema <= 0: return True, 'bad_ema', {}
+    dist = abs(last_c - ema) / ema
+    # RSI(14) on 1h close
     gains=[]; losses=[]
     for i in range(1, len(closes)):
         d = closes[i]-closes[i-1]
         gains.append(max(d,0)); losses.append(max(-d,0))
     pp = 14
-    if len(gains) < pp: return True, 'insufficient_rsi', {}
+    if len(gains) < pp: return True, 'insufficient_rsi', {'candles': len(candles)}
     ag = sum(gains[:pp])/pp; al = sum(losses[:pp])/pp
     for i in range(pp, len(gains)):
         ag = (ag*(pp-1)+gains[i])/pp
         al = (al*(pp-1)+losses[i])/pp
     rs = ag/al if al > 0 else 999
     rsi = 100 - 100/(1+rs)
-    meta = {'dist_ema_pct': round(dist*100, 3), 'rsi5m': round(rsi, 1), 'ema1h': round(ema1h, 5), 'price': round(last_c, 5)}
+    meta = {'dist_ema_pct': round(dist*100, 3), 'rsi1h': round(rsi, 1), 'ema1h': round(ema, 5), 'price': round(last_c, 5), 'candles': len(candles)}
     # Proximity check
     if dist > PB_PROXIMITY:
         return False, f'PB_FAR ({dist*100:.2f}% from EMA20, limit {PB_PROXIMITY*100:.1f}%)', meta
-    # RSI cool check
+    # RSI cool check  
     if direction == 'BUY' and rsi >= PB_RSI_HI:
         return False, f'PB_RSI_HOT ({rsi:.0f} >= {PB_RSI_HI})', meta
     if direction == 'SELL' and rsi <= PB_RSI_LO:
@@ -303,8 +301,10 @@ OANDA_PAIRS = {
 }
 
 def _fetch_oanda_sentiment(clean_ticker):
-    """Fetch OANDA open positions ratio. Returns (long_pct, short_pct) or None.
-    Uses OANDA fxlabs historical position ratios endpoint (public/no auth needed)."""
+    """Fetch retail sentiment. Returns (long_pct, short_pct) or None.
+    Uses ForexFactory-style public sentiment via MyFXBook community outlook HTML scrape.
+    Falls back to None (neutral) on any failure — never blocks trades.
+    """
     pair = OANDA_PAIRS.get(clean_ticker)
     if not pair: return None
     now = time.time()
@@ -313,22 +313,27 @@ def _fetch_oanda_sentiment(clean_ticker):
         return cached[1]
     try:
         import urllib.request as _ur
-        url = f'https://www.myfxbook.com/community/outlook/{pair.replace("_","")}'
-        # MyFXBook's public sentiment scraping is unreliable; fall back to OANDA labs
-        # OANDA requires auth for API. Use FXBlue free endpoint as proxy.
-        url = f'https://api.fxblue.com/profiles/live/ratios?format=json&symbol={pair.replace("_","")}'
-        req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0','Accept':'application/json'})
+        import re as _re
+        # MyFXBook community outlook page - parse HTML for long/short percentages
+        pair_url = pair.replace("_","")  # EUR_USD → EURUSD
+        url = f'https://www.myfxbook.com/community/outlook/{pair_url}'
+        req = _ur.Request(url, headers={
+            'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Accept':'text/html',
+        })
         resp = _ur.urlopen(req, timeout=4)
-        data = _json.loads(resp.read())
-        long_pct = None; short_pct = None
-        if isinstance(data, dict):
-            long_pct = data.get('long_percent') or data.get('longPct') or data.get('longs')
-            short_pct = data.get('short_percent') or data.get('shortPct') or data.get('shorts')
-        if long_pct is None or short_pct is None:
-            return None
-        result = (float(long_pct), float(short_pct))
-        _oanda_cache[pair] = (now, result)
-        return result
+        html = resp.read().decode('utf-8', errors='ignore')
+        # Parse "Short 65% / Long 35%" patterns from the outlook page
+        m_short = _re.search(r'Short[^\d]*(\d+)\s*%', html)
+        m_long  = _re.search(r'Long[^\d]*(\d+)\s*%', html)
+        if m_short and m_long:
+            long_pct = float(m_long.group(1))
+            short_pct = float(m_short.group(1))
+            if 0 < long_pct < 100 and 0 < short_pct < 100:
+                result = (long_pct, short_pct)
+                _oanda_cache[pair] = (now, result)
+                return result
+        return None
     except Exception:
         return None
 
