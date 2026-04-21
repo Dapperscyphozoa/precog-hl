@@ -1126,6 +1126,11 @@ def health():
     eq = 0
     try: eq = get_balance()
     except Exception: pass
+    cur_regime = None
+    try:
+        import regime_detector
+        cur_regime = regime_detector.get_regime()
+    except Exception: pass
     return jsonify({'status':'ok','version':'v8.28','equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -1133,7 +1138,22 @@ def health():
                     'risk':INITIAL_RISK_PCT,
                     'trail':TRAIL_PCT,
                     'gates_loaded':len(TICKER_GATES),
+                    'regime':cur_regime,
                     'recent_logs':LOG_BUFFER[-20:]})
+
+@app.route('/regime', methods=['GET'])
+def regime_status():
+    """Return current regime detector state + per-coin coverage."""
+    try:
+        import regime_detector
+        import regime_configs
+        return jsonify({
+            'detector': regime_detector.status(),
+            'config_coverage': regime_configs.coverage_stats(),
+            'total_coins_with_regime_configs': len(regime_configs.REGIME_CONFIGS),
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 LOG_BUFFER = []
 
