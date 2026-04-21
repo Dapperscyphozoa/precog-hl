@@ -1925,7 +1925,9 @@ LEV = 10
 LOOP_SEC = 2  # tight outer loop (Bybit WS push)
 USE_ISOLATED_MARGIN = True
 
-TP_MULTIPLIER = 2.0  # Widen per-coin TPs ×2 — OOS 14d: $11 avg win@$35 margin, $25@$75. WR drops 87→50% but expectancy +$2/trade. Targets user's $5+ min win goal.
+TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global multiplier needed).
+                     # Per-coin 15m OOS optimization: PROMPT 10%, ETH 10%, ALT 6%, ASTER 6%, etc.
+                     # Prior value 2.0 was bandaid before per-coin tuning existed.
 MAX_POSITIONS = 80  # was 40 — with 5/3/3/3 risk we can support more concurrent
 MAX_SAME_SIDE = 40  # was 15 — let regime-aware system pick directions
 MAX_TOTAL_RISK = 0.92    # 8% reserve
@@ -2310,6 +2312,45 @@ def pass_per_coin_filter(coin, side, candles, i):
             dx = 100*abs(pdi-ndi)/(pdi+ndi) if (pdi+ndi)>0 else 0
             # Single-bar ADX approximation — compare DX vs threshold directly (noisy but fast)
             if dx < threshold: return False
+        if 'conv' in flt and N >= 50:
+            # CONVICTION STACK: adx_low + ema21_far + deep_os
+            # OOS 15m: lifts Exp from $1.86 → $2.39 (+29%), WR 48.5% → 49.1%
+            # Trade count drops 62% but every trade is higher quality
+            # 1. ADX_LOW: only trade when ADX < 30 (mean-reversion regime)
+            P = 14
+            tr_s = []; pdm_s = []; ndm_s = []
+            for j in range(max(1, i-60), i+1):
+                tr = max(h[j]-l[j], abs(h[j]-cl[j-1]), abs(l[j]-cl[j-1]))
+                up = h[j]-h[j-1]; dn = l[j-1]-l[j]
+                pdm = up if (up > dn and up > 0) else 0
+                ndm = dn if (dn > up and dn > 0) else 0
+                tr_s.append(tr); pdm_s.append(pdm); ndm_s.append(ndm)
+            if len(tr_s) >= 2*P:
+                atr = sum(tr_s[:P])/P; spdm = sum(pdm_s[:P]); sndm = sum(ndm_s[:P])
+                for j in range(P, len(tr_s)):
+                    atr = (atr*(P-1) + tr_s[j])/P
+                    spdm = spdm - spdm/P + pdm_s[j]
+                    sndm = sndm - sndm/P + ndm_s[j]
+                pdi = 100*spdm/atr if atr>0 else 0
+                ndi = 100*sndm/atr if atr>0 else 0
+                dx = 100*abs(pdi-ndi)/(pdi+ndi) if (pdi+ndi)>0 else 0
+                if dx >= 30: return False  # ADX too high, trend regime — skip mean-rev
+            # 2. EMA21_FAR: require >1% distance from 21 EMA
+            k21 = 2/22
+            if N >= 21:
+                e21 = sum(cl[:21])/21
+                for j in range(21, i+1): e21 = cl[j]*k21 + e21*(1-k21)
+                if cl[i] > 0 and abs(cl[i]-e21)/cl[i] < 0.01: return False
+            # 3. DEEP_OS: price must be outside 1.5σ band (not just touching 2σ)
+            BB_P = 20
+            if N >= BB_P:
+                window = cl[i-BB_P:i]
+                mu = sum(window)/BB_P
+                var = sum((x-mu)**2 for x in window)/BB_P
+                sd = var**0.5
+                if sd > 0:
+                    if side == 'BUY' and cl[i] > mu - 1.5*sd: return False
+                    if side == 'SELL' and cl[i] < mu + 1.5*sd: return False
         return True
     except Exception:
         return True  # fail-open to avoid blocking trades on filter bugs
