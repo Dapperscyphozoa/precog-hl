@@ -11,7 +11,7 @@ import os
 import time
 import json
 
-from . import bounds, db
+from . import bounds, db, kb
 
 MIN_CONFIDENCE = float(os.environ.get('POSTMORTEM_MIN_CONFIDENCE', '0.55'))
 DRY_RUN = os.environ.get('POSTMORTEM_DRY_RUN', '0') == '1'
@@ -127,4 +127,22 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
         )
         vetos_applied += 1
 
-    return applied_count + vetos_applied
+    # Write KB entries from synthesizer — semantic memory for entry gate
+    kb_written = 0
+    side = trade.get('side')
+    for entry in synthesis.get('kb_entries', []) or []:
+        pk = (entry.get('pattern_key') or '').strip()
+        summary = (entry.get('summary') or '').strip()
+        if not pk or not summary: continue
+        # Guardrails on pattern_key length and summary length
+        if len(pk) > 120: pk = pk[:120]
+        if len(summary) > 400: summary = summary[:400]
+        evidence = entry.get('evidence') or {}
+        # Ensure evidence references the log for traceability
+        evidence['log_id'] = log_id
+        evidence['root_cause'] = synthesis.get('root_cause', '')[:300]
+        if kb.write_entry(coin=coin, side=side, pattern_key=pk,
+                          summary=summary, evidence=evidence, log_id=log_id):
+            kb_written += 1
+
+    return applied_count + vetos_applied + kb_written

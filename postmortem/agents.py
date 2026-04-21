@@ -272,16 +272,29 @@ Your job:
    - APPROVE: delta is supported by the findings and not contradicted by other agents.
    - REJECT: delta would move the system in a direction contradicted by other agents.
    - DEFER: insufficient evidence, wait for more samples.
+3. Propose knowledge-base entries that capture transferable patterns. Each entry
+   has a pattern_key (how the entry will be retrieved) and a summary (what to remember).
 
-Output JSON:
+Pattern_key formats you may use:
+   "{coin}:{side}"                           — coin+side baseline
+   "{coin}:{side}:regime={regime}"           — regime-specific (squeeze/neg_funding/high_vol/...)
+   "{coin}:{side}:session={session}"         — session-specific (asian/london/ny/...)
+   "{coin}:{side}:engine={engine}"           — engine-specific (PIVOT/BB_REJ/...)
+   "{coin}:{side}:funding={pos|neg|flat}"    — funding-state specific
+
+Summary should be <=200 chars, plain english, actionable. Example:
+   "LIT shorts during negative funding + BTC up-trend failed 3/3. OB was stale. Avoid
+    unless fresh OB within 10 bars."
+
+Output JSON only. No markdown fences. Exact shape:
 {
   "root_cause": "string",
   "decisions": [{"component": "...", "param": "...", "decision": "APPROVE|REJECT|DEFER",
                  "note": "..."}],
-  "new_vetos": [{"component": "...", "expires_in_sec": 43200, "reason": "..."}]
-}
-
-Pure JSON. No markdown fences.'''
+  "new_vetos": [{"component": "...", "expires_in_sec": 43200, "reason": "..."}],
+  "kb_entries": [{"pattern_key": "...", "summary": "...",
+                  "evidence": {"key": "value"}}]
+}'''
 
 
 def synthesize(trade, findings):
@@ -292,13 +305,18 @@ def synthesize(trade, findings):
 AGENT FINDINGS:
 {json.dumps(findings, indent=2, default=str)}
 
-Synthesize and decide.'''
-        text = _call_claude(_SYNTH_SYSTEM, prompt, model=_SYNTH_MODEL, max_tokens=1500)
-        return _parse_verdict(text) or {
-            'root_cause': 'synthesis parse failed', 'decisions': [], 'new_vetos': []
-        }
+Synthesize, decide tunings, and extract KB entries for future reference.'''
+        text = _call_claude(_SYNTH_SYSTEM, prompt, model=_SYNTH_MODEL, max_tokens=2000)
+        parsed = _parse_verdict(text)
+        if parsed:
+            # Normalize fields so callers never KeyError
+            parsed.setdefault('root_cause', '')
+            parsed.setdefault('decisions', [])
+            parsed.setdefault('new_vetos', [])
+            parsed.setdefault('kb_entries', [])
+            return parsed
+        return {'root_cause': 'synthesis parse failed', 'decisions': [],
+                'new_vetos': [], 'kb_entries': []}
     except Exception as e:
-        return {
-            'root_cause': f'synthesis error: {type(e).__name__}: {e}',
-            'decisions': [], 'new_vetos': [],
-        }
+        return {'root_cause': f'synthesis error: {type(e).__name__}: {e}',
+                'decisions': [], 'new_vetos': [], 'kb_entries': []}

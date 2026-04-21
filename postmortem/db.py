@@ -106,9 +106,25 @@ def init_db():
             agent_name   TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS kb_entries (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at        REAL NOT NULL,
+            updated_at        REAL NOT NULL,
+            coin              TEXT NOT NULL,
+            side              TEXT,
+            pattern_key       TEXT NOT NULL,
+            summary           TEXT NOT NULL,
+            evidence_json     TEXT,
+            reinforced_count  INTEGER DEFAULT 1,
+            weight            REAL DEFAULT 1.0,
+            last_log_id       INTEGER
+        );
+
         CREATE INDEX IF NOT EXISTS idx_pm_log_coin ON postmortem_log(coin, ts);
         CREATE INDEX IF NOT EXISTS idx_findings_log ON agent_findings(log_id);
         CREATE INDEX IF NOT EXISTS idx_history_coin ON param_history(coin, component, ts);
+        CREATE INDEX IF NOT EXISTS idx_kb_coin_side ON kb_entries(coin, side, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_kb_pattern ON kb_entries(pattern_key);
         ''')
         c.commit()
 

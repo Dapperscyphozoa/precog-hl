@@ -116,4 +116,49 @@ def register_endpoints(app):
     def pm_ping():
         return jsonify({'ok': True, 'ts': time.time(), 'module': 'postmortem'})
 
+    # ─────────────────────────────────────────────────────
+    # Knowledge base endpoints
+    # ─────────────────────────────────────────────────────
+    from . import kb, entry_gate
+
+    @app.route('/postmortem/kb', methods=['GET'])
+    def pm_kb():
+        coin = request.args.get('coin')
+        side = request.args.get('side')
+        limit = min(int(request.args.get('limit', 100)), 500)
+        return jsonify({'entries': kb.list_entries(coin=coin, side=side, limit=limit)})
+
+    @app.route('/postmortem/kb/<int:entry_id>', methods=['DELETE'])
+    def pm_kb_delete(entry_id):
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        return jsonify({'ok': kb.delete_entry(entry_id)})
+
+    @app.route('/postmortem/kb/reset/<coin>', methods=['POST'])
+    def pm_kb_reset(coin):
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        return jsonify({'ok': kb.reset_coin(coin)})
+
+    @app.route('/postmortem/gate/test', methods=['POST'])
+    def pm_gate_test():
+        """Diagnostic: run the entry gate with a supplied signal_ctx, don't trade.
+        Useful for verifying gate logic before enabling in process()."""
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        d = request.get_json(silent=True) or {}
+        coin = d.get('coin'); side = d.get('side')
+        if not coin or side not in ('BUY', 'SELL'):
+            return jsonify({'ok': False, 'err': 'coin+side required'}), 400
+        verdict = entry_gate.evaluate_entry(coin, side, d.get('signal_ctx') or {})
+        return jsonify({'ok': True, 'coin': coin, 'side': side, 'verdict': verdict})
+
+    @app.route('/postmortem/gate/clear-cache', methods=['POST'])
+    def pm_gate_clear():
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        coin = (request.get_json(silent=True) or {}).get('coin')
+        entry_gate.clear_cache(coin)
+        return jsonify({'ok': True, 'coin': coin or 'all'})
+
     return app
