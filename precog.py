@@ -497,6 +497,17 @@ def _mt4_sentiment_mult(clean_ticker, direction):
     return 1.0
 
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
+# v4.15: live PnL feedback from EA v5 trade-closed reports
+MT4_CLOSED_RING = []
+MT4_LIVE_STATS = {}
+MT4_TICKET_META = {}
+try:
+    import os as _os_stats
+    if _os_stats.path.exists('/var/data/mt4_stats.json'):
+        with open('/var/data/mt4_stats.json') as _f:
+            _saved = _json.load(_f)
+            MT4_LIVE_STATS = _saved.get('stats', {})
+except Exception: pass
 MT4_BIAS = {'direction': '', 'ts': 0}
 
 # --- MT4 queue persistence (HL-isolated; writes /var/data/mt4_queue.json) ---
@@ -1404,46 +1415,137 @@ def mt4_flatten_ack():
     MT4_FLATTEN_FLAG = {'pending': False, 'ts': time.time(), 'reason': ''}
     return jsonify({'status': 'acked'})
 
-@app.route('/mt4/trade-closed', methods=['POST'])
-def mt4_trade_closed():
-    """EA reports trail-stop exits. Server computes fib 0.382 retest zone and queues a LIMIT re-entry."""
+@app.route('/mt4/trade-opened', methods=['POST'])
+def mt4_trade_opened():
+    """EA v5.1 reports OrderSend success so server tracks direction per ticket."""
     try:
         d = flask_request.get_json(force=True, silent=True) or {}
-        ticket = d.get('ticket')
+        ticket = int(d.get('ticket', 0))
         symbol = (d.get('symbol') or '').replace('.a', '').upper()
         side = (d.get('side') or '').upper()
         entry = float(d.get('entry', 0))
+        lots = float(d.get('lots', 0))
+        if ticket <= 0: return jsonify({'ok': False, 'err':'no_ticket'}), 200
+        MT4_TICKET_META[ticket] = {
+            'direction': side, 'entry_ts': time.time(),
+            'symbol': symbol, 'entry': entry, 'lots': lots,
+        }
+        cutoff = time.time() - 86400
+        stale = [t for t,m in MT4_TICKET_META.items() if m['entry_ts'] < cutoff]
+        for t in stale: MT4_TICKET_META.pop(t, None)
+        log(f"MT4 OPEN #{ticket} {side} {symbol} @ {entry} lots={lots}")
+        return jsonify({'ok': True})
+    except Exception as e:
+        log(f"MT4 trade-opened err: {e}")
+        return jsonify({'ok': False, 'err': str(e)}), 200
+
+@app.route('/mt4/trade-closed', methods=['POST'])
+def mt4_trade_closed():
+    """EA v5 reports every trade exit. Records PnL, rolls stats, queues retest if TRAIL."""
+    try:
+        d = flask_request.get_json(force=True, silent=True) or {}
+        ticket = int(d.get('ticket', 0))
+        symbol = (d.get('symbol') or '').replace('.a', '').upper()
+        exit_type = (d.get('exit_type') or '').upper()
+        entry = float(d.get('entry', 0))
         peak_pct = float(d.get('peak_pct', 0))
-        reason = d.get('reason', '')
-        if reason != 'TRAIL' or entry <= 0 or peak_pct <= 0:
-            return jsonify({'ok': False, 'err': 'not a valid trail exit'}), 200
-        # Fib 0.382 retrace from peak back toward entry
+        exit_pct = float(d.get('exit_pct', 0))
+        if entry <= 0:
+            return jsonify({'ok': False, 'err': 'no_entry'}), 200
+
+        rec_exit = {
+            'ts': time.time(), 'symbol': symbol, 'ticket': ticket,
+            'exit_type': exit_type, 'entry': entry,
+            'peak_pct': round(peak_pct, 3), 'exit_pct': round(exit_pct, 3),
+            'win': exit_pct > 0,
+        }
+        MT4_CLOSED_RING.append(rec_exit)
+        if len(MT4_CLOSED_RING) > 500:
+            MT4_CLOSED_RING[:] = MT4_CLOSED_RING[-500:]
+
+        ss = MT4_LIVE_STATS.setdefault(symbol, {'wins':0,'losses':0,'sum_pnl':0.0,'trades':0,'recent':[]})
+        ss['trades'] += 1
+        ss['sum_pnl'] += exit_pct
+        if exit_pct > 0: ss['wins'] += 1
+        else: ss['losses'] += 1
+        ss['recent'].append({'ts':rec_exit['ts'],'pnl':exit_pct,'exit_type':exit_type,'peak':peak_pct})
+        if len(ss['recent']) > 50:
+            ss['recent'] = ss['recent'][-50:]
+
+        try:
+            with open('/var/data/mt4_stats.json','w') as f:
+                _json.dump({'stats': MT4_LIVE_STATS, 'ring_len': len(MT4_CLOSED_RING)}, f, default=str)
+        except Exception: pass
+
+        outcome = 'WIN' if exit_pct > 0 else 'LOSS'
+        wr50 = sum(1 for r in ss['recent'] if r['pnl']>0) / max(1, len(ss['recent'])) * 100
+        log(f"MT4 CLOSE {symbol} #{ticket} {exit_type} peak={peak_pct:+.2f}% exit={exit_pct:+.2f}% {outcome} [n={ss['trades']} wr50={wr50:.0f}% totPnL={ss['sum_pnl']:+.2f}%]")
+
+        if exit_type != 'TRAIL' or peak_pct < 0.3:
+            return jsonify({'ok': True, 'recorded': True, 'retest': False})
+
+        side = MT4_TICKET_META.get(ticket, {}).get('direction')
+        if not side:
+            return jsonify({'ok': True, 'recorded': True, 'retest': False, 'note':'no_side'})
+
         if side == 'BUY':
             peak_price = entry * (1 + peak_pct / 100.0)
             retest = peak_price - (peak_price - entry) * 0.382
         else:
             peak_price = entry * (1 - peak_pct / 100.0)
             retest = peak_price + (entry - peak_price) * 0.382
+
         broker_sym = symbol + '.a'
         rec = {
-            'symbol': broker_sym,
-            'direction': side,
-            'price': round(retest, 5),
-            'type': 'LIMIT',
-            'ts': int(time.time() * 1000),
-            'ttl_sec': 1800,
-            'is_retest': True,
-            'origin_ticket': ticket,
-            'origin_entry': entry,
-            'origin_peak_pct': peak_pct,
+            'symbol': broker_sym, 'direction': side, 'price': round(retest, 5),
+            'type': 'LIMIT', 'ts': int(time.time() * 1000), 'ttl_sec': 1800,
+            'is_retest': True, 'origin_ticket': ticket,
+            'origin_entry': entry, 'origin_peak_pct': peak_pct,
         }
         global MT4_LATEST_SIGNAL
         MT4_LATEST_SIGNAL = rec
         log(f"MT4 RETEST QUEUED: {side} {broker_sym} retest={retest:.5f} (peak was {peak_pct:.2f}% from entry {entry})")
-        return jsonify({'ok': True, 'retest_price': retest, 'ttl_sec': 1800})
+        return jsonify({'ok': True, 'recorded': True, 'retest': True, 'retest_price': retest, 'ttl_sec': 1800})
     except Exception as e:
         log(f"MT4 trade-closed err: {e}")
         return jsonify({'ok': False, 'err': str(e)}), 200
+
+@app.route('/mt4/stats', methods=['GET'])
+def mt4_stats():
+    """Per-ticker live WR/PnL dashboard."""
+    out = {}
+    for sym, ss in MT4_LIVE_STATS.items():
+        recent = ss.get('recent', [])
+        wr_all = ss['wins'] / max(1, ss['trades']) * 100
+        wr50 = sum(1 for r in recent if r['pnl']>0) / max(1, len(recent)) * 100
+        avg_pnl = ss['sum_pnl'] / max(1, ss['trades'])
+        wins_pnl = sum(r['pnl'] for r in recent if r['pnl']>0)
+        losses_pnl = sum(r['pnl'] for r in recent if r['pnl']<=0)
+        pf = (wins_pnl / abs(losses_pnl)) if losses_pnl else 99.0
+        out[sym] = {
+            'trades': ss['trades'], 'wr_all_pct': round(wr_all, 1),
+            'wr_last50_pct': round(wr50, 1), 'avg_pnl_pct': round(avg_pnl, 3),
+            'total_pnl_pct': round(ss['sum_pnl'], 2), 'profit_factor': round(pf, 2),
+        }
+    sorted_out = dict(sorted(out.items(), key=lambda x: -x[1]['total_pnl_pct']))
+    return jsonify({'tickers': sorted_out, 'ring_len': len(MT4_CLOSED_RING),
+                    'total_closed': sum(s['trades'] for s in MT4_LIVE_STATS.values())})
+
+@app.route('/mt4/stats/summary', methods=['GET'])
+def mt4_stats_summary():
+    total = sum(s['trades'] for s in MT4_LIVE_STATS.values())
+    if total == 0:
+        return jsonify({'trades':0,'msg':'no closures yet'})
+    wins = sum(s['wins'] for s in MT4_LIVE_STATS.values())
+    tot_pnl = sum(s['sum_pnl'] for s in MT4_LIVE_STATS.values())
+    return jsonify({
+        'trades': total, 'wins': wins, 'losses': total - wins,
+        'wr_pct': round(wins / total * 100, 1),
+        'total_pnl_pct_sum': round(tot_pnl, 2),
+        'avg_pnl_pct': round(tot_pnl/total, 3),
+        'tickers_traded': len(MT4_LIVE_STATS),
+    })
+
 
 COINS = [
     'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
