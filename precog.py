@@ -38,6 +38,17 @@ import cvd_ws
 import oi_tracker
 import funding_arb
 
+# Post-mortem tuning engine (HL-only; MT4 close path does NOT call this).
+# Import is defensive: if the module or its deps are missing, the rest of
+# precog.py still runs. Every call site below is guarded.
+try:
+    import postmortem as _postmortem
+    _POSTMORTEM_OK = True
+except Exception as _e:
+    _postmortem = None
+    _POSTMORTEM_OK = False
+    print(f'[postmortem] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
 # ═══════════════════════════════════════════════════════
@@ -94,6 +105,17 @@ def record_close(pos, coin, pnl_pct, state):
     if win: stats['total_wins'] += 1
     else: stats['total_losses'] += 1
     stats['total_pnl'] += pnl_pct
+
+    # ─────────────────────────────────────────────────────
+    # POST-MORTEM TUNING — HL close path only.
+    # Fire-and-forget. Runs in daemon thread. Never blocks trading.
+    # MT4 closes go through mt4_trade_closed() which does NOT invoke this.
+    # ─────────────────────────────────────────────────────
+    if _POSTMORTEM_OK and _postmortem is not None:
+        try:
+            _postmortem.run_postmortem_async(pos, coin, pnl_pct)
+        except Exception as _e:
+            pass  # never let post-mortem crash the close path
 
 def wr_to_mult(wr, n, min_n=5):
     """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
@@ -972,6 +994,19 @@ def tv_to_hl(ticker):
     return remap.get(t, t)
 
 app = Flask(__name__)
+
+# Register post-mortem endpoints (no-op if module failed to import)
+if _POSTMORTEM_OK and _postmortem is not None:
+    try:
+        from postmortem.endpoints import register_endpoints as _pm_register
+        _pm_register(app)
+        # Also initialize DB eagerly so first close doesn't pay the cost
+        try:
+            _postmortem.init_db()
+        except Exception as _e:
+            print(f'[postmortem] db init deferred: {_e}', flush=True)
+    except Exception as _e:
+        print(f'[postmortem] endpoint registration failed (non-fatal): {_e}', flush=True)
 
 
 _LANDING_HTML = None
