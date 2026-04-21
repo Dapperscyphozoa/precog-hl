@@ -1272,6 +1272,20 @@ def close_all_positions():
     log(f"FORCE CLOSE ALL: {len(closed)} positions closed")
     return jsonify({'status':'closed_all','positions':closed})
 
+@app.route('/close/<coin>', methods=['GET', 'POST'])
+def close_one_position(coin):
+    """Force close a single coin. Requires ?secret="""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET: return jsonify({'err':'unauthorized'}), 401
+    coin = coin.upper()
+    try:
+        pnl = close(coin)
+        state = load_state()
+        state['positions'].pop(coin, None)
+        save_state(state)
+        return jsonify({'status':'closed','coin':coin,'pnl':pnl})
+    except Exception as e:
+        return jsonify({'status':'error','coin':coin,'error':str(e)}), 500
+
 @app.route('/transfer', methods=['POST'])
 def transfer_funds():
     """Transfer USDC internally on HL. POST {amount, to_wallet}"""
