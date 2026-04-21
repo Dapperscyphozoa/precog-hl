@@ -54,6 +54,31 @@ PURE_14 = {
     'UNI':       {'sigs':['PV'],'flt':'none','RH':75,'RL':25,'TP':0.006,'SL':0.05},  # 100% WR / 24 trades
     'WIF':       {'sigs':['PV','BB'],'flt':'ema200+adx20','RH':70,'RL':25,'TP':0.025,'SL':0.05},  # 100% WR / 5 trades
     'WLD':       {'sigs':['BB','IB'],'flt':'ema200+adx20','RH':70,'RL':25,'TP':0.01,'SL':0.05},  # 100% WR / 13 trades
+    'ANIME':     {'sigs':['PV','IB'],'flt':'adx25','RH':80,'RL':25,'TP':0.025,'SL':0.03},  # 100% WR / 14 trades
+    'APEX':      {'sigs':['IB'],'flt':'none','RH':65,'RL':20,'TP':0.015,'SL':0.05},  # 100% WR / 15 trades
+    'AXS':       {'sigs':['PV','BB'],'flt':'ema200','RH':70,'RL':30,'TP':0.01,'SL':0.05},  # 100% WR / 15 trades
+    'BCH':       {'sigs':['PV','IB'],'flt':'adx30','RH':70,'RL':30,'TP':0.005,'SL':0.05},  # 100% WR / 18 trades
+    'CC':        {'sigs':['PV'],'flt':'adx20','RH':75,'RL':25,'TP':0.007,'SL':0.05},  # 100% WR / 31 trades
+    'CELO':      {'sigs':['PV','IB'],'flt':'adx25','RH':80,'RL':25,'TP':0.007,'SL':0.05},  # 100% WR / 29 trades
+    'GMT':       {'sigs':['PV','BB'],'flt':'adx30','RH':75,'RL':30,'TP':0.007,'SL':0.05},  # 100% WR / 33 trades
+    'HEMI':      {'sigs':['BB','IB'],'flt':'none','RH':80,'RL':30,'TP':0.005,'SL':0.05},  # 100% WR / 54 trades
+    'INIT':      {'sigs':['PV','BB'],'flt':'ema200','RH':75,'RL':35,'TP':0.005,'SL':0.05},  # 100% WR / 20 trades
+    'KAS':       {'sigs':['PV'],'flt':'adx30','RH':80,'RL':35,'TP':0.007,'SL':0.05},  # 100% WR / 19 trades
+    'MANTA':     {'sigs':['PV','BB','IB'],'flt':'ema200','RH':65,'RL':35,'TP':0.007,'SL':0.05},  # 100% WR / 27 trades
+    'MET':       {'sigs':['PV','IB'],'flt':'ema200+adx25','RH':75,'RL':35,'TP':0.025,'SL':0.05},  # 100% WR / 9 trades
+    'NXPC':      {'sigs':['PV'],'flt':'adx30','RH':75,'RL':30,'TP':0.025,'SL':0.03},  # 100% WR / 12 trades
+    'POPCAT':    {'sigs':['BB'],'flt':'adx25','RH':80,'RL':30,'TP':0.025,'SL':0.05},  # 100% WR / 17 trades
+    'RESOLV':    {'sigs':['BB','IB'],'flt':'ema200','RH':65,'RL':35,'TP':0.007,'SL':0.05},  # 100% WR / 43 trades
+    'REZ':       {'sigs':['PV'],'flt':'none','RH':80,'RL':20,'TP':0.01,'SL':0.05},  # 100% WR / 17 trades
+    'RUNE':      {'sigs':['PV','BB','IB'],'flt':'adx25','RH':75,'RL':30,'TP':0.025,'SL':0.05},  # 100% WR / 12 trades
+    'SNX':       {'sigs':['PV'],'flt':'adx20','RH':80,'RL':25,'TP':0.01,'SL':0.05},  # 100% WR / 20 trades
+    'STABLE':    {'sigs':['PV','BB','IB'],'flt':'none','RH':65,'RL':25,'TP':0.01,'SL':0.05},  # 100% WR / 48 trades
+    'STBL':      {'sigs':['PV'],'flt':'ema200+adx25','RH':70,'RL':30,'TP':0.015,'SL':0.03},  # 100% WR / 20 trades
+    'STX':       {'sigs':['BB','IB'],'flt':'ema200','RH':65,'RL':30,'TP':0.007,'SL':0.05},  # 100% WR / 19 trades
+    'YZY':       {'sigs':['BB'],'flt':'adx20','RH':65,'RL':20,'TP':0.025,'SL':0.03},  # 100% WR / 5 trades
+    'ZEC':       {'sigs':['IB'],'flt':'adx30','RH':65,'RL':20,'TP':0.02,'SL':0.05},  # 100% WR / 12 trades
+    'kNEIRO':    {'sigs':['PV'],'flt':'ema200','RH':70,'RL':25,'TP':0.015,'SL':0.05},  # 100% WR / 8 trades
+
 
 }
 
@@ -78,6 +103,9 @@ NINETY_99 = {
     'SUSHI':     {'sigs':['PV'],'flt':'none','RH':75,'RL':30,'TP':0.006,'SL':0.05},  # 97% WR / 33 trades
     'TAO':       {'sigs':['PV'],'flt':'adx25','RH':75,'RL':25,'TP':0.015,'SL':0.05},  # 95% WR / 22 trades
     'kBONK':     {'sigs':['BB'],'flt':'none','RH':75,'RL':30,'TP':0.025,'SL':0.05},  # 90% WR / 20 trades
+    'HMSTR':     {'sigs':['PV'],'flt':'none','RH':75,'RL':35,'TP':0.01,'SL':0.05},  # 91% WR / 56 trades
+    'NOT':       {'sigs':['PV'],'flt':'adx20','RH':80,'RL':25,'TP':0.01,'SL':0.05},  # 92% WR / 52 trades
+
 
 }
 
@@ -137,32 +165,6 @@ EIGHTY_89 = {
 # ─── TIER 4: 70-79% WR (12x × 5% risk + 3-FILTER STACK) ───
 # Filters required: signal_persistence (2-bar confirm) + wall_confluence HARD gate + BTC correlation strict
 SEVENTY_79 = {
-    'ANIME':  {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.031,'SL':0.05},
-    'APEX':   {'sigs':['BB','PV'],     'flt':'ema200+adx20','RH':70,'RL':30,'TP':0.021,'SL':0.05},
-    'AXS':    {'sigs':['IB','PV'],     'flt':'none',       'RH':70,'RL':30,'TP':0.027,'SL':0.05},
-    'BCH':    {'sigs':['BB'],          'flt':'ema200+adx20','RH':70,'RL':30,'TP':0.020,'SL':0.05},
-    'CC':     {'sigs':['BB','IB'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.033,'SL':0.05},
-    'CELO':   {'sigs':['PV'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.031,'SL':0.05},
-    'GMT':    {'sigs':['PV'],          'flt':'adx20',      'RH':70,'RL':30,'TP':0.027,'SL':0.05},
-    'HEMI':   {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.028,'SL':0.05},
-    'INIT':   {'sigs':['IB','PV'],     'flt':'ema200+adx20','RH':70,'RL':30,'TP':0.032,'SL':0.05},
-    'MANTA':  {'sigs':['IB','PV'],     'flt':'adx20',      'RH':70,'RL':30,'TP':0.025,'SL':0.05},
-    'MET':    {'sigs':['IB'],          'flt':'ema200',     'RH':70,'RL':30,'TP':0.029,'SL':0.05},
-    'NXPC':   {'sigs':['BB','PV'],     'flt':'adx25',      'RH':70,'RL':30,'TP':0.031,'SL':0.05},
-    'POPCAT': {'sigs':['BB','PV'],     'flt':'adx25',      'RH':70,'RL':30,'TP':0.026,'SL':0.05},
-    'RESOLV': {'sigs':['PV'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.030,'SL':0.05},
-    'REZ':    {'sigs':['IB'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.030,'SL':0.05},
-    'RUNE':   {'sigs':['IB'],          'flt':'adx25',      'RH':70,'RL':30,'TP':0.022,'SL':0.05},
-    'SNX':    {'sigs':['BB','PV'],     'flt':'adx20',      'RH':70,'RL':30,'TP':0.030,'SL':0.05},
-    'STABLE': {'sigs':['BB','PV'],     'flt':'adx25',      'RH':70,'RL':30,'TP':0.031,'SL':0.05},
-    'STBL':   {'sigs':['PV'],          'flt':'ema200+adx25','RH':70,'RL':30,'TP':0.036,'SL':0.05},
-    'STX':    {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.024,'SL':0.05},
-    'YZY':    {'sigs':['BB','IB','PV'],'flt':'none',       'RH':70,'RL':30,'TP':0.019,'SL':0.05},
-    'ZEC':    {'sigs':['BB'],          'flt':'adx20',      'RH':70,'RL':30,'TP':0.028,'SL':0.05},
-    'kNEIRO': {'sigs':['PV'],          'flt':'ema200',     'RH':70,'RL':30,'TP':0.033,'SL':0.05},
-    'HMSTR':     {'sigs':['PV'],'flt':'none','RH':75,'RL':30,'TP':0.025,'SL':0.05},  # 77% WR / 26 trades
-    'KAS':       {'sigs':['IB'],'flt':'ema200','RH':70,'RL':25,'TP':0.025,'SL':0.05},  # 75% WR / 8 trades
-    'NOT':       {'sigs':['PV','BB'],'flt':'adx25','RH':75,'RL':25,'TP':0.025,'SL':0.05},  # 78% WR / 23 trades
 
 }
 
