@@ -9,7 +9,7 @@
 //| - Time-cut exit per signal                                       |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "5.11"
+#property version   "5.12"
 #property strict
 
 // ===== INPUTS =====
@@ -32,7 +32,7 @@ extern double Trail_Distance_Default = 0.2;
 extern bool   EMA_Exit         = false;
 extern string SignalURL        = "https://precog-hl-web.onrender.com/mt4/signals";
 extern int    PollSec          = 2;
-extern bool   UseLocalEMAFilter = true;
+extern bool   UseLocalEMAFilter = false; // v5.12: gates handle trend, local EMA was overfiltering
 extern bool   UseLimitOrders   = true;
 extern int    LimitExpiryMin   = 15;
 extern double LimitOffsetPips  = 2;
@@ -41,7 +41,7 @@ extern string FlattenURL       = "https://precog-hl-web.onrender.com/mt4/flatten
 extern string FlattenAckURL    = "https://precog-hl-web.onrender.com/mt4/flatten/ack";
 extern string TradeClosedURL   = "https://precog-hl-web.onrender.com/mt4/trade-closed";
 extern string TradeOpenedURL   = "https://precog-hl-web.onrender.com/mt4/trade-opened";
-extern double MaxSpreadPctDefault = 0.08;
+extern double MaxSpreadPctDefault = 0.15;    // v5.12: widened for metals/oil/indices. Server overrides per-ticker.
 
 // ===== STATE =====
 datetime lastBarTime[256];
@@ -130,10 +130,14 @@ double GetLot(string sym, double sl_pct) {
    if (lot > MaxLotCap) lot = MaxLotCap;
    if (lot > mx) lot = mx;
 
-   // Skip if minlot is larger than our sized lot (avoid blowup)
-   if (mn > lot + 0.00001) {
-      Print("GetLot SKIP ", sym, ": minlot=", mn, " > sized_lot=", DoubleToStr(lot, 4));
+   // v5.12: accept minlot up to 1.5x sized_lot (effective risk <=1.5%). SKIP only if way too big.
+   if (mn > lot * 1.5 && mn > lot + 0.00001) {
+      Print("GetLot SKIP ", sym, ": minlot=", mn, " > 1.5x sized_lot=", DoubleToStr(lot, 4));
       return 0;
+   }
+   if (mn > lot + 0.00001) {
+      Print("GetLot BUMP ", sym, ": sized_lot=", DoubleToStr(lot, 4), " -> minlot=", mn, " (eff risk ", DoubleToStr(mn/lot*100,0), "% of target)");
+      lot = mn;
    }
 
    // Step-align
@@ -671,7 +675,7 @@ int OnInit() {
       Print("WebRequest probe FAIL err=", GetLastError(), " — check MT4 Tools → Options → Expert Advisors → Allow WebRequest for ", SignalURL);
       return INIT_FAILED;
    }
-   Print("EA v5.11 live -- probe OK (", ArraySize(result), " bytes)");
+   Print("EA v5.12 live -- probe OK (", ArraySize(result), " bytes)");
 
    if (FlattenOnInit) {
       Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
