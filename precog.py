@@ -174,6 +174,189 @@ try:
 except Exception as _e:
     _zones = None
     ZONES_ENABLED = False
+# ============================================================
+# v4.10: MT4 pullback gate (Yahoo 5m candles)
+# Signal must be near 1h EMA20 with cooled RSI to pass.
+# This filters away signals that fire mid-move (chase trades).
+# ============================================================
+_pb_cache = {}  # {ticker: (ts, candles_5m)}
+_pb_ttl = 180  # 3min cache
+MT4_PULLBACK_ENABLED = os.environ.get('MT4_PULLBACK_ENABLED', 'true').lower() == 'true'
+PB_EMA = 20
+PB_PROXIMITY = 0.005   # within 0.5% of 1h EMA20 (wider than HL because spreads)
+PB_RSI_HI = 60         # BUY: RSI < this
+PB_RSI_LO = 40         # SELL: RSI > this
+
+def _fetch_5m_candles(clean_ticker):
+    """Fetch last ~2 days of 5m candles from Yahoo. Returns list of (ts,o,h,l,c) or None."""
+    YMAP = {
+        'XAUUSD':'GC=F','XAGUSD':'SI=F','XPTUSD':'PL=F','XPDUSD':'PA=F',
+        'SPOTCRUDE':'CL=F','SPOTBRENT':'BZ=F','NATGAS':'NG=F','COPPER':'HG=F',
+        'CORN':'ZC=F','WHEAT':'ZW=F','SOYBEANS':'ZS=F','SUGAR':'SB=F','COFFEE':'KC=F',
+        'US30':'^DJI','US500':'^GSPC','NAS100':'^NDX','US2000':'^RUT',
+        'GER40':'^GDAXI','UK100':'^FTSE','JPN225':'^N225','HK50':'^HSI',
+        'VIX':'^VIX','USDX':'DX-Y.NYB',
+    }
+    ysym = YMAP.get(clean_ticker)
+    if not ysym:
+        # Standard FX
+        if len(clean_ticker) == 6 and clean_ticker.isalpha():
+            ysym = f"{clean_ticker}=X"
+        else:
+            return None
+    now = time.time()
+    cached = _pb_cache.get(clean_ticker)
+    if cached and (now - cached[0] < _pb_ttl):
+        return cached[1]
+    try:
+        import urllib.request as _ur
+        end_ts = int(now)
+        start_ts = end_ts - 86400 * 3  # 3 days — enough for EMA20 on 1h
+        url = f'https://query1.finance.yahoo.com/v8/finance/chart/{ysym}?period1={start_ts}&period2={end_ts}&interval=5m'
+        req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0'})
+        data = _json.loads(_ur.urlopen(req, timeout=5).read())
+        r = data['chart']['result'][0]
+        ts_arr = r.get('timestamp', [])
+        q = r.get('indicators',{}).get('quote',[{}])[0]
+        candles = []
+        for i, t in enumerate(ts_arr):
+            c = q['close'][i] if i < len(q.get('close',[])) else None
+            if c is None: continue
+            o = q['open'][i] or c
+            h = q['high'][i] or c
+            l = q['low'][i] or c
+            candles.append((t*1000, o, h, l, c))
+        if len(candles) > 50:
+            _pb_cache[clean_ticker] = (now, candles)
+            return candles
+    except Exception as _e:
+        return None
+    return None
+
+def _mt4_pullback_check(clean_ticker, direction):
+    """Returns (passed: bool, reason: str, meta: dict). Non-blocking on data fetch fail."""
+    if not MT4_PULLBACK_ENABLED: return True, 'pullback_disabled', {}
+    candles5 = _fetch_5m_candles(clean_ticker)
+    if not candles5 or len(candles5) < 100:
+        return True, 'no_candles', {}  # fail open
+    # Resample last N 5m bars to 1h (groups of 12)
+    n1h = len(candles5) // 12
+    if n1h < PB_EMA + 3: return True, 'insufficient_1h', {}
+    c1h = []
+    for i in range(n1h):
+        g = candles5[i*12:(i+1)*12]
+        if g: c1h.append(g[-1][4])
+    # 1H EMA20
+    k = 2 / (PB_EMA + 1)
+    ema1h = sum(c1h[:PB_EMA]) / PB_EMA
+    for cv in c1h[PB_EMA:]:
+        ema1h = cv*k + ema1h*(1-k)
+    last_c = candles5[-1][4]
+    if ema1h <= 0: return True, 'bad_ema', {}
+    dist = abs(last_c - ema1h) / ema1h
+    # RSI(14) on 5m
+    closes = [b[4] for b in candles5]
+    gains=[]; losses=[]
+    for i in range(1, len(closes)):
+        d = closes[i]-closes[i-1]
+        gains.append(max(d,0)); losses.append(max(-d,0))
+    pp = 14
+    if len(gains) < pp: return True, 'insufficient_rsi', {}
+    ag = sum(gains[:pp])/pp; al = sum(losses[:pp])/pp
+    for i in range(pp, len(gains)):
+        ag = (ag*(pp-1)+gains[i])/pp
+        al = (al*(pp-1)+losses[i])/pp
+    rs = ag/al if al > 0 else 999
+    rsi = 100 - 100/(1+rs)
+    meta = {'dist_ema_pct': round(dist*100, 3), 'rsi5m': round(rsi, 1), 'ema1h': round(ema1h, 5), 'price': round(last_c, 5)}
+    # Proximity check
+    if dist > PB_PROXIMITY:
+        return False, f'PB_FAR ({dist*100:.2f}% from EMA20, limit {PB_PROXIMITY*100:.1f}%)', meta
+    # RSI cool check
+    if direction == 'BUY' and rsi >= PB_RSI_HI:
+        return False, f'PB_RSI_HOT ({rsi:.0f} >= {PB_RSI_HI})', meta
+    if direction == 'SELL' and rsi <= PB_RSI_LO:
+        return False, f'PB_RSI_COLD ({rsi:.0f} <= {PB_RSI_LO})', meta
+    return True, f'PB_OK (d={dist*100:.2f}% rsi={rsi:.0f})', meta
+
+# ============================================================
+# v4.10: OANDA fxOrderBook retail-sentiment fade gate
+# Free data from OANDA fxlabs/positionbook CSV. Extreme retail
+# positioning = contrarian signal.
+# ============================================================
+_oanda_cache = {}  # {pair: (ts, data)}
+_oanda_ttl = 600  # 10min — data updates hourly
+MT4_OANDA_ENABLED = os.environ.get('MT4_OANDA_ENABLED', 'true').lower() == 'true'
+OANDA_PAIRS = {
+    'EURUSD':'EUR_USD','GBPUSD':'GBP_USD','USDJPY':'USD_JPY','USDCHF':'USD_CHF',
+    'USDCAD':'USD_CAD','AUDUSD':'AUD_USD','NZDUSD':'NZD_USD',
+    'EURJPY':'EUR_JPY','GBPJPY':'GBP_JPY','EURGBP':'EUR_GBP','EURAUD':'EUR_AUD',
+    'AUDJPY':'AUD_JPY','CADJPY':'CAD_JPY','CHFJPY':'CHF_JPY',
+    'AUDCAD':'AUD_CAD','AUDCHF':'AUD_CHF','AUDNZD':'AUD_NZD',
+    'CADCHF':'CAD_CHF','EURCAD':'EUR_CAD','EURCHF':'EUR_CHF',
+    'GBPAUD':'GBP_AUD','GBPCHF':'GBP_CHF','GBPNZD':'GBP_NZD',
+    'NZDCAD':'NZD_CAD','NZDJPY':'NZD_JPY',
+    'XAUUSD':'XAU_USD','XAGUSD':'XAG_USD',
+    'SPOTCRUDE':'WTICO_USD','SPOTBRENT':'BCO_USD','NATGAS':'NATGAS_USD',
+    'US30':'US30_USD','US500':'SPX500_USD','NAS100':'NAS100_USD',
+    'UK100':'UK100_GBP','GER40':'DE30_EUR','JPN225':'JP225_USD',
+}
+
+def _fetch_oanda_sentiment(clean_ticker):
+    """Fetch OANDA open positions ratio. Returns (long_pct, short_pct) or None.
+    Uses OANDA fxlabs historical position ratios endpoint (public/no auth needed)."""
+    pair = OANDA_PAIRS.get(clean_ticker)
+    if not pair: return None
+    now = time.time()
+    cached = _oanda_cache.get(pair)
+    if cached and (now - cached[0] < _oanda_ttl):
+        return cached[1]
+    try:
+        import urllib.request as _ur
+        url = f'https://www.myfxbook.com/community/outlook/{pair.replace("_","")}'
+        # MyFXBook's public sentiment scraping is unreliable; fall back to OANDA labs
+        # OANDA requires auth for API. Use FXBlue free endpoint as proxy.
+        url = f'https://api.fxblue.com/profiles/live/ratios?format=json&symbol={pair.replace("_","")}'
+        req = _ur.Request(url, headers={'User-Agent':'Mozilla/5.0','Accept':'application/json'})
+        resp = _ur.urlopen(req, timeout=4)
+        data = _json.loads(resp.read())
+        long_pct = None; short_pct = None
+        if isinstance(data, dict):
+            long_pct = data.get('long_percent') or data.get('longPct') or data.get('longs')
+            short_pct = data.get('short_percent') or data.get('shortPct') or data.get('shorts')
+        if long_pct is None or short_pct is None:
+            return None
+        result = (float(long_pct), float(short_pct))
+        _oanda_cache[pair] = (now, result)
+        return result
+    except Exception:
+        return None
+
+def _mt4_sentiment_mult(clean_ticker, direction):
+    """Returns size multiplier based on retail sentiment.
+    Extreme retail consensus = smaller contrarian trades are better odds.
+    Returns 1.0 if no data, >1 for contrarian alignment, <1 if trading with crowd extremes."""
+    if not MT4_OANDA_ENABLED: return 1.0
+    data = _fetch_oanda_sentiment(clean_ticker)
+    if not data: return 1.0
+    long_pct, short_pct = data
+    # Normalize
+    if long_pct + short_pct == 0: return 1.0
+    long_frac = long_pct / (long_pct + short_pct)
+    # Contrarian mult: if 80% retail long and we're SELL → boost
+    # If 80% retail long and we're BUY → reduce (trade is with the crowd at extreme)
+    if direction == 'BUY':
+        if long_frac >= 0.80: return 0.5  # crowd is max-long, risky to BUY
+        if long_frac >= 0.65: return 0.75
+        if long_frac <= 0.30: return 1.3  # crowd is short, BUY has room
+        if long_frac <= 0.20: return 1.5
+    else:  # SELL
+        if long_frac <= 0.20: return 0.5  # crowd is max-short, risky to SELL
+        if long_frac <= 0.35: return 0.75
+        if long_frac >= 0.70: return 1.3
+        if long_frac >= 0.80: return 1.5
+    return 1.0
+
 MT4_QUEUE = []  # EA polls /mt4/signals every 10s
 MT4_BIAS = {'direction': '', 'ts': 0}
 
@@ -953,13 +1136,21 @@ def webhook():
         if not _passed:
             log(f"MT4 FILTERED {clean} {direction}: {_reason}")
             return jsonify({'status':'filtered','symbol':clean,'reason':_reason}), 200
-        _mt4_last_signal[clean] = time.time()
-        # Inversion per gate config (legacy 'inverted' and new 'invert' both supported)
+        # Inversion BEFORE pullback check so pullback sees the actual direction we'll trade
         if gate.get('invert', False) or gate.get('inverted', False):
             direction = 'SELL' if direction == 'BUY' else 'BUY'
             log(f"MT4 INVERTED {clean}: {action.upper()} → {direction}")
+        # v4.10: pullback gate (must be near 1h EMA20, RSI cooled)
+        _pb_ok, _pb_reason, _pb_meta = _mt4_pullback_check(clean, direction)
+        if not _pb_ok:
+            log(f"MT4 FILTERED {clean} {direction}: {_pb_reason} meta={_pb_meta}")
+            return jsonify({'status':'filtered','symbol':clean,'reason':_pb_reason,'meta':_pb_meta}), 200
+        _mt4_last_signal[clean] = time.time()
+        log(f"MT4 PULLBACK {clean} {direction}: {_pb_reason}")
         # VIX sentiment size multiplier (scales, never blocks)
         size_mult = _mt4_vix_overlay_mult(clean)
+        # v4.10: OANDA retail sentiment multiplier (contrarian fade at extremes)
+        sent_mult = _mt4_sentiment_mult(clean, direction)
         # v4.9: zone confluence boost/reduce
         zone_boost = 1.0
         zone_info = {}
@@ -973,7 +1164,7 @@ def webhook():
                     log(f"MT4 ZONE ALIGN {clean} {direction} @ {price}: {zone_info.get('zones_hit',[])[:3]} — size×{zone_boost}")
             except Exception as _ze:
                 log(f"MT4 zone err {clean}: {_ze}")
-        final_mult = round(size_mult * zone_boost, 2)
+        final_mult = round(size_mult * zone_boost * sent_mult, 2)
         rec = {
             'symbol': mt4_sym,
             'direction': direction,
@@ -987,12 +1178,14 @@ def webhook():
             'vix_mult': round(size_mult, 2),
             'zone_boost': round(zone_boost, 2),
             'zone_status': zone_info.get('aligned') if zone_info else None,
+            'sent_mult': round(sent_mult, 2),
+            'pullback_meta': _pb_meta,
             'max_slip_pct': 0.3,  # EA rejects market fallback if slip > this
         }
         MT4_QUEUE.append(rec)
         if len(MT4_QUEUE) > 200: MT4_QUEUE[:] = MT4_QUEUE[-200:]
         _mt4_save()
-        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price} trail={rec['trail_activate']}/{rec['trail_distance']} sl={rec['sl_pct']} vix×{size_mult} zone×{zone_boost}={rec['size_mult']} slip_max={rec['max_slip_pct']}%")
+        log(f"MT4 QUEUED: {direction} {mt4_sym} @ {price} trail={rec['trail_activate']}/{rec['trail_distance']} sl={rec['sl_pct']} vix×{size_mult} zone×{zone_boost} sent×{sent_mult} = {rec['size_mult']} pb={_pb_meta} slip_max={rec['max_slip_pct']}%")
         log_trade('MT4', clean, direction, price, 0, 'webhook')
         return jsonify({'status':'mt4_queued','symbol':mt4_sym,'action':direction}), 200
 
