@@ -9,7 +9,7 @@
 //| - Time-cut exit per signal                                       |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "5.10"
+#property version   "5.11"
 #property strict
 
 // ===== INPUTS =====
@@ -412,14 +412,17 @@ void PollDynaPro() {
 // Report successful OrderSend to server -- stashes side per ticket
 //+------------------------------------------------------------------+
 void ReportOpen(int ticket, string sym, string side, double entry, double lots) {
+   // v5.11: route through /mt4/trade-closed with exit_type="OPEN" sentinel
+   // This avoids needing a separate WebRequest whitelist entry for trade-opened
    string cookie = "", headers = "";
    char post[], result[];
    string body = "{\"ticket\":" + IntegerToString(ticket) +
                  ",\"symbol\":\"" + sym + "\",\"side\":\"" + side +
                  "\",\"entry\":" + DoubleToStr(entry, 5) +
-                 ",\"lots\":" + DoubleToStr(lots, 2) + "}";
+                 ",\"lots\":" + DoubleToStr(lots, 2) +
+                 ",\"exit_type\":\"OPEN\",\"peak_pct\":0,\"exit_pct\":0}";
    StringToCharArray(body, post, 0, StringLen(body));
-   WebRequest("POST", TradeOpenedURL, cookie, NULL, 3000, post, StringLen(body), result, headers);
+   WebRequest("POST", TradeClosedURL, cookie, NULL, 3000, post, StringLen(body), result, headers);
 }
 
 //+------------------------------------------------------------------+
@@ -668,7 +671,7 @@ int OnInit() {
       Print("WebRequest probe FAIL err=", GetLastError(), " — check MT4 Tools → Options → Expert Advisors → Allow WebRequest for ", SignalURL);
       return INIT_FAILED;
    }
-   Print("EA v5.1 live -- probe OK (", ArraySize(result), " bytes)");
+   Print("EA v5.11 live -- probe OK (", ArraySize(result), " bytes)");
 
    if (FlattenOnInit) {
       Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
