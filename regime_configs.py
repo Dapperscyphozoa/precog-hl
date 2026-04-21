@@ -1,16 +1,5 @@
-"""Per-coin per-regime configs (auto-generated from regime tuner).
-Generated from 90 days of HL 4h regime data.
-
-Regimes: bull-calm, bull-storm, bear-calm, bear-storm, chop
-Each entry maps coin -> regime -> {RH, RL, sigs, flt, TP, SL, n, wr, pnl}.
-
-# Coverage stats from tuning:
-# bull-calm: 139/139 coins
-# bull-storm: 139/139 coins
-# bear-calm: 42/139 coins
-# bear-storm: 130/139 coins
-# chop: 139/139 coins
-"""
+"""Per-coin per-regime configs (auto-generated)."""
+# Total coins: 143
 
 REGIME_CONFIGS = {
   "ALT": {
@@ -9164,12 +9153,260 @@ REGIME_CONFIGS = {
       "pnl": 0.3407,
       "score": 30.417
     }
+  },
+  "ETH": {
+    "bull-calm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "PV"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 20,
+      "wr": 0.6,
+      "pnl": 0.1102,
+      "score": 6.613
+    },
+    "bull-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "PV",
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 16,
+      "wr": 0.938,
+      "pnl": 0.2625,
+      "score": 24.611
+    },
+    "bear-calm": {
+      "reason": "no_valid_combo"
+    },
+    "bear-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.006,
+      "SL": 0.05,
+      "n": 6,
+      "wr": 1.0,
+      "pnl": 0.0306,
+      "score": 3.06
+    },
+    "chop": {
+      "RH": 78,
+      "RL": 30,
+      "sigs": [
+        "PV"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 22,
+      "wr": 0.773,
+      "pnl": 0.0829,
+      "score": 6.409
+    }
+  },
+  "DOGE": {
+    "bull-calm": {
+      "RH": 70,
+      "RL": 22,
+      "sigs": [
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 9,
+      "wr": 0.889,
+      "pnl": 0.1019,
+      "score": 9.058
+    },
+    "bull-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "PV"
+      ],
+      "flt": "none",
+      "TP": 0.012,
+      "SL": 0.05,
+      "n": 16,
+      "wr": 0.875,
+      "pnl": 0.1251,
+      "score": 10.945
+    },
+    "bear-calm": {
+      "reason": "no_valid_combo"
+    },
+    "bear-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "PV"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 5,
+      "wr": 0.4,
+      "pnl": -0.1145,
+      "score": -4.58
+    },
+    "chop": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "PV",
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 40,
+      "wr": 0.775,
+      "pnl": 0.2784,
+      "score": 21.574
+    }
+  },
+  "NEAR": {
+    "bull-calm": {
+      "RH": 70,
+      "RL": 22,
+      "sigs": [
+        "PV"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 9,
+      "wr": 1.0,
+      "pnl": 0.1719,
+      "score": 17.19
+    },
+    "bull-storm": {
+      "RH": 78,
+      "RL": 30,
+      "sigs": [
+        "PV",
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 12,
+      "wr": 1.0,
+      "pnl": 0.2292,
+      "score": 22.92
+    },
+    "bear-calm": {
+      "reason": "no_valid_combo"
+    },
+    "bear-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.012,
+      "SL": 0.05,
+      "n": 6,
+      "wr": 1.0,
+      "pnl": 0.0666,
+      "score": 6.66
+    },
+    "chop": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 28,
+      "wr": 0.821,
+      "pnl": 0.2364,
+      "score": 19.421
+    }
+  },
+  "ENA": {
+    "bull-calm": {
+      "RH": 78,
+      "RL": 30,
+      "sigs": [
+        "PV",
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.012,
+      "SL": 0.05,
+      "n": 15,
+      "wr": 0.867,
+      "pnl": 0.0646,
+      "score": 5.599
+    },
+    "bull-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "PV",
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 17,
+      "wr": 0.941,
+      "pnl": 0.2547,
+      "score": 23.972
+    },
+    "bear-calm": {
+      "reason": "no_valid_combo"
+    },
+    "bear-storm": {
+      "RH": 70,
+      "RL": 30,
+      "sigs": [
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 5,
+      "wr": 1.0,
+      "pnl": 0.0955,
+      "score": 9.55
+    },
+    "chop": {
+      "RH": 78,
+      "RL": 30,
+      "sigs": [
+        "BB"
+      ],
+      "flt": "none",
+      "TP": 0.02,
+      "SL": 0.05,
+      "n": 22,
+      "wr": 0.818,
+      "pnl": 0.1402,
+      "score": 11.471
+    }
   }
 }
 
 
 def get_config_for_regime(coin, regime):
-    """Returns config dict for coin+regime, or None if no valid config."""
     coin_data = REGIME_CONFIGS.get(coin)
     if not coin_data: return None
     cfg = coin_data.get(regime)
@@ -9178,10 +9415,7 @@ def get_config_for_regime(coin, regime):
     return None
 
 def get_config_with_fallback(coin, regime, fallback_chain=None):
-    """Try requested regime, then fallback chain (bear-calm -> chop, etc).
-    Returns first valid config."""
     if fallback_chain is None:
-        # Default fallbacks: similar regimes
         fallback_chain = {
             'bear-calm':  ['chop', 'bear-storm', 'bull-calm'],
             'bull-calm':  ['chop', 'bull-storm', 'bear-calm'],
@@ -9191,13 +9425,12 @@ def get_config_with_fallback(coin, regime, fallback_chain=None):
         }
     cfg = get_config_for_regime(coin, regime)
     if cfg: return cfg, regime
-    for fb_regime in fallback_chain.get(regime, []):
-        cfg = get_config_for_regime(coin, fb_regime)
-        if cfg: return cfg, fb_regime
+    for fb in fallback_chain.get(regime, []):
+        cfg = get_config_for_regime(coin, fb)
+        if cfg: return cfg, fb
     return None, None
 
 def coverage_stats():
-    """Return coverage % per regime."""
     from collections import defaultdict
     stats = defaultdict(int)
     for coin, regs in REGIME_CONFIGS.items():

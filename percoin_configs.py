@@ -7,6 +7,13 @@ All 58 coins validated over 17d OOS on 5m candles."""
 
 # ─── TIER 1: 100% WR ELITE (20x × 10% risk) ───
 PURE_14 = {
+    # HIGH-LEVERAGE additions (10-25x HL max) — added based on OOS regime tuning
+    # ETH 25x, DOGE/NEAR/ENA 10x. These coins compound MUCH faster than 3-5x PURE.
+    # Base configs match chop regime (will hot-swap via regime_configs.py)
+    'ETH':    {'sigs':['PV','BB'],     'flt':'none',       'RH':78,'RL':30,'TP':0.020,'SL':0.05},
+    'DOGE':   {'sigs':['PV','BB'],     'flt':'none',       'RH':78,'RL':30,'TP':0.020,'SL':0.05},
+    'NEAR':   {'sigs':['PV','BB'],     'flt':'none',       'RH':78,'RL':30,'TP':0.020,'SL':0.05},
+    'ENA':    {'sigs':['PV','BB'],     'flt':'none',       'RH':78,'RL':30,'TP':0.020,'SL':0.05},
     'ALT':    {'sigs':['IB'],          'flt':'ema200+adx25','RH':70,'RL':30,'TP':0.010,'SL':0.05},
     'ASTER':  {'sigs':['BB','PV'],     'flt':'ema200',     'RH':70,'RL':30,'TP':0.004,'SL':0.05},
     'BERA':   {'sigs':['IB','PV'],     'flt':'ema200+adx25','RH':75,'RL':25,'TP':0.010,'SL':0.05},
