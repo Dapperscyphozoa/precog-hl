@@ -1127,7 +1127,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 0,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "safe_haven",
     "invert": false,
     "sample_size": 2,
@@ -1140,7 +1140,8 @@
       "low_vix_mult": 0.8,
       "normal_mult": 1.0,
       "panic_mult": 1.5
-    }
+    },
+    "disabled_reason": "wide spread costs ~$20 per fill"
   },
   "XPTUSD": {
     "_optimized": "ext_grid",
@@ -1153,7 +1154,7 @@
     "confidence": "high",
     "cooldown_sec": 0,
     "counter_trend_fade": false,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "safe_haven",
     "invert": false,
     "rsi_filter": "any",
@@ -1171,6 +1172,7 @@
       "panic_mult": 1.5
     },
     "xag_align": "none",
-    "xau_align": "none"
+    "xau_align": "none",
+    "disabled_reason": "wide spread costs ~$20 per fill"
   }
 }
