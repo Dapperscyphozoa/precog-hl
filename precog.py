@@ -3090,11 +3090,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # if not signal_persistence.check(coin, sig, bar_ts): return
 
     # Confidence scoring: 0-100 → sizing multiplier (0.5x / 1.0x / 1.5x / 2.0x)
-    # OOS: every score tier profitable, use as SIZING not filter. Every signal trades.
+    # EMERGENCY FEE-CUT: skip sub-40 confidence signals (fees eat edge on low-conviction)
     try:
         btc_state = btc_correlation.get_state()
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
+        # HARD FLOOR: below 40 = skip entirely (too weak to overcome fees in chop)
+        if conf_score < 40:
+            log(f"{coin} SKIP low-conf {conf_score}<40 (fee-protection) {conf_breakdown}")
+            return
         size_mult = confidence.size_multiplier(conf_score)
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
