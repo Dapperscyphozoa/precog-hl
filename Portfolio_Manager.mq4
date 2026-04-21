@@ -9,12 +9,12 @@
 //| - Time-cut exit per signal                                       |
 //+------------------------------------------------------------------+
 #property copyright "CPM"
-#property version   "5.13"
+#property version   "5.14"
 #property strict
 
 // ===== INPUTS =====
 extern bool   UseEquityScaling = true;   // v5: scale lot to account
-extern double RiskPctPerTrade  = 1.0;    // v5: 1% of equity per trade (at SL_Pct loss)
+extern double RiskPctPerTrade = 2.0;    // v5.14: bumped from 1.0 -> 2.0 to fix minlot skips at low equity ($716 * 2% = $14 risk)    // v5: 1% of equity per trade (at SL_Pct loss)
 extern double LotSize          = 0.01;   // fallback if scaling off or minlot forces
 extern double MaxLotCap        = 5.0;    // hard cap on any single trade lot size
 extern int    EMAFast          = 9;
@@ -612,16 +612,15 @@ void ManagePositions() {
          continue;
       }
 
-      // Time-cut exit
+      // v5.14: Time-cut exit — flatten REGARDLESS of P&L. Stale losers were running forever.
       if (t_cut_h > 0 && (TimeCurrent() - entry_time) >= (int)(t_cut_h * 3600)) {
-         if (pnl_pct > 0) {
-            bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrBlue);
-            if (ok) {
-               Print("TIME_CUT EXIT ", sym, " +", DoubleToStr(pnl_pct,2), "% after ", DoubleToStr(t_cut_h,1), "h ticket=", tk);
-               ReportExit(sym, "TIME_CUT", entry, peak_pct, pnl_pct, tk);
-               DeleteTicketParams(tk);
-               continue;
-            }
+         bool ok = OrderClose(tk, OrderLots(), px, Slippage, clrBlue);
+         if (ok) {
+            string tc_tag = (pnl_pct > 0) ? "TIME_CUT_W" : "TIME_CUT_L";
+            Print("TIME_CUT EXIT ", sym, " ", DoubleToStr(pnl_pct,2), "% after ", DoubleToStr(t_cut_h,1), "h ticket=", tk);
+            ReportExit(sym, tc_tag, entry, peak_pct, pnl_pct, tk);
+            DeleteTicketParams(tk);
+            continue;
          }
       }
 
@@ -722,7 +721,7 @@ int OnInit() {
       Print("WebRequest probe FAIL err=", GetLastError(), " — check MT4 Tools → Options → Expert Advisors → Allow WebRequest for ", SignalURL);
       return INIT_FAILED;
    }
-   Print("EA v5.13 live -- probe OK (", ArraySize(result), " bytes)");
+   Print("EA v5.14 live -- probe OK (", ArraySize(result), " bytes)");
 
    if (FlattenOnInit) {
       Print("FlattenOnInit=true — closing all magic-matched positions and pendings");
