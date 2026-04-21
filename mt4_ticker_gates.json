@@ -223,7 +223,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 900,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "commodity",
     "invert": true,
     "rsi_filter": "any",
@@ -239,7 +239,8 @@
       "low_vix_mult": 1.1,
       "normal_mult": 1.0,
       "panic_mult": 0.6
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "COPPER": {
     "atr_max": 2.0,
@@ -249,7 +250,7 @@
     "backtest_wr": 100.0,
     "confidence": "high",
     "cooldown_sec": 0,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "commodity",
     "invert": false,
     "sample_size": 6,
@@ -262,7 +263,8 @@
       "low_vix_mult": 1.1,
       "normal_mult": 1.0,
       "panic_mult": 0.6
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "CORN": {
     "atr_max": 2.0,
@@ -272,7 +274,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 0,
-    "disabled_reason": "live_WR_losses_v5.12",
+    "disabled_reason": "illiquid/wide-spread bleeder",
     "enabled": false,
     "instrument_type": "commodity",
     "invert": true,
@@ -561,7 +563,7 @@
     "backtest_wr": null,
     "confidence": "low",
     "cooldown_sec": 900,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "risk_on",
     "invert": false,
     "sample_size": 1,
@@ -574,7 +576,8 @@
       "low_vix_mult": 1.2,
       "normal_mult": 1.0,
       "panic_mult": 0.4
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "JPN225": {
     "_comment": "insufficient backtest data, safe defaults",
@@ -720,7 +723,7 @@
     "backtest_wr": 100.0,
     "confidence": "high",
     "cooldown_sec": 0,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "commodity",
     "invert": true,
     "sample_size": 4,
@@ -733,7 +736,8 @@
       "low_vix_mult": 1.1,
       "normal_mult": 1.0,
       "panic_mult": 0.6
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "SPOTBRENT": {
     "atr_max": 5.0,
@@ -743,7 +747,7 @@
     "backtest_wr": 100.0,
     "confidence": "high",
     "cooldown_sec": 0,
-    "disabled_reason": "live_WR_losses_v5.12",
+    "disabled_reason": "illiquid/wide-spread bleeder",
     "enabled": false,
     "instrument_type": "commodity",
     "invert": false,
@@ -767,7 +771,7 @@
     "backtest_wr": 100.0,
     "confidence": "high",
     "cooldown_sec": 0,
-    "disabled_reason": "live_WR_losses_v5.12",
+    "disabled_reason": "illiquid/wide-spread bleeder",
     "enabled": false,
     "instrument_type": "commodity",
     "invert": false,
@@ -793,7 +797,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 900,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "commodity",
     "invert": true,
     "rsi_filter": "any",
@@ -809,7 +813,8 @@
       "low_vix_mult": 1.1,
       "normal_mult": 1.0,
       "panic_mult": 0.6
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "UK100": {
     "_comment": "insufficient backtest data, safe defaults",
@@ -849,7 +854,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 900,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "risk_on",
     "invert": true,
     "rsi_filter": "any",
@@ -865,7 +870,8 @@
       "low_vix_mult": 1.2,
       "normal_mult": 1.0,
       "panic_mult": 0.4
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "US30": {
     "_comment": "insufficient backtest data, safe defaults",
@@ -1030,7 +1036,7 @@
       "normal_mult": 1.0,
       "panic_mult": 1.5
     },
-    "disabled_reason": "margin too high for account size"
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "VIX": {
     "_comment": "VIX used as sentiment overlay on all other trades, never traded directly",
@@ -1039,7 +1045,7 @@
     "backtest_net": 29.33,
     "backtest_wr": 100.0,
     "confidence": "high",
-    "disabled_reason": "live_WR_losses_v5.12",
+    "disabled_reason": "illiquid/wide-spread bleeder",
     "enabled": false,
     "invert": false,
     "rsi_filter": "any",
@@ -1059,7 +1065,7 @@
     "backtest_wr": 100.0,
     "confidence": "medium",
     "cooldown_sec": 0,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "commodity",
     "invert": true,
     "sample_size": 3,
@@ -1072,7 +1078,8 @@
       "low_vix_mult": 1.1,
       "normal_mult": 1.0,
       "panic_mult": 0.6
-    }
+    },
+    "disabled_reason": "illiquid/wide-spread bleeder"
   },
   "XAGUSD": {
     "atr_max": 2.0,
