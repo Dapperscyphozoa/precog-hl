@@ -285,6 +285,44 @@ def _mt4_pullback_check(clean_ticker, direction):
 _oanda_cache = {}  # {pair: (ts, data)}
 _oanda_ttl = 600  # 10min — data updates hourly
 MT4_OANDA_ENABLED = os.environ.get('MT4_OANDA_ENABLED', 'true').lower() == 'true'
+# v4.14: TradingView scanner symbol mapping (clean_ticker → (tv_symbol, endpoint))
+# Endpoint determines which scanner API to hit (forex / cfd / america / global)
+_TV_SYMBOL_MAP = {
+    # Forex majors & crosses
+    'EURUSD': ('FX_IDC:EURUSD','forex'), 'GBPUSD': ('FX_IDC:GBPUSD','forex'),
+    'USDJPY': ('FX_IDC:USDJPY','forex'), 'USDCHF': ('FX_IDC:USDCHF','forex'),
+    'USDCAD': ('FX_IDC:USDCAD','forex'), 'AUDUSD': ('FX_IDC:AUDUSD','forex'),
+    'NZDUSD': ('FX_IDC:NZDUSD','forex'),
+    'EURJPY': ('FX_IDC:EURJPY','forex'), 'GBPJPY': ('FX_IDC:GBPJPY','forex'),
+    'EURGBP': ('FX_IDC:EURGBP','forex'), 'EURAUD': ('FX_IDC:EURAUD','forex'),
+    'AUDJPY': ('FX_IDC:AUDJPY','forex'), 'CADJPY': ('FX_IDC:CADJPY','forex'),
+    'CHFJPY': ('FX_IDC:CHFJPY','forex'),
+    'AUDCAD': ('FX_IDC:AUDCAD','forex'), 'AUDCHF': ('FX_IDC:AUDCHF','forex'),
+    'AUDNZD': ('FX_IDC:AUDNZD','forex'), 'CADCHF': ('FX_IDC:CADCHF','forex'),
+    'EURCAD': ('FX_IDC:EURCAD','forex'), 'EURCHF': ('FX_IDC:EURCHF','forex'),
+    'GBPAUD': ('FX_IDC:GBPAUD','forex'), 'GBPCHF': ('FX_IDC:GBPCHF','forex'),
+    'GBPNZD': ('FX_IDC:GBPNZD','forex'), 'NZDCAD': ('FX_IDC:NZDCAD','forex'),
+    'NZDJPY': ('FX_IDC:NZDJPY','forex'),
+    # Metals
+    'XAUUSD': ('OANDA:XAUUSD','cfd'),     'XAGUSD': ('TVC:SILVER','cfd'),
+    'XPTUSD': ('TVC:PLATINUM','cfd'),     'XPDUSD': ('TVC:PALLADIUM','cfd'),
+    # Energy
+    'SPOTCRUDE': ('NYMEX:CL1!','global'), 'SPOTBRENT': ('ICEEUR:BRN1!','global'),
+    'NATGAS': ('OANDA:NATGASUSD','cfd'),
+    # Soft commodities & grains
+    'COPPER': ('OANDA:XCUUSD','cfd'),
+    'CORN': ('CBOT:ZC1!','global'),       'WHEAT': ('CBOT:ZW1!','global'),
+    'SOYBEANS': ('CBOT:ZS1!','global'),
+    'SUGAR': ('ICEUS:SB1!','global'),     'COFFEE': ('ICEUS:KC1!','global'),
+    # Indices
+    'US30': ('OANDA:US30USD','cfd'),      'US500': ('SP:SPX','cfd'),
+    'NAS100': ('NASDAQ:NDX','america'),   'US2000': ('TVC:RUT','cfd'),
+    'GER40': ('OANDA:DE30EUR','cfd'),     'UK100': ('TVC:UKX','cfd'),
+    'JPN225': ('TVC:NI225','cfd'),        'HK50': ('OANDA:HK33HKD','cfd'),
+    # Volatility & dollar index
+    'VIX': ('CBOE:VIX','cfd'),            'USDX': ('TVC:DXY','cfd'),
+}
+
 OANDA_PAIRS = {
     'EURUSD':'EUR_USD','GBPUSD':'GBP_USD','USDJPY':'USD_JPY','USDCHF':'USD_CHF',
     'USDCAD':'USD_CAD','AUDUSD':'AUD_USD','NZDUSD':'NZD_USD',
@@ -301,11 +339,16 @@ OANDA_PAIRS = {
 }
 
 def _fetch_oanda_sentiment(clean_ticker):
-    """Fetch retail sentiment. Returns (long_pct, short_pct) or None.
-    Tries multiple sources:
-    1. MyFXBook community outlook HTML
-    2. DailyFX sentiment endpoint
-    Falls back to None (neutral) on any failure — never blocks trades.
+    """Fetch market sentiment. Returns tagged tuple or None:
+    - ('tv', recommend_all) where recommend_all ∈ [-1, +1] (strong sell→strong buy)
+    - (long_pct, short_pct) from MyFXBook/DailyFX retail positioning
+
+    Sources tried in order:
+    1. TradingView Scanner API (tech-indicator confluence) — works from cloud IPs
+    2. MyFXBook community outlook (retail positioning) — often blocked on cloud
+    3. DailyFX sentiment feed (retail positioning) — fallback
+
+    Never blocks trades; returns None if all sources fail.
     """
     pair = OANDA_PAIRS.get(clean_ticker)
     if not pair: return None
@@ -313,10 +356,36 @@ def _fetch_oanda_sentiment(clean_ticker):
     cached = _oanda_cache.get(pair)
     if cached and (now - cached[0] < _oanda_ttl):
         return cached[1]
-    pair_url = pair.replace("_","")  # EUR_USD → EURUSD
     import urllib.request as _ur
     import re as _re
-    # Source 1: MyFXBook
+
+    # Source 1: TradingView Scanner (PRIMARY — works from cloud)
+    tv_sym, tv_ep = _TV_SYMBOL_MAP.get(clean_ticker, (None, None))
+    if tv_sym and tv_ep:
+        try:
+            url = f'https://scanner.tradingview.com/{tv_ep}/scan'
+            payload = _json.dumps({
+                "symbols":{"tickers":[tv_sym],"query":{"types":[]}},
+                "columns":["Recommend.All"]
+            }).encode()
+            req = _ur.Request(url, data=payload, headers={
+                'User-Agent':'Mozilla/5.0','Content-Type':'application/json'
+            })
+            resp = _ur.urlopen(req, timeout=4)
+            data = _json.loads(resp.read())
+            if data.get('totalCount', 0) > 0:
+                rec_all = data['data'][0]['d'][0]
+                if rec_all is not None:
+                    # Clamp to [-1, +1]
+                    rec_all = max(-1.0, min(1.0, float(rec_all)))
+                    result = ('tv', rec_all)
+                    _oanda_cache[pair] = (now, result)
+                    return result
+        except Exception:
+            pass
+
+    # Source 2: MyFXBook community outlook (retail positioning — often blocked on cloud)
+    pair_url = pair.replace("_","")  # EUR_USD → EURUSD
     try:
         url = f'https://www.myfxbook.com/community/outlook/{pair_url}'
         req = _ur.Request(url, headers={
@@ -338,13 +407,11 @@ def _fetch_oanda_sentiment(clean_ticker):
                 result = (long_pct, short_pct)
                 _oanda_cache[pair] = (now, result)
                 return result
-    except Exception as _e:
+    except Exception:
         pass
-    # Source 2: DailyFX (different retail positioning feed, also free)
+
+    # Source 3: DailyFX retail positioning feed
     try:
-        # DailyFX uses OANDA client positioning feed
-        url = f'https://www.dailyfx.com/sentiment'
-        # More complex JSON endpoint — let's use the raw sentiment.json
         url2 = 'https://www.dailyfx.com/api/market-overview/sentiment'
         req = _ur.Request(url2, headers={
             'User-Agent':'Mozilla/5.0',
@@ -368,32 +435,62 @@ def _fetch_oanda_sentiment(clean_ticker):
 _sent_log_throttle = {}  # {ticker: ts} — avoid log spam
 
 def _mt4_sentiment_mult(clean_ticker, direction):
-    """Returns size multiplier based on retail sentiment.
-    Extreme retail consensus = smaller contrarian trades are better odds.
-    Returns 1.0 if no data, >1 for contrarian alignment, <1 if trading with crowd extremes."""
+    """Returns size multiplier based on market sentiment.
+
+    Handles two data formats from _fetch_oanda_sentiment:
+    1. ('tv', recommend_all) — TradingView tech-indicator confluence ∈ [-1, +1]
+       ALIGN with consensus → boost (confluence trade)
+       COUNTER to consensus → reduce (fighting the tape)
+    2. (long_pct, short_pct) — MyFXBook/DailyFX retail positioning
+       Contrarian fade: extreme crowd long → don't BUY, don't SELL against extreme short
+
+    Returns 1.0 if no data (never blocks).
+    """
     if not MT4_OANDA_ENABLED: return 1.0
     data = _fetch_oanda_sentiment(clean_ticker)
     if not data:
-        # Throttled debug log — once per ticker per 60s
         _now = time.time()
         if _now - _sent_log_throttle.get(clean_ticker, 0) > 60:
             _sent_log_throttle[clean_ticker] = _now
-            log(f"SENT no_data for {clean_ticker} (MyFXBook blocked or pair missing)")
+            log(f"SENT no_data for {clean_ticker} (all sources failed)")
         return 1.0
-    log(f"SENT {clean_ticker} {direction}: long={data[0]:.0f}% short={data[1]:.0f}%")
+
+    # Format 1: TradingView tech consensus (CONFLUENCE logic — align with tape)
+    if isinstance(data, tuple) and len(data) == 2 and data[0] == 'tv':
+        rec = data[1]  # -1 strong sell ... +1 strong buy
+        label = ('STRONG_BUY' if rec >= 0.5 else 'BUY' if rec >= 0.1
+                 else 'STRONG_SELL' if rec <= -0.5 else 'SELL' if rec <= -0.1
+                 else 'NEUTRAL')
+        log(f"SENT TV {clean_ticker} {direction}: rec={rec:+.2f} ({label})")
+        if direction == 'BUY':
+            if rec >= 0.5:  return 1.5   # strong align with tape
+            if rec >= 0.25: return 1.3
+            if rec >= 0.1:  return 1.15
+            if rec <= -0.5: return 0.5   # strong counter-trend
+            if rec <= -0.25: return 0.7
+            if rec <= -0.1: return 0.85
+            return 1.0
+        else:  # SELL
+            if rec <= -0.5:  return 1.5
+            if rec <= -0.25: return 1.3
+            if rec <= -0.1:  return 1.15
+            if rec >= 0.5:   return 0.5
+            if rec >= 0.25:  return 0.7
+            if rec >= 0.1:   return 0.85
+            return 1.0
+
+    # Format 2: Retail positioning % (CONTRARIAN fade at extremes)
     long_pct, short_pct = data
-    # Normalize
+    log(f"SENT RETAIL {clean_ticker} {direction}: long={long_pct:.0f}% short={short_pct:.0f}%")
     if long_pct + short_pct == 0: return 1.0
     long_frac = long_pct / (long_pct + short_pct)
-    # Contrarian mult: if 80% retail long and we're SELL → boost
-    # If 80% retail long and we're BUY → reduce (trade is with the crowd at extreme)
     if direction == 'BUY':
-        if long_frac >= 0.80: return 0.5  # crowd is max-long, risky to BUY
+        if long_frac >= 0.80: return 0.5
         if long_frac >= 0.65: return 0.75
-        if long_frac <= 0.30: return 1.3  # crowd is short, BUY has room
+        if long_frac <= 0.30: return 1.3
         if long_frac <= 0.20: return 1.5
-    else:  # SELL
-        if long_frac <= 0.20: return 0.5  # crowd is max-short, risky to SELL
+    else:
+        if long_frac <= 0.20: return 0.5
         if long_frac <= 0.35: return 0.75
         if long_frac >= 0.70: return 1.3
         if long_frac >= 0.80: return 1.5
