@@ -1453,6 +1453,20 @@ def mt4_trade_closed():
         if entry <= 0:
             return jsonify({'ok': False, 'err': 'no_entry'}), 200
 
+        # v4.15b: handle OPEN events piggybacked on /mt4/trade-closed (saves MT4 whitelist slot)
+        if exit_type == 'OPEN':
+            side = (d.get('side') or '').upper()
+            lots = float(d.get('lots', 0))
+            MT4_TICKET_META[ticket] = {
+                'direction': side, 'entry_ts': time.time(),
+                'symbol': symbol, 'entry': entry, 'lots': lots,
+            }
+            cutoff = time.time() - 86400
+            stale = [t for t,m in MT4_TICKET_META.items() if m['entry_ts'] < cutoff]
+            for t in stale: MT4_TICKET_META.pop(t, None)
+            log(f"MT4 OPEN #{ticket} {side} {symbol} @ {entry} lots={lots}")
+            return jsonify({'ok': True, 'event': 'open'})
+
         rec_exit = {
             'ts': time.time(), 'symbol': symbol, 'ticket': ticket,
             'exit_type': exit_type, 'entry': entry,
