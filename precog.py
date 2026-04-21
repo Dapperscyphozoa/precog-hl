@@ -1443,7 +1443,9 @@ def mt4_trade_opened():
 def mt4_trade_closed():
     """EA v5 reports every trade exit. Records PnL, rolls stats, queues retest if TRAIL."""
     try:
+        raw_body = flask_request.get_data(as_text=True)
         d = flask_request.get_json(force=True, silent=True) or {}
+        log(f"MT4 trade-closed RAW body={raw_body[:300]} parsed={d}")
         ticket = int(d.get('ticket', 0))
         symbol = (d.get('symbol') or '').replace('.a', '').upper()
         exit_type = (d.get('exit_type') or '').upper()
@@ -1544,6 +1546,20 @@ def mt4_stats():
     sorted_out = dict(sorted(out.items(), key=lambda x: -x[1]['total_pnl_pct']))
     return jsonify({'tickers': sorted_out, 'ring_len': len(MT4_CLOSED_RING),
                     'total_closed': sum(s['trades'] for s in MT4_LIVE_STATS.values())})
+
+@app.route('/mt4/stats/reset', methods=['POST'])
+def mt4_stats_reset():
+    """Wipe MT4 live stats. Intended for wiping test data before real trading begins."""
+    global MT4_LIVE_STATS, MT4_CLOSED_RING, MT4_TICKET_META
+    MT4_LIVE_STATS = {}
+    MT4_CLOSED_RING = []
+    MT4_TICKET_META = {}
+    try:
+        with open('/var/data/mt4_stats.json','w') as f:
+            _json.dump({'stats': {}, 'ring_len': 0}, f)
+    except Exception: pass
+    log("MT4 STATS RESET")
+    return jsonify({'ok': True, 'wiped': True})
 
 @app.route('/mt4/stats/summary', methods=['GET'])
 def mt4_stats_summary():
