@@ -1761,7 +1761,7 @@ def fetch_htf(coin, interval='4h', bars=30):
         log(f"htf err {coin} {interval}: {e}")
         return []
 
-V3_ENABLED = True
+V3_ENABLED = False  # OOS 14d: V3 ON +108% gain, V3 OFF +173% (+65pp). Regime-aware system already handles trend context per-coin per-regime; V3 was double-filtering and blocking valid signals.
 V3_HTF = '4h'
 V3_EMA = 9
 
@@ -2985,13 +2985,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             return
 
     # Per-ticker gate check — uses candles already fetched above (no extra API call)
-    try:
-        px_for_gate = get_mid(coin) or 0
-        if not apply_ticker_gate(coin, sig, px_for_gate, candles):
-            log(f"{coin} {sig} GATED")
-            return
-    except Exception as e:
-        log(f"{coin} gate check err: {e}")
+    # SKIPPED for elite-whitelisted coins: regime-aware system already validates per-coin
+    # OOS: V3 OFF + no ticker_gate = +65pp gain over V3 ON
+    if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
+        try:
+            px_for_gate = get_mid(coin) or 0
+            if not apply_ticker_gate(coin, sig, px_for_gate, candles):
+                log(f"{coin} {sig} GATED")
+                return
+        except Exception as e:
+            log(f"{coin} gate check err: {e}")
 
     # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
     # if not signal_persistence.check(coin, sig, bar_ts): return

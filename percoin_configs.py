@@ -175,11 +175,19 @@ SEVENTY_79 = {
 #   3/2/2/2:       +185% gain, 9.6% MaxDD   ← borderline (high signal count, fee drag risk)
 # Rationale: smaller positions = more concurrent slots = capture more signals
 TIER_SIZING = {
-    'PURE':      {'leverage': 20, 'risk_pct': 0.05},
-    'NINETY_99': {'leverage': 15, 'risk_pct': 0.03},
-    'EIGHTY_89': {'leverage': 12, 'risk_pct': 0.03},
-    'SEVENTY_79': {'leverage': 12, 'risk_pct': 0.03},
+    'PURE':      {'leverage': 15, 'risk_pct': 0.05},
+    'NINETY_99': {'leverage': 12, 'risk_pct': 0.03},
+    'EIGHTY_89': {'leverage': 10, 'risk_pct': 0.03},
+    'SEVENTY_79': {'leverage': 10, 'risk_pct': 0.03},
 }
+# Leverage rationale (OOS validated 14d):
+#   5x  PURE: +164% gain, 11% MaxDD (safe but underleveraged)
+#   10x PURE: +655% gain, 17% MaxDD
+#   15x PURE: +1,676% gain, 27% MaxDD ← SWEET SPOT
+#   20x PURE: -222% (LIQUIDATIONS — 4.5% liq line < 5% SL)
+# At 15x leverage: liquidation line = 1/15 - 0.005 = 6.2%, safely BEYOND 5% SL.
+# At 20x: liquidation = 1/20 - 0.005 = 4.5%, INSIDE 5% SL — every stopout = liquidation.
+# Live trading 20x was silent disaster — every "SL hit" was actually liquidation.
 
 ELITE_MODE = True
 
