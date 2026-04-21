@@ -637,7 +637,7 @@
     "backtest_wr": 100.0,
     "confidence": "high",
     "cooldown_sec": 0,
-    "enabled": true,
+    "enabled": false,
     "instrument_type": "commodity",
     "invert": true,
     "rsi_filter": "any",
@@ -653,7 +653,8 @@
       "low_vix_mult": 1.1,
       "normal_mult": 1.0,
       "panic_mult": 0.6
-    }
+    },
+    "disabled_reason": "killed by user - bleeding money"
   },
   "NZDCAD": {
     "_optimized": "ext_grid",
@@ -1141,7 +1142,7 @@
       "normal_mult": 1.0,
       "panic_mult": 1.5
     },
-    "disabled_reason": "wide spread costs ~$20 per fill"
+    "disabled_reason": "killed by user - bleeding money"
   },
   "XPTUSD": {
     "_optimized": "ext_grid",
@@ -1173,6 +1174,6 @@
     },
     "xag_align": "none",
     "xau_align": "none",
-    "disabled_reason": "wide spread costs ~$20 per fill"
+    "disabled_reason": "killed by user - bleeding money"
   }
 }
