@@ -1381,6 +1381,7 @@ def webhook():
             'sent_mult': round(sent_mult, 2),
             'pullback_meta': _pb_meta,
             'max_spread_pct': _mt4_max_spread_for(clean),
+            'tp_pct': gate.get('tp_pct', round(gate.get('sl_pct', 1.0) * 2.0, 2)),
             'max_slip_pct': 0.3,  # EA rejects market fallback if slip > this
         }
         MT4_QUEUE.append(rec)
