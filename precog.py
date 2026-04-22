@@ -3655,66 +3655,62 @@ def main():
                                              'engine':'RECONCILED', 'source':'reconcile'}
                     log(f"RECONCILE: adopting existing {k} {side} (fresh 30min grace window)")
 
-            # DUST-SWEEP: close STALE positions (>30min old) with |PnL| <= threshold to free margin.
-            # Rationale: dust-sweep was killing fresh trades before they could develop edge.
-            # Only sweep positions that have had time to work and are going nowhere.
-            # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
+            # DUST-SWEEP — DISABLED 2026-04-22.
+            # POSTMORTEM AUDIT of 51 trades: 45 dust_sweep exits, ZERO TP hits, 1 SL hit.
+            # Distribution: 100% of dust exits within ±1.0% of entry, 78% within ±0.3%.
+            # Signal edge is ~0.6-1% but dust_sweep at ±0.13% of notional ($0.10 floor on
+            # $70 positions) snipped every winner at the noise level. Even FOGO (id=51),
+            # the first trade that passed ALL new filters with correctly-attached native
+            # SL+TP, dust-swept at -0.148% in 31 min — never tested either native order.
             #
-            # Threshold scales with position notional: absolute $0.10 floor AND 0.1% of
-            # notional. Prior bug: fixed $0.10 killed 100% of $13 positions at <0.77% move,
-            # including winners. A $500 position needs to actually move <0.02% to sweep.
-            DUST_THRESHOLD_FIXED = 0.10   # $0.10 minimum floor
-            DUST_THRESHOLD_PCT = 0.001    # 0.1% of notional — below this is truly dust
-            DUST_MIN_AGE_SEC = 1800  # 30 min — fresh positions get time to reach TP
-            now_ts = time.time()
-            swept = 0
-            for k in list(live_positions.keys()):
-                try:
-                    lp = live_positions[k]
-                    sz = lp.get('size', 0)
-                    entry = lp.get('entry', 0)
-                    if sz == 0 or not entry: continue
-                    pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
-                    if pos_tier == 'PURE': continue  # don't sweep 100% WR coins
-                    # Age gate — don't kill fresh trades (let them hit TP)
-                    pos_state = state.get('positions', {}).get(k, {})
-                    opened_at = pos_state.get('opened_at', now_ts)
-                    age_sec = now_ts - opened_at
-                    if age_sec < DUST_MIN_AGE_SEC: continue  # too fresh, let it work
-                    # Use HL's reported PnL directly (no get_mid 429 issues)
-                    unrealized_usd = lp.get('pnl', 0)
-                    notional = abs(sz) * entry
-                    # Scale threshold: max of $0.10 absolute floor AND 0.1% of notional.
-                    # A $13 position gets $0.10 threshold (0.77% of notional = huge);
-                    # a $500 position gets $0.50 threshold (0.1% of notional = noise).
-                    dust_threshold = max(DUST_THRESHOLD_FIXED, notional * DUST_THRESHOLD_PCT)
-                    if abs(unrealized_usd) <= dust_threshold:
-                        try:
-                            pnl = close(k)
-                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} threshold=${dust_threshold:.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
-                            # Feed post-mortem ONLY if close() actually succeeded.
-                            # close() returns None when HL reports no position, which
-                            # happens if the position was already closed externally
-                            # (native SL hit, manual close, previous dust-sweep tick).
-                            # Firing record_close on a None pnl creates phantom entries.
-                            if pnl is not None:
-                                try:
-                                    pos_for_pm = dict(pos_state)
-                                    pos_for_pm['exit_reason'] = 'dust_sweep'
-                                    pos_for_pm['dust_age_sec'] = age_sec
-                                    record_close(pos_for_pm, k, pnl, state)
-                                except Exception as _e:
-                                    log(f"dust-sweep postmortem hook err {k}: {_e}")
-                            state['positions'].pop(k, None)
-                            if pnl is not None:
-                                state['last_pnl_close'] = pnl
-                                if pnl > 0: state['consec_losses'] = 0
-                            swept += 1
-                        except Exception as e:
-                            log(f"dust-sweep err {k}: {e}")
-                except Exception as e:
-                    log(f"dust-sweep scan err {k}: {e}")
-            if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=max($0.10,0.1%%notional), age>={DUST_MIN_AGE_SEC/60:.0f}min)")
+            # Now that place_native_sl/tp reliably attach to every position (b8f5b9a5),
+            # dust_sweep has no value. Native SL/TP handles exits. Winners can reach
+            # their 0.6-1.2% TP, losers bounded by 5% SL. Real expectancy finally visible.
+            #
+            # Env override: DUST_SWEEP_ENABLED=1 re-enables the legacy behavior.
+            if os.environ.get('DUST_SWEEP_ENABLED', '0') == '1':
+                DUST_THRESHOLD_FIXED = 0.10
+                DUST_THRESHOLD_PCT = 0.001
+                DUST_MIN_AGE_SEC = 1800
+                now_ts = time.time()
+                swept = 0
+                for k in list(live_positions.keys()):
+                    try:
+                        lp = live_positions[k]
+                        sz = lp.get('size', 0)
+                        entry = lp.get('entry', 0)
+                        if sz == 0 or not entry: continue
+                        pos_tier = percoin_configs.get_tier(k) if percoin_configs.ELITE_MODE else None
+                        if pos_tier == 'PURE': continue
+                        pos_state = state.get('positions', {}).get(k, {})
+                        opened_at = pos_state.get('opened_at', now_ts)
+                        age_sec = now_ts - opened_at
+                        if age_sec < DUST_MIN_AGE_SEC: continue
+                        unrealized_usd = lp.get('pnl', 0)
+                        notional = abs(sz) * entry
+                        dust_threshold = max(DUST_THRESHOLD_FIXED, notional * DUST_THRESHOLD_PCT)
+                        if abs(unrealized_usd) <= dust_threshold:
+                            try:
+                                pnl = close(k)
+                                log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} threshold=${dust_threshold:.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
+                                if pnl is not None:
+                                    try:
+                                        pos_for_pm = dict(pos_state)
+                                        pos_for_pm['exit_reason'] = 'dust_sweep'
+                                        pos_for_pm['dust_age_sec'] = age_sec
+                                        record_close(pos_for_pm, k, pnl, state)
+                                    except Exception as _e:
+                                        log(f"dust-sweep postmortem hook err {k}: {_e}")
+                                state['positions'].pop(k, None)
+                                if pnl is not None:
+                                    state['last_pnl_close'] = pnl
+                                    if pnl > 0: state['consec_losses'] = 0
+                                swept += 1
+                            except Exception as e:
+                                log(f"dust-sweep err {k}: {e}")
+                    except Exception as e:
+                        log(f"dust-sweep scan err {k}: {e}")
+                if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=max($0.10,0.1%%notional), age>={DUST_MIN_AGE_SEC/60:.0f}min)")
 
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
