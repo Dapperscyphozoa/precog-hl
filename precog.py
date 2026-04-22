@@ -2865,7 +2865,15 @@ def flatten_all(reason='KILL'):
 def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay.
     Uses per-coin SL from percoin_configs (OOS-tuned), then postmortem tuner overrides,
-    else global fallback. Returns the sl_pct that was used (for pos-dict enrichment)."""
+    else global fallback. Returns the sl_pct that was used (for pos-dict enrichment).
+
+    CRITICAL: we do NOT trust the caller's `size` param. A reduce_only SL sized
+    larger than the actual HL position is rejected. Between place() returning and
+    this call firing, partial fills and settlement delays mean the true position
+    size can differ from the requested `size`. We query HL for the authoritative
+    current position size and use that instead. If HL has no position yet, we
+    retry for up to 3 seconds before giving up (settlement delay on taker fills).
+    """
     try:
         # Per-coin SL from OOS tuning (5% default — validated WR)
         sl_pct = STOP_LOSS_PCT  # global fallback 2%
@@ -2880,21 +2888,47 @@ def place_native_sl(coin, is_long, entry, size):
             try:
                 sl_pct = float(_postmortem.get_param(coin, 'sl', 'pct', default=sl_pct))
             except Exception: pass
-        entry = float(entry); size = float(size)
+
+        # AUTHORITATIVE POSITION SIZE: query HL, don't trust caller.
+        # Retry up to 3s for settlement delay on taker fills.
+        actual_size = None
+        for attempt in range(6):
+            try:
+                us = info.user_state(WALLET)
+                for ap in us.get('assetPositions', []):
+                    p = ap.get('position', {})
+                    if p.get('coin','').upper() == coin.upper():
+                        szi = float(p.get('szi', 0))
+                        if abs(szi) > 1e-12:
+                            actual_size = abs(szi)
+                            break
+                if actual_size is not None:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if actual_size is None:
+            log(f"{coin} NATIVE SL ABORT: no position found after 3s retry (size requested={size})")
+            return None
+        if abs(actual_size - abs(float(size))) > 1e-9:
+            log(f"{coin} NATIVE SL size correction: caller said {size}, HL shows {actual_size} (partial fill or pre-existing)")
+
+        entry = float(entry)
         trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
         trigger_px = float(round_price(coin, trigger_px))
         # Limit price: aggressive to ensure fill (2% past trigger for slippage room)
         limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
-        sl_size = float(round_size(coin, size))
+        sl_size = float(round_size(coin, actual_size))
         sl_side = not is_long
         r = exchange.order(coin, sl_side, sl_size, limit_px,
                        {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
                        reduce_only=True)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
         if 'error' in status:
-            log(f"{coin} NATIVE SL REJECTED: {status['error']}")
+            log(f"{coin} NATIVE SL REJECTED: {status['error']} (size={sl_size}, trigger={trigger_px})")
+            return None
         else:
-            log(f"{coin} NATIVE SL placed @ {trigger_px} (sl_pct={sl_pct*100:.1f}%)")
+            log(f"{coin} NATIVE SL placed @ {trigger_px} (sl_pct={sl_pct*100:.1f}%, size={sl_size})")
         return sl_pct
     except Exception as e:
         log(f"{coin} native SL err: {e}")
@@ -2915,21 +2949,45 @@ def place_native_tp(coin, is_long, entry, size):
             try:
                 tp_pct = float(_postmortem.get_param(coin, 'tp', 'pct', default=tp_pct))
             except Exception: pass
-        entry = float(entry); size = float(size)
+        # AUTHORITATIVE POSITION SIZE: same logic as place_native_sl.
+        # Partial fills + settlement delay mean `size` from calc_size can
+        # differ from what HL actually has. reduce_only with wrong qty = reject.
+        actual_size = None
+        for attempt in range(6):
+            try:
+                us = info.user_state(WALLET)
+                for ap in us.get('assetPositions', []):
+                    p = ap.get('position', {})
+                    if p.get('coin','').upper() == coin.upper():
+                        szi = float(p.get('szi', 0))
+                        if abs(szi) > 1e-12:
+                            actual_size = abs(szi)
+                            break
+                if actual_size is not None:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if actual_size is None:
+            log(f"{coin} NATIVE TP ABORT: no position found after 3s retry")
+            return None
+
+        entry = float(entry)
         trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
         trigger_px = float(round_price(coin, trigger_px))
         # Limit: slightly worse to ensure fill
         limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
-        tp_size = float(round_size(coin, size))
+        tp_size = float(round_size(coin, actual_size))
         tp_side = not is_long
         r = exchange.order(coin, tp_side, tp_size, limit_px,
                        {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
                        reduce_only=True)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
         if 'error' in status:
-            log(f"{coin} NATIVE TP REJECTED: {status['error']}")
+            log(f"{coin} NATIVE TP REJECTED: {status['error']} (size={tp_size}, trigger={trigger_px})")
+            return None
         else:
-            log(f"{coin} NATIVE TP placed @ {trigger_px} (tp_pct={tp_pct*100:.2f}%)")
+            log(f"{coin} NATIVE TP placed @ {trigger_px} (tp_pct={tp_pct*100:.2f}%, size={tp_size})")
         return tp_pct
     except Exception as e:
         log(f"{coin} native TP err: {e}")
