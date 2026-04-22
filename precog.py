@@ -1338,6 +1338,62 @@ def close_one_position(coin):
     except Exception as e:
         return jsonify({'status':'error','coin':coin,'error':str(e)}), 500
 
+
+@app.route('/protect_sl/<coin>', methods=['GET', 'POST'])
+def protect_sl_endpoint(coin):
+    """Place a native SL on an existing HL position that lacks one.
+    ?secret=  (required)
+    ?sl_pct=0.05  (optional override; else uses per-coin OOS config / tuner)
+    Reads the current HL position directly — no dependency on local state."""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err':'unauthorized'}), 401
+    coin = coin.upper()
+    try:
+        us = info.user_state(WALLET)
+        # Find this coin's open position on HL
+        target = None
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            if p.get('coin','').upper() == coin:
+                sz = float(p.get('szi', 0))
+                if sz == 0: continue
+                target = {'sz': sz, 'entry': float(p.get('entryPx', 0))}
+                break
+        if not target:
+            return jsonify({'err':'no open position', 'coin':coin}), 404
+
+        is_long = target['sz'] > 0
+        size_abs = abs(target['sz'])
+        entry = target['entry']
+
+        # Optional override of sl_pct
+        override = flask_request.args.get('sl_pct')
+        if override:
+            try:
+                sl_pct = float(override)
+                trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
+                trigger_px = float(round_price(coin, trigger_px))
+                limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
+                sl_size = float(round_size(coin, size_abs))
+                sl_side = not is_long  # reduce short by buying, reduce long by selling
+                r = exchange.order(coin, sl_side, sl_size, limit_px,
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"sl"}},
+                                   reduce_only=True)
+                status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+                log(f"{coin} MANUAL SL placed @ {trigger_px} (sl_pct={sl_pct*100:.1f}%, entry={entry}, size={sl_size})")
+                return jsonify({'status':'placed','coin':coin,'sl_pct':sl_pct,'trigger_px':trigger_px,
+                                'entry':entry,'size':sl_size,'hl_response':status})
+            except Exception as e:
+                return jsonify({'err': f'override place failed: {e}'}), 500
+        else:
+            # Use normal SL pipeline (per-coin config + postmortem tuner)
+            sl_pct_used = place_native_sl(coin, is_long, entry, size_abs)
+            return jsonify({'status':'placed','coin':coin,'sl_pct_used':sl_pct_used,
+                            'entry':entry,'size':size_abs,'side':'LONG' if is_long else 'SHORT'})
+    except Exception as e:
+        log(f"PROTECT_SL ERR {coin}: {e}")
+        return jsonify({'err': str(e)}), 500
+
 @app.route('/transfer', methods=['POST'])
 def transfer_funds():
     """Transfer USDC internally on HL. POST {amount, to_wallet}"""
