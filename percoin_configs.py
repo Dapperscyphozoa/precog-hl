@@ -181,25 +181,75 @@ def is_elite(coin):
 def get_config(coin):
     """Return per-coin config dict, regime-aware if regime detector loaded.
     
-    Tries regime-tuned config first (if regime_configs + regime_detector available),
-    falls back to base PURE_14/NINETY_99/EIGHTY_89/SEVENTY_79 config."""
-    # Try regime-aware first
+    FIXED 2026-04-22: regime_configs.py was OOS-tuned on 5m noise, producing
+    completely inverted R:R for swing trades. Every regime entry has TP=0.6-2.0%
+    and SL=5.0% (R:R 0.12-0.40), which means every winning trade makes $1
+    and every loss costs $5. 100% of entries fail MIN_RR=2.0. This is the
+    5m-noise-tuner signature: high WR stats from micro-scalp TPs, but
+    catastrophic expected value because losses are 5-10x larger than wins.
+    
+    Keep the regime tuner's LEGITIMATE insights (which signal engines
+    work in which regime, which RSI thresholds, which filter stack) but
+    FORCE TP and SL from the clean base configs which have swing-safe
+    R:R ratios (2.0 to 4.0).
+    
+    Fallback chain:
+      1. Regime-tuned sigs/RH/RL/flt + base TP/SL (primary path)
+      2. Full base config (if no regime match)
+      3. None (coin not in any tier)
+    """
+    # Base config (always needed for SL/TP override — these are swing-safe)
+    base_cfg = None
+    if coin in PURE_14: base_cfg = PURE_14[coin]
+    elif coin in NINETY_99: base_cfg = NINETY_99[coin]
+    elif coin in EIGHTY_89: base_cfg = EIGHTY_89[coin]
+    elif coin in SEVENTY_79: base_cfg = SEVENTY_79[coin]
+    
+    # Try regime-aware enrichment
     try:
         import regime_detector
         import regime_configs
         regime = regime_detector.get_regime()
         if regime:
-            cfg, _ = regime_configs.get_config_with_fallback(coin, regime)
-            if cfg: return cfg
+            reg_cfg, _ = regime_configs.get_config_with_fallback(coin, regime)
+            if reg_cfg and base_cfg:
+                # MERGE: regime provides engine selection, base provides risk params.
+                # This gives us regime-adaptive signals with swing-safe R:R.
+                merged = dict(reg_cfg)   # start with regime's sigs/RH/RL/flt
+                merged['TP'] = base_cfg['TP']  # force swing-safe TP
+                merged['SL'] = base_cfg['SL']  # force swing-safe SL
+                # FORCE RSI SYMMETRY: the 5m-noise tuner often produced pairs
+                # like RH=70, RL=22 — asymmetric thresholds that structurally
+                # suppress BUYs (RSI rarely drops to 22 in a bull regime) while
+                # letting SELLs through at standard 70. For a mean-reversion
+                # signal, the thresholds must be mirror images: RH=70 pairs
+                # with RL=30, RH=78 pairs with RL=22. Symmetry is a design
+                # invariant, not an optimization target.
+                rh = merged.get('RH', 70); rl = merged.get('RL', 30)
+                if (rh, rl) not in [(70, 30), (78, 22), (75, 25), (72, 28)]:
+                    # Map to nearest symmetric pair
+                    merged['RL'] = 100 - rh  # 70→30, 78→22, 75→25, 72→28
+                # Preserve regime diagnostics if the caller wants them
+                merged['_regime'] = regime
+                merged['_base_tier'] = get_tier(coin)
+                return merged
+            elif reg_cfg:
+                # No base config (coin not in elite tiers) — use regime cfg but
+                # override clearly-broken TP/SL with a sane default (R:R=3).
+                merged = dict(reg_cfg)
+                merged['TP'] = 0.06  # 6% — default swing TP
+                merged['SL'] = 0.02  # 2% — tight swing SL, R:R=3
+                # Force RSI symmetry (see comment above)
+                rh = merged.get('RH', 70); rl = merged.get('RL', 30)
+                if (rh, rl) not in [(70, 30), (78, 22), (75, 25), (72, 28)]:
+                    merged['RL'] = 100 - rh
+                merged['_regime'] = regime
+                merged['_tp_sl_defaulted'] = True
+                return merged
     except Exception:
         pass  # silent fallback to base config
     
-    # Base config fallback
-    if coin in PURE_14: return PURE_14[coin]
-    if coin in NINETY_99: return NINETY_99[coin]
-    if coin in EIGHTY_89: return EIGHTY_89[coin]
-    if coin in SEVENTY_79: return SEVENTY_79[coin]
-    return None
+    return base_cfg
 
 def get_config_static(coin):
     """Original static config lookup (no regime). Used by tuner and OOS scripts."""
