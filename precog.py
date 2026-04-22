@@ -1012,6 +1012,16 @@ if _POSTMORTEM_OK and _postmortem is not None:
                 print('[postmortem] trade finder auto-started', flush=True)
         except Exception as _e:
             print(f'[postmortem] finder auto-start err (non-fatal): {_e}', flush=True)
+        # Auto-start macro puller daemon (Stooq + Massive.io → tv_cache)
+        # Requires no user config. Refreshes every POSTMORTEM_AUTOMACRO_TTL sec (default 1800).
+        # Disable by setting POSTMORTEM_AUTOMACRO_ENABLED=0.
+        try:
+            if os.environ.get('POSTMORTEM_AUTOMACRO_ENABLED', '1') == '1':
+                from postmortem import auto_macro as _auto_macro
+                if _auto_macro.start_daemon():
+                    print('[postmortem] auto_macro daemon started (Stooq + Massive.io)', flush=True)
+        except Exception as _e:
+            print(f'[postmortem] auto_macro start err (non-fatal): {_e}', flush=True)
     except Exception as _e:
         print(f'[postmortem] endpoint registration failed (non-fatal): {_e}', flush=True)
 
