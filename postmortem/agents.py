@@ -283,19 +283,23 @@ def agent_target_realization(trade, context):
         realization = (signed_pnl / tp_as_pct) if (signed_pnl > 0 and tp_as_pct > 0) else 0.0
 
         # Sufficient: hit or came close to target
-        if realization >= 0.8 or exit_reason in ('tp_hit', 'tp', 'native_tp'):
+        TP_EXITS = ('tp_hit', 'tp', 'native_tp', 'tp_lock_exit', 'trail_exit')
+        if realization >= 0.8 or exit_reason in TP_EXITS:
             return {
                 'verdict': 'passed',
                 'confidence': 0.9,
                 'reasoning': (f'{coin} {side} reached {signed_pnl:.2f}% = {realization*100:.0f}% of '
                               f'TP target ({tp_as_pct:.2f}%) in {duration_s/60:.0f}min. '
-                              f'TP calibration appropriate for this regime.'),
+                              f'Exit={exit_reason}. TP calibration appropriate for this regime.'),
                 'proposed_delta': [],
                 'proposed_veto': None,
             }
 
-        # Insufficient + dust-sweep = TP was too wide. Propose tightening.
-        if exit_reason == 'dust_sweep' and realization < 0.5:
+        # Insufficient + ANY non-TP/non-SL exit = TP was too wide for this trade.
+        # Includes: dust_sweep, signal_reversal, trail_exit pre-TP-lock, unknown, etc.
+        # All share the same learning signal: target was never realized.
+        LOW_REAL_EXITS = ('dust_sweep', 'signal_reversal', 'unknown', '', None)
+        if realization < 0.5 and exit_reason in LOW_REAL_EXITS:
             # Propose 1.5x achieved peak move as new TP, floored at bounds min.
             proposed_tp = max(pnl * 1.5 / 100.0, 0.004)  # min 0.4% (matches bounds)
             proposed_tp = round(proposed_tp, 4)
@@ -304,15 +308,15 @@ def agent_target_realization(trade, context):
                 'verdict': 'failed',
                 'confidence': 0.85,
                 'reasoning': (f'{coin} {side}: TP={tp_as_pct:.2f}% was not reached in '
-                              f'{duration_s/60:.0f}min. Peak PnL was {pnl:.2f}% = only '
-                              f'{realization*100:.0f}% of target. Trade dust-swept without '
-                              f'finding edge. Regime suggests achievable TP ~{proposed_tp*100:.2f}% '
+                              f'{duration_s/60:.0f}min (exit={exit_reason}). Peak PnL was '
+                              f'{pnl:.2f}% = only {realization*100:.0f}% of target. '
+                              f'Regime suggests achievable TP ~{proposed_tp*100:.2f}% '
                               f'(1.5× achieved). Tighter TP would improve hit rate.'),
                 'proposed_delta': [{'component': 'tp', 'param': 'pct', 'new_value': proposed_tp}],
                 'proposed_veto': None,
             }
 
-        # In-between: partial realization, not dust-swept. Inconclusive.
+        # In-between: partial realization, inconclusive.
         return {
             'verdict': 'irrelevant',
             'confidence': 0.75,
