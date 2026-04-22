@@ -244,4 +244,49 @@ def register_endpoints(app):
         trade_finder.stop_auto()
         return jsonify({'ok': True, 'stopped': True})
 
+    # ─────────────────────────────────────────────────────
+    # TradingView macro webhook cache (DXY/SPX/VIX/GOLD/OIL/etc)
+    # User configures TV alerts → POST here with auth.
+    # ─────────────────────────────────────────────────────
+    from . import tv_cache
+
+    @app.route('/postmortem/tv/macro', methods=['POST'])
+    def pm_tv_macro():
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        # Accept both JSON and plain-text payloads (TV alert messages can be either)
+        d = request.get_json(silent=True)
+        if d is None:
+            # Fall back to parsing JSON out of plain-text body
+            try:
+                raw = request.get_data(as_text=True) or ''
+                # Strip TradingView's literal wrapper if present
+                raw = raw.strip().strip('`').strip()
+                import json as _json
+                d = _json.loads(raw) if raw.startswith('{') else {}
+            except Exception:
+                d = {}
+        sym = d.get('symbol') or d.get('ticker')
+        price = d.get('price') or d.get('close') or d.get('last')
+        if sym is None or price is None:
+            return jsonify({'ok': False, 'err': 'symbol and price required', 'got': d}), 400
+        written = tv_cache.write(
+            symbol=sym,
+            price=price,
+            prev_close=d.get('prev_close') or d.get('open'),
+            timeframe=d.get('timeframe') or d.get('interval'),
+            raw=d,
+        )
+        if not written:
+            return jsonify({'ok': False, 'err': 'symbol not allowed', 'symbol': sym}), 400
+        return jsonify({'ok': True, 'symbol': written, 'price': price})
+
+    @app.route('/postmortem/tv/macro', methods=['GET'])
+    def pm_tv_macro_list():
+        return jsonify({'entries': tv_cache.list_all()})
+
+    @app.route('/postmortem/tv/macro/<symbol>', methods=['GET'])
+    def pm_tv_macro_one(symbol):
+        return jsonify({'entry': tv_cache.read(symbol)})
+
     return app
