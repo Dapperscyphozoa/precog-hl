@@ -2994,6 +2994,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
             if fav <= -sl_pct:
                 prev_pos = dict(cur)
+                prev_pos['exit_reason'] = 'sl_hit'
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     record_close(prev_pos, coin, pnl_pct, state)
@@ -3031,6 +3032,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             # If TP-locked, exit when price retraces back to TP level
             if tp_locked and tp_pct is not None and fav < tp_pct:
                 prev_pos = dict(cur)
+                prev_pos['exit_reason'] = 'tp_lock_exit'
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     record_close(prev_pos, coin, pnl_pct, state)
@@ -3049,6 +3051,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 trl = TRAIL_TIGHTEN_PCT if age > TRAIL_TIGHTEN_AFTER_SEC else TRAIL_PCT
                 if (hwm - fav) >= trl:
                     prev_pos = dict(cur)
+                    prev_pos['exit_reason'] = 'trail_exit'
                     pnl_pct = close(coin)
                     if pnl_pct is not None:
                         record_close(prev_pos, coin, pnl_pct, state)
@@ -3263,7 +3266,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar_ts
         if live and live['size']>0:
-            prev_pos = state.get('positions', {}).get(coin, {})
+            prev_pos = dict(state.get('positions', {}).get(coin, {}))
+            prev_pos['exit_reason'] = 'signal_reversal'
             pnl_pct = close(coin)
             if pnl_pct is not None:
                 record_close(prev_pos, coin, pnl_pct, state)
@@ -3297,7 +3301,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
-            prev_pos = state.get('positions', {}).get(coin, {})
+            prev_pos = dict(state.get('positions', {}).get(coin, {}))
+            prev_pos['exit_reason'] = 'signal_reversal'
             pnl_pct = close(coin)
             if pnl_pct is not None:
                 record_close(prev_pos, coin, pnl_pct, state)
