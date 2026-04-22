@@ -2822,6 +2822,27 @@ def _cached_user_state():
     return _cache['state'] or {}
 
 def get_mid(coin):
+    """Get latest mid price. Bybit WS FIRST (no rate limit, ~500ms lead on HL),
+    HL cached mids as fallback. This is the hot path — called by every SL/TP
+    placement, every gate check, every position PnL computation.
+
+    FIXED 2026-04-22: previous impl went straight to HL info.all_mids() with
+    a 5-sec cache. At 7+ positions × ~10 gate checks per tick × ticks every
+    30s × 120 coins, this hammered HL /info and triggered 429s on the very
+    endpoints we need for SL placement. Root cause of the 'naked position'
+    symptom: protect_sl and place_native_sl both call this path.
+
+    The 500ms lead on Bybit is also a minor alpha leak — SL/TP placement at
+    a lagging price misses the real mid by ~0.05-0.1%.
+    """
+    # Bybit WS — fresh if age <= 3s
+    try:
+        if bybit_ws.has_coin(coin):
+            by_px, age_ms = bybit_ws.get_price(coin)
+            if by_px and age_ms is not None and age_ms <= 3000:
+                return float(by_px)
+    except Exception: pass
+    # HL mids fallback (still cached 5s at _cached_mids level)
     try: return float(_cached_mids()[coin])
     except Exception: return None
 
