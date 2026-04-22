@@ -23,11 +23,25 @@ import time
 import json
 import urllib.request
 import threading
+import os
 
 _LOCK = threading.Lock()
 _CACHE = {}          # (coin, interval) -> {'bias', 'ts', 'close', 'ema20', 'dist_pct'}
 _CACHE_TTL_SEC = 300 # 5 min
-_NEUTRAL_BUF = 0.003 # ±0.3% from EMA20 = neutral zone
+
+# Neutral zone: ±NEUTRAL_BUF from EMA20 counts as neutral (both sides allowed).
+# Widened 2026-04-22 from 0.3% to 1.0% after the regime filter produced
+# ZERO trades in a bull-calm market. Coins drifting +0.4% were being
+# classified as "bullish" which blocked all shorts — too restrictive.
+# At 1% buffer: only clearly-trending coins (>1% from EMA20) block the
+# opposing side. Env override: MTF_NEUTRAL_BUF=0.01 (default).
+_NEUTRAL_BUF = float(os.environ.get('MTF_NEUTRAL_BUF', '0.01'))
+
+# Conviction scoring ramp. When buffer is 1%, a coin at exactly +1% is
+# "directional" but only barely. Full conviction boost requires stronger
+# signal. Ramp score from NEUTRAL_BUF (0 score) up to MAX_CONVICTION_DIST
+# (1.0 score). Above that: clipped. Env: MTF_CONVICTION_MAX_DIST=0.025
+_CONV_MAX_DIST = float(os.environ.get('MTF_CONVICTION_MAX_DIST', '0.025'))
 
 # Interval → (bars to fetch, bar duration in ms)
 _INTERVAL_MS = {
@@ -101,20 +115,33 @@ def get_bias(coin, interval='1h'):
 
 def aligned(coin, side):
     """Check 15m signal `side` ('BUY'/'SELL') against 1h + 4h bias.
-    Returns (bool aligned, str detail).
-    Fail-open: if any TF is 'neutral' the trade is allowed (no blocker).
-    Only blocks when HTF explicitly OPPOSES the signal direction.
+
+    Returns (ok: bool, detail: str, size_mult: float).
+      ok=True, size_mult=1.0: at least one HTF favors or both neutral
+      ok=True, size_mult=PARTIAL_MULT: exactly one HTF opposes, other neutral/favors
+      ok=False: BOTH HTFs oppose (hard block)
+
+    Rationale: hard-blocking on any single HTF opposition was too restrictive
+    in strong regimes (BTC/ETH trending +2% → every 15m short blocked). But
+    allowing full-size trade into even partial HTF opposition gave back the
+    bleed we just fixed. Compromise: accept a partial-opposition trade at
+    reduced size so we measure edge without full exposure.
+
+    Env override: MTF_PARTIAL_SIZE=0.3 (default 30% size on partial mismatch).
     """
     bias_1h, d_1h = get_bias(coin, '1h')
     bias_4h, d_4h = get_bias(coin, '4h')
     needed = 'up' if side == 'BUY' else 'down'
     opposite = 'down' if needed == 'up' else 'up'
-    # Reject only when HTF is explicitly opposite. Neutral passes through.
-    if bias_1h == opposite:
-        return False, f"1h={bias_1h} (dist={d_1h.get('dist_pct','?')}%) opposes {side}"
-    if bias_4h == opposite:
-        return False, f"4h={bias_4h} (dist={d_4h.get('dist_pct','?')}%) opposes {side}"
-    return True, f"1h={bias_1h} 4h={bias_4h} aligned_with={side}"
+    op_1h = bias_1h == opposite
+    op_4h = bias_4h == opposite
+    partial_mult = float(os.environ.get('MTF_PARTIAL_SIZE', '0.3'))
+    if op_1h and op_4h:
+        return False, f"BOTH HTFs oppose {side}: 1h={bias_1h} 4h={bias_4h}", 0.0
+    if op_1h or op_4h:
+        which = '1h' if op_1h else '4h'
+        return True, f"partial: {which}={opposite} opposes {side}, other={bias_1h if which=='4h' else bias_4h} (size_mult={partial_mult})", partial_mult
+    return True, f"1h={bias_1h} 4h={bias_4h} aligned_with={side}", 1.0
 
 def status():
     """Snapshot of cache for /mtf endpoint."""
@@ -131,32 +158,45 @@ def conviction_mult(coin, side, max_mult=2.5):
     """Return a sizing multiplier (1.0 to max_mult) based on 1h + 4h alignment strength.
 
     Called AFTER aligned() has already passed — here we only reward FAVORABLE
-    alignment strength. A trade where both TFs are strongly aligned (>1% from
-    EMA20 in correct direction) gets close to max_mult. A trade where both TFs
-    are neutral (|dist|<0.3%) gets 1.0x.
+    alignment strength. A trade where both TFs are strongly aligned (at or
+    beyond _CONV_MAX_DIST in correct direction) gets close to max_mult.
+    A trade where both TFs sit within _NEUTRAL_BUF gets 1.0x (neutral).
 
-    Scoring:
-      per-TF score = min(1, |dist| / 1%) when dist has the RIGHT sign, else 0
-      combined     = 0.4*score_1h + 0.6*score_4h  (4h weighted higher)
-      mult         = 1.0 + (max_mult - 1.0) * combined
+    Ramp: score_tf = clamp((fav_dist - NEUTRAL_BUF) / (CONV_MAX - NEUTRAL_BUF), 0, 1)
+      fav_dist within neutral buffer  → 0 score
+      fav_dist at CONV_MAX (2.5% default) → 1.0 score (max)
+
+    Combined: 0.4 × score_1h + 0.6 × score_4h (4h weighted higher).
+    Multiplier: 1.0 + (max_mult − 1.0) × combined.
 
     Fail-soft: on any error, returns 1.0 (no sizing change).
     """
     try:
         _, d1 = get_bias(coin, '1h')
         _, d4 = get_bias(coin, '4h')
-        raw_1h_pct = d1.get('dist_pct', 0)  # already in %
+        raw_1h_pct = d1.get('dist_pct', 0)
         raw_4h_pct = d4.get('dist_pct', 0)
         needed_sign = 1 if side == 'BUY' else -1
-        # Signed dist in favorable direction only
         fav_1h = raw_1h_pct * needed_sign  # positive = favorable
         fav_4h = raw_4h_pct * needed_sign
-        score_1h = min(1.0, max(0.0, fav_1h) / 1.0)  # cap at 1% = full score
-        score_4h = min(1.0, max(0.0, fav_4h) / 1.0)
-        combined = 0.4 * score_1h + 0.6 * score_4h   # 0..1
+        # Score ramps from NEUTRAL_BUF_% up to CONV_MAX_DIST_%
+        neutral_pct = _NEUTRAL_BUF * 100
+        max_pct = _CONV_MAX_DIST * 100
+        span = max(1e-9, max_pct - neutral_pct)
+        def _score(fav):
+            excess = fav - neutral_pct
+            if excess <= 0: return 0.0
+            return min(1.0, excess / span)
+        score_1h = _score(fav_1h)
+        score_4h = _score(fav_4h)
+        combined = 0.4 * score_1h + 0.6 * score_4h
         mult = 1.0 + (max_mult - 1.0) * combined
-        return round(mult, 2), {'score_1h': round(score_1h,2), 'score_4h': round(score_4h,2),
-                                'fav_1h_pct': round(fav_1h,3), 'fav_4h_pct': round(fav_4h,3),
-                                'combined': round(combined,2)}
+        return round(mult, 2), {
+            'score_1h': round(score_1h, 2), 'score_4h': round(score_4h, 2),
+            'fav_1h_pct': round(fav_1h, 3), 'fav_4h_pct': round(fav_4h, 3),
+            'combined': round(combined, 2),
+            'neutral_buf_pct': round(neutral_pct, 3),
+            'conv_max_pct': round(max_pct, 3),
+        }
     except Exception as e:
         return 1.0, {'err': str(e)}

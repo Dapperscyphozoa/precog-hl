@@ -3455,12 +3455,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Blocks when either HTF is EXPLICITLY opposite. Neutral passes through.
     if _MTF_OK and _mtf is not None:
         try:
-            _ok, _detail = _mtf.aligned(coin, sig)
+            _ok, _detail, _partial_mult = _mtf.aligned(coin, sig)
             if not _ok:
                 log(f"{coin} {sig} MTF-BLOCK: {_detail}")
                 return
             else:
                 log(f"{coin} {sig} MTF-OK: {_detail}")
+            # Apply partial-opposition downsize BEFORE conviction boost
+            if _partial_mult < 1.0:
+                _old_pm = risk_mult
+                risk_mult = risk_mult * _partial_mult
+                log(f"{coin} {sig} MTF-PARTIAL-DOWNSIZE ×{_partial_mult} (risk_mult {_old_pm:.2f} → {risk_mult:.2f})")
             # CONVICTION SIZING — scale risk when HTFs strongly confirm.
             # Multiplier 1.0-MTF_SIZE_MAX based on combined 1h+4h distance
             # from EMA20 in favorable direction. Applied on top of existing
@@ -3981,12 +3986,16 @@ def main():
                                     wh_count += 1; continue
                                 # MTF CONFLUENCE (1h + 4h alignment).
                                 _wh_mtf_mult = 1.0
+                                _wh_partial = 1.0
                                 if _MTF_OK and _mtf is not None:
                                     try:
-                                        _wmo, _wmd = _mtf.aligned(coin, side_str)
+                                        _wmo, _wmd, _wpm = _mtf.aligned(coin, side_str)
                                         if not _wmo:
                                             log(f"WEBHOOK {coin} {side_str} MTF-BLOCK: {_wmd}")
                                             wh_count += 1; continue
+                                        _wh_partial = _wpm
+                                        if _wpm < 1.0:
+                                            log(f"WEBHOOK {coin} {side_str} MTF-PARTIAL-DOWNSIZE ×{_wpm}: {_wmd}")
                                         _wh_mtf_mult, _wh_mtf_det = _mtf.conviction_mult(coin, side_str, max_mult=MTF_SIZE_MAX)
                                         if _wh_mtf_mult > 1.0:
                                             log(f"WEBHOOK {coin} {side_str} MTF-CONVICTION ×{_wh_mtf_mult}: {_wh_mtf_det}")
@@ -4039,7 +4048,7 @@ def main():
                                         log(f"WEBHOOK {coin} gate err: {_ge} — allowing at 1.0x")
 
                                 # Apply both conviction and gate multipliers to size calc
-                                wh_risk_mult = min(RISK_MULT_CEIL, risk_mult * wh_size_mult * wh_gate_mult * _wh_mtf_mult)
+                                wh_risk_mult = min(RISK_MULT_CEIL, risk_mult * wh_size_mult * wh_gate_mult * _wh_mtf_mult * _wh_partial)
                                 sz = calc_size(equity, px, risk_pct, wh_risk_mult, coin=coin, side=side_str)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
