@@ -3365,9 +3365,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if px:
                 # Tier-priority bump: if margin might reject, close lower-tier positions first
                 try_tier_bump(coin, state, live_positions)
-                fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
+                # CRITICAL: compute sz ONCE. calc_size reads live news/whale/CVD/OI state
+                # and is not deterministic across calls — calling it twice produces
+                # DIFFERENT sizes, causing SL/TP to be placed with wrong quantity and
+                # rejected as reduce_only violations (bug fix 2026-04-22: 5 of 6 new
+                # shorts opened with TP but no SL because re-computed sz differed).
+                sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
+                fill_px = place(coin, False, sz)
                 if fill_px:
-                    sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     _sl_pct_used = place_native_sl(coin, False, fill_px, sz)
                     _tp_pct_used = place_native_tp(coin, False, fill_px, sz)
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
@@ -3400,9 +3405,10 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if px:
                 # Tier-priority bump: if margin might reject, close lower-tier positions first
                 try_tier_bump(coin, state, live_positions)
-                fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
+                # CRITICAL: compute sz ONCE — calc_size is not deterministic (see short path above)
+                sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
+                fill_px = place(coin, True, sz)
                 if fill_px:
-                    sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                     _sl_pct_used = place_native_sl(coin, True, fill_px, sz)
                     _tp_pct_used = place_native_tp(coin, True, fill_px, sz)
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
