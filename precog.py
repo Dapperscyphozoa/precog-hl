@@ -50,6 +50,54 @@ except Exception as _e:
     print(f'[postmortem] import failed (non-fatal): {_e}', flush=True)
 
 # ═══════════════════════════════════════════════════════
+# REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
+# ═══════════════════════════════════════════════════════
+# 48-trade post-mortem audit (2026-04-22 session): 44 of 48 entries were
+# SHORTS in bull-calm regime with positive funding. Zero TP hits. WR 45.8%.
+# Expectancy +0.013% per trade (statistical zero). Every post-mortem's
+# root_cause called this out: "bull-calm + positive funding = short headwind."
+#
+# This is a hard global gate. It runs BEFORE the LLM entry gate and cannot
+# be overridden by KB patterns or per-coin tuning. If the regime is against
+# the trade direction AND funding confirms the regime, the trade is blocked.
+#
+# Set env REGIME_SIDE_BLOCK=0 to disable (not recommended).
+_REGIME_BLOCK_ENABLED = os.environ.get('REGIME_SIDE_BLOCK', '1') != '0'
+# Funding cutoff: above +0.3 bps in bull or below -0.3 in bear = regime confirmed
+_REGIME_FUNDING_CUTOFF_BPS = 0.3
+
+def regime_blocks_side(coin, side):
+    """Return (blocked, reason). side='BUY' or 'SELL'.
+    Blocks SELL in bull-* regime when funding is positive.
+    Blocks BUY in bear-* regime when funding is negative.
+    Fail-open on any data error."""
+    if not _REGIME_BLOCK_ENABLED:
+        return False, ''
+    try:
+        import regime_detector
+        regime = regime_detector.get_regime()
+        if not regime:
+            return False, ''
+        try:
+            funding_bps = get_funding_rate(coin) * 10000.0
+        except Exception:
+            funding_bps = 0.0
+        if regime.startswith('bull') and side == 'SELL':
+            if funding_bps > _REGIME_FUNDING_CUTOFF_BPS:
+                return True, f'bull-regime({regime}) + funding +{funding_bps:.2f}bps blocks short'
+        if regime.startswith('bear') and side == 'BUY':
+            if funding_bps < -_REGIME_FUNDING_CUTOFF_BPS:
+                return True, f'bear-regime({regime}) + funding {funding_bps:.2f}bps blocks long'
+    except Exception as e:
+        return False, ''
+    return False, ''
+
+# Max TP cap (bug fix 2026-04-22): 0 TP hits in 48 trades. Realized peak
+# favorable moves average 0.4-0.8%. Per-coin configs set TP to 2-6% which
+# never gets reached. Cap at 1.2% globally until realization improves.
+MAX_TP_PCT = 0.012
+
+# ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
 # ═══════════════════════════════════════════════════════
 TRADE_LOG = '/var/data/trades.csv'
@@ -2949,6 +2997,11 @@ def place_native_tp(coin, is_long, entry, size):
             try:
                 tp_pct = float(_postmortem.get_param(coin, 'tp', 'pct', default=tp_pct))
             except Exception: pass
+        # GLOBAL TP CAP — 0 TP hits in 48-trade audit, average peak move 0.4-0.8%.
+        # Cap at MAX_TP_PCT (1.2%) so TP is actually reachable within hold window.
+        if tp_pct > MAX_TP_PCT:
+            log(f"{coin} TP capped: cfg={tp_pct*100:.1f}% → {MAX_TP_PCT*100:.1f}% (realization-based)")
+            tp_pct = MAX_TP_PCT
         # AUTHORITATIVE POSITION SIZE: same logic as place_native_sl.
         # Partial fills + settlement delay mean `size` from calc_size can
         # differ from what HL actually has. reduce_only with wrong qty = reject.
@@ -3355,6 +3408,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         conf_score = 0
 
     log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} engine={signal_engine} risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score}")
+
+    # REGIME-SIDE BLOCKER (global, pre-gate): fails CLOSED for data-confirmed
+    # regime-mismatched trades. Cannot be overridden by KB/LLM gate.
+    _rb, _rb_reason = regime_blocks_side(coin, sig)
+    if _rb:
+        log(f"{coin} {sig} REGIME-BLOCK: {_rb_reason}")
+        return
 
     # ─────────────────────────────────────────────────────
     # ENTRY LLM GATE — final semantic pre-trade check.
@@ -3837,6 +3897,11 @@ def main():
 
                                 # GATE 3 — ENTRY LLM GATE. Check KB + vetos + regime before placing.
                                 # Fail-open: any error returns ALLOW at 1.0x.
+                                # REGIME-SIDE BLOCKER runs FIRST and cannot be overridden.
+                                _wrb, _wrb_reason = regime_blocks_side(coin, side_str)
+                                if _wrb:
+                                    log(f"WEBHOOK {coin} {side_str} REGIME-BLOCK: {_wrb_reason}")
+                                    wh_count += 1; continue
                                 wh_gate_mult = 1.0
                                 if _POSTMORTEM_OK and _postmortem is not None:
                                     try:
