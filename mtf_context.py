@@ -126,3 +126,37 @@ def status():
                 'dist_pct': d.get('dist_pct'), 'age_sec': int(time.time() - d.get('ts', 0)),
             })
     return {'cached': len(items), 'ttl_sec': _CACHE_TTL_SEC, 'neutral_buffer_pct': _NEUTRAL_BUF*100, 'entries': items}
+
+def conviction_mult(coin, side, max_mult=2.5):
+    """Return a sizing multiplier (1.0 to max_mult) based on 1h + 4h alignment strength.
+
+    Called AFTER aligned() has already passed — here we only reward FAVORABLE
+    alignment strength. A trade where both TFs are strongly aligned (>1% from
+    EMA20 in correct direction) gets close to max_mult. A trade where both TFs
+    are neutral (|dist|<0.3%) gets 1.0x.
+
+    Scoring:
+      per-TF score = min(1, |dist| / 1%) when dist has the RIGHT sign, else 0
+      combined     = 0.4*score_1h + 0.6*score_4h  (4h weighted higher)
+      mult         = 1.0 + (max_mult - 1.0) * combined
+
+    Fail-soft: on any error, returns 1.0 (no sizing change).
+    """
+    try:
+        _, d1 = get_bias(coin, '1h')
+        _, d4 = get_bias(coin, '4h')
+        raw_1h_pct = d1.get('dist_pct', 0)  # already in %
+        raw_4h_pct = d4.get('dist_pct', 0)
+        needed_sign = 1 if side == 'BUY' else -1
+        # Signed dist in favorable direction only
+        fav_1h = raw_1h_pct * needed_sign  # positive = favorable
+        fav_4h = raw_4h_pct * needed_sign
+        score_1h = min(1.0, max(0.0, fav_1h) / 1.0)  # cap at 1% = full score
+        score_4h = min(1.0, max(0.0, fav_4h) / 1.0)
+        combined = 0.4 * score_1h + 0.6 * score_4h   # 0..1
+        mult = 1.0 + (max_mult - 1.0) * combined
+        return round(mult, 2), {'score_1h': round(score_1h,2), 'score_4h': round(score_4h,2),
+                                'fav_1h_pct': round(fav_1h,3), 'fav_4h_pct': round(fav_4h,3),
+                                'combined': round(combined,2)}
+    except Exception as e:
+        return 1.0, {'err': str(e)}
