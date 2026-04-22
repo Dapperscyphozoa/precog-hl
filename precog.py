@@ -63,11 +63,13 @@ except Exception as _e:
 #
 # Set env REGIME_SIDE_BLOCK=0 to disable (not recommended).
 _REGIME_BLOCK_ENABLED = os.environ.get('REGIME_SIDE_BLOCK', '1') != '0'
-# Funding cutoff: any positive funding in bull regime = confirmed, block shorts
-# (Was +0.3 bps initially but HL perps routinely sit at +0.125 bps, letting
-# regime-mismatched shorts through. Tightened to 0.0 — any pos funding in bull
-# regime blocks all shorts; any neg funding in bear regime blocks all longs.)
-_REGIME_FUNDING_CUTOFF_BPS = 0.0
+# Funding cutoff — only block when funding meaningfully confirms regime.
+# HL perps baseline sits at +0.125 bps on most coins (exchange default).
+# Cutoff at 0.0 blocked every short regardless of true positioning.
+# Cutoff at 0.5 bps blocks only when funding is strongly positive (longs
+# paying shorts = crowded long = don't fade). Baseline ±0.125 ambiguous
+# = let MTF filter decide. Env: REGIME_FUNDING_CUTOFF_BPS=0.5 (default).
+_REGIME_FUNDING_CUTOFF_BPS = float(os.environ.get('REGIME_FUNDING_CUTOFF_BPS', '0.5'))
 
 def regime_blocks_side(coin, side):
     """Return (blocked, reason). side='BUY' or 'SELL'.
@@ -3193,6 +3195,47 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 log(f"SPOOF-FADE {coin} {sig} (wall ${sp['original_wall']/1000:.0f}k→${sp['remaining']/1000:.0f}k)")
         except Exception as e:
             log(f"spoof err {coin}: {e}")
+    # Sextenary: TREND_CONT — buy-pullback / sell-rally in direction of HTF bias.
+    # This is the FIRST engine that intentionally aligns with regime instead of
+    # fading it. Fixes the 90% SELL bias caused by mean-reversion engines in
+    # bull markets. Fires when:
+    #   - 1h + 4h bias both strongly in same direction (from mtf_context)
+    #   - Price has pulled back / rallied to within 0.6% of 1h EMA20
+    #   - 5m RSI is not extreme (20-80) — we want continuation, not reversal
+    # R:R: 1h EMA20 as invalidation (tight SL ~1-2%), next swing as TP (3-5%).
+    if not sig and _MTF_OK and _mtf is not None:
+        try:
+            b1, d1 = _mtf.get_bias(coin, '1h')
+            b4, d4 = _mtf.get_bias(coin, '4h')
+            # Require BOTH TFs to agree strongly (not neutral)
+            if b1 == b4 and b1 in ('up', 'down'):
+                cur_px = get_mid(coin)
+                ema20_1h = (d1 or {}).get('ema20')
+                if cur_px and ema20_1h and ema20_1h > 0:
+                    dist_to_ema = (cur_px - ema20_1h) / ema20_1h
+                    # In uptrend, BUY the pullback (price near/below 1h EMA20).
+                    # In downtrend, SELL the rally (price near/above 1h EMA20).
+                    pullback_buy = b1 == 'up' and -0.015 < dist_to_ema < 0.006
+                    rally_sell  = b1 == 'down' and -0.006 < dist_to_ema < 0.015
+                    if pullback_buy or rally_sell:
+                        # Sanity: avoid entries when 5m RSI is already extreme (catching falling/rising knife)
+                        rsi_arr = rsi_calc([c[4] for c in candles], 14)
+                        r_now = rsi_arr[-1] if rsi_arr and rsi_arr[-1] is not None else 50
+                        ok_rsi = (pullback_buy and 30 <= r_now <= 70) or (rally_sell and 30 <= r_now <= 70)
+                        if ok_rsi:
+                            # Cooldown check
+                            tc_key = coin + ('_tc_buy' if pullback_buy else '_tc_sell')
+                            last_tc = state['cooldowns'].get(tc_key, 0)
+                            bar_ts_now = int(time.time()*1000)
+                            if (bar_ts_now - last_tc) > CD_MS:
+                                sig = 'BUY' if pullback_buy else 'SELL'
+                                bar_ts = bar_ts_now
+                                signal_engine = 'TREND_CONT'
+                                state['cooldowns'][tc_key] = bar_ts
+                                log(f"TREND_CONT {coin} {sig}: 1h={b1}({d1.get('dist_pct','?')}%) 4h={b4}({d4.get('dist_pct','?')}%) dist_ema20={dist_to_ema*100:+.2f}% rsi={r_now:.0f}")
+        except Exception as _tce:
+            log(f"trend_cont err {coin}: {_tce}")
+
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
