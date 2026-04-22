@@ -38,6 +38,17 @@ import cvd_ws
 import oi_tracker
 import funding_arb
 
+# Post-mortem tuning engine (HL-only; MT4 close path does NOT call this).
+# Import is defensive: if the module or its deps are missing, the rest of
+# precog.py still runs. Every call site below is guarded.
+try:
+    import postmortem as _postmortem
+    _POSTMORTEM_OK = True
+except Exception as _e:
+    _postmortem = None
+    _POSTMORTEM_OK = False
+    print(f'[postmortem] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
 # ═══════════════════════════════════════════════════════
@@ -94,6 +105,17 @@ def record_close(pos, coin, pnl_pct, state):
     if win: stats['total_wins'] += 1
     else: stats['total_losses'] += 1
     stats['total_pnl'] += pnl_pct
+
+    # ─────────────────────────────────────────────────────
+    # POST-MORTEM TUNING — HL close path only.
+    # Fire-and-forget. Runs in daemon thread. Never blocks trading.
+    # MT4 closes go through mt4_trade_closed() which does NOT invoke this.
+    # ─────────────────────────────────────────────────────
+    if _POSTMORTEM_OK and _postmortem is not None:
+        try:
+            _postmortem.run_postmortem_async(pos, coin, pnl_pct)
+        except Exception as _e:
+            pass  # never let post-mortem crash the close path
 
 def wr_to_mult(wr, n, min_n=5):
     """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
@@ -972,6 +994,19 @@ def tv_to_hl(ticker):
     return remap.get(t, t)
 
 app = Flask(__name__)
+
+# Register post-mortem endpoints (no-op if module failed to import)
+if _POSTMORTEM_OK and _postmortem is not None:
+    try:
+        from postmortem.endpoints import register_endpoints as _pm_register
+        _pm_register(app)
+        # Also initialize DB eagerly so first close doesn't pay the cost
+        try:
+            _postmortem.init_db()
+        except Exception as _e:
+            print(f'[postmortem] db init deferred: {_e}', flush=True)
+    except Exception as _e:
+        print(f'[postmortem] endpoint registration failed (non-fatal): {_e}', flush=True)
 
 
 _LANDING_HTML = None
@@ -2184,11 +2219,24 @@ def pullback_signal(coin, candles5, last_pb_buy_ts, last_pb_sell_ts):
 
 def signal(candles, last_sell_ts, last_buy_ts, coin=None):
     """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp.
-    Applies chase_gate for coins in CHASE_GATE_COINS."""
+    Applies chase_gate for coins in CHASE_GATE_COINS.
+
+    Tuned params (read via postmortem, fall through to SP/BP defaults):
+      rsi.sell_threshold, rsi.buy_threshold, pivot.lookback
+    """
     if len(candles)<60: return None, None
     h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
     N=len(cl); r14=rsi_calc(cl,14)
-    LB = SP['pivot_lb']
+    # Read tuned params with SP/BP as defaults (per-coin tuner overrides if set)
+    if _POSTMORTEM_OK and _postmortem is not None and coin:
+        try:
+            LB = int(_postmortem.get_param(coin, 'pivot', 'lookback', default=SP['pivot_lb']))
+            RH_ = float(_postmortem.get_param(coin, 'rsi', 'sell_threshold', default=SP['rsi_hi']))
+            RL_ = float(_postmortem.get_param(coin, 'rsi', 'buy_threshold', default=BP['rsi_lo']))
+        except Exception:
+            LB = SP['pivot_lb']; RH_ = SP['rsi_hi']; RL_ = BP['rsi_lo']
+    else:
+        LB = SP['pivot_lb']; RH_ = SP['rsi_hi']; RL_ = BP['rsi_lo']
     apply_gate = coin in CHASE_GATE_COINS
     for i in range(max(LB, N-SCAN_BARS), N):
         if r14[i] is None: continue
@@ -2197,8 +2245,8 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         bar_ts = candles[i][0]
         is_pivot_high = h[i] == max(h[max(0,i-LB):i+1])
         is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
-        sell_ok = is_pivot_high and r14[i] > SP['rsi_hi'] and (bar_ts - last_sell_ts) > CD_MS
-        buy_ok  = is_pivot_low  and r14[i] < BP['rsi_lo'] and (bar_ts - last_buy_ts)  > CD_MS
+        sell_ok = is_pivot_high and r14[i] > RH_ and (bar_ts - last_sell_ts) > CD_MS
+        buy_ok  = is_pivot_low  and r14[i] < RL_ and (bar_ts - last_buy_ts)  > CD_MS
         if apply_gate:
             if sell_ok and not chase_gate_ok('SELL', cl[i], candles, i):
                 sell_ok = False
@@ -2213,19 +2261,40 @@ def bb_signal(candles, coin=None, last_buy_ts=0, last_sell_ts=0):
     BUY: low breaks lower BB (2 SD), close back above lower BB, RSI near oversold
     SELL: high breaks upper BB (2 SD), close back below upper BB, RSI near overbought
     Returns (side, bar_ts) or (None, None).
-    Enforces CD_MS cooldown from last_buy_ts/last_sell_ts to prevent signal storms."""
+    Enforces CD_MS cooldown from last_buy_ts/last_sell_ts to prevent signal storms.
+
+    Tuned params (postmortem overrides):
+      bollinger.period, bollinger.std_mult, bollinger.rsi_buffer,
+      rsi.buy_threshold, rsi.sell_threshold
+    """
     if len(candles) < 40: return None, None
     h = [c[2] for c in candles]; l = [c[3] for c in candles]; cl = [c[4] for c in candles]
-    N = len(cl); BB_P = 20
+    N = len(cl)
+    # Defaults
+    BB_P_default = 20
+    std_mult_default = 2.0
+    rsi_buffer_default = 5.0
     r14 = rsi_calc(cl, 14)
     # Per-coin RL/RH if available, else globals
-    RL = BP['rsi_lo']; RH = SP['rsi_hi']
+    RL_def = BP['rsi_lo']; RH_def = SP['rsi_hi']
     try:
         if coin and percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
             cfg = percoin_configs.get_config(coin)
             if cfg:
-                RL = cfg.get('RL', RL); RH = cfg.get('RH', RH)
+                RL_def = cfg.get('RL', RL_def); RH_def = cfg.get('RH', RH_def)
     except Exception: pass
+    # Read tuner overrides
+    if _POSTMORTEM_OK and _postmortem is not None and coin:
+        try:
+            BB_P = int(_postmortem.get_param(coin, 'bollinger', 'period', default=BB_P_default))
+            std_mult = float(_postmortem.get_param(coin, 'bollinger', 'std_mult', default=std_mult_default))
+            rsi_buffer = float(_postmortem.get_param(coin, 'bollinger', 'rsi_buffer', default=rsi_buffer_default))
+            RL = float(_postmortem.get_param(coin, 'rsi', 'buy_threshold', default=RL_def))
+            RH = float(_postmortem.get_param(coin, 'rsi', 'sell_threshold', default=RH_def))
+        except Exception:
+            BB_P, std_mult, rsi_buffer, RL, RH = BB_P_default, std_mult_default, rsi_buffer_default, RL_def, RH_def
+    else:
+        BB_P, std_mult, rsi_buffer, RL, RH = BB_P_default, std_mult_default, rsi_buffer_default, RL_def, RH_def
     for i in range(max(BB_P+5, N-SCAN_BARS), N):
         if r14[i] is None: continue
         window = cl[i-BB_P:i]
@@ -2233,13 +2302,13 @@ def bb_signal(candles, coin=None, last_buy_ts=0, last_sell_ts=0):
         var = sum((x-mean)**2 for x in window)/BB_P
         sd = var**0.5
         if sd <= 0: continue
-        upper = mean + 2*sd; lower = mean - 2*sd
+        upper = mean + std_mult*sd; lower = mean - std_mult*sd
         bar_ts = candles[i][0]
         # BUY: pierced lower BB, closed back above, RSI in oversold zone
-        if l[i] <= lower and cl[i] > lower and r14[i] < RL + 5 and (bar_ts - last_buy_ts) > CD_MS:
+        if l[i] <= lower and cl[i] > lower and r14[i] < RL + rsi_buffer and (bar_ts - last_buy_ts) > CD_MS:
             return 'BUY', bar_ts
         # SELL: pierced upper BB, closed back below, RSI in overbought zone
-        if h[i] >= upper and cl[i] < upper and r14[i] > RH - 5 and (bar_ts - last_sell_ts) > CD_MS:
+        if h[i] >= upper and cl[i] < upper and r14[i] > RH - rsi_buffer and (bar_ts - last_sell_ts) > CD_MS:
             return 'SELL', bar_ts
     return None, None
 
@@ -2699,7 +2768,8 @@ def flatten_all(reason='KILL'):
 # ═══════════════════════════════════════════════════════
 def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay.
-    Uses per-coin SL from percoin_configs if available (OOS-tuned), else global fallback."""
+    Uses per-coin SL from percoin_configs (OOS-tuned), then postmortem tuner overrides,
+    else global fallback."""
     try:
         # Per-coin SL from OOS tuning (5% default — validated WR)
         sl_pct = STOP_LOSS_PCT  # global fallback 2%
@@ -2709,6 +2779,11 @@ def place_native_sl(coin, is_long, entry, size):
                 if cfg and 'SL' in cfg:
                     sl_pct = cfg['SL']  # OOS-validated per-coin SL
         except Exception: pass
+        # Postmortem tuner override (applies on top of OOS baseline)
+        if _POSTMORTEM_OK and _postmortem is not None:
+            try:
+                sl_pct = float(_postmortem.get_param(coin, 'sl', 'pct', default=sl_pct))
+            except Exception: pass
         entry = float(entry); size = float(size)
         trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
         trigger_px = float(round_price(coin, trigger_px))
@@ -2728,13 +2803,19 @@ def place_native_sl(coin, is_long, entry, size):
         log(f"{coin} native SL err: {e}")
 
 def place_native_tp(coin, is_long, entry, size):
-    """Place HL native take-profit order using per-coin TP from OOS tuning."""
+    """Place HL native take-profit order using per-coin TP from OOS tuning.
+    Postmortem tuner may override the per-coin TP within bounds."""
     try:
         if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
             return  # no per-coin TP for non-elite
         cfg = percoin_configs.get_config(coin)
         if not cfg or 'TP' not in cfg: return
         tp_pct = cfg['TP']
+        # Postmortem tuner override
+        if _POSTMORTEM_OK and _postmortem is not None:
+            try:
+                tp_pct = float(_postmortem.get_param(coin, 'tp', 'pct', default=tp_pct))
+            except Exception: pass
         entry = float(entry); size = float(size)
         trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
         trigger_px = float(round_price(coin, trigger_px))
@@ -3105,6 +3186,56 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         conf_score = 0
 
     log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} engine={signal_engine} risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score}")
+
+    # ─────────────────────────────────────────────────────
+    # ENTRY LLM GATE — final semantic pre-trade check.
+    # Reads tuned params + active vetos + KB entries → ALLOW | SIZE_DOWN | BLOCK.
+    # Fail-open on any error (returns ALLOW with 1.0 mult) so trading never halts.
+    # Set env POSTMORTEM_ENTRY_GATE=0 to disable.
+    # ─────────────────────────────────────────────────────
+    if _POSTMORTEM_OK and _postmortem is not None:
+        try:
+            cur_px = get_mid(coin) or 0
+            session_hour = time.gmtime(time.time()).tm_hour
+            session_name = ('asian' if 0 <= session_hour < 8
+                            else 'london' if 8 <= session_hour < 13
+                            else 'ny' if 13 <= session_hour < 21
+                            else 'overnight')
+            try:
+                funding_bps = get_funding_rate(coin) * 10000.0  # fraction → bps
+            except Exception:
+                funding_bps = None
+            try:
+                _btc_dir = btc_correlation.get_state().get('btc_dir', 0)
+            except Exception:
+                _btc_dir = 0
+            signal_ctx = {
+                'engine': signal_engine,
+                'conf_score': conf_score,
+                'conf_breakdown': conf_breakdown if 'conf_breakdown' in dir() else None,
+                'price': cur_px,
+                'session': session_name,
+                'funding_rate_bps': funding_bps,
+                'btc_dir': _btc_dir,
+                'equity': equity,
+                'open_positions': len(live_positions),
+                'regime_state': None,  # optional; left null for now
+            }
+            verdict = _postmortem.evaluate_entry(coin, sig, signal_ctx)
+            dec = verdict.get('decision', 'ALLOW')
+            sm = float(verdict.get('size_mult', 1.0))
+            reason = verdict.get('reason', '')
+            if dec == 'BLOCK':
+                log(f"{coin} {sig} GATE BLOCK: {reason}")
+                return
+            if dec == 'SIZE_DOWN' and sm < 1.0:
+                old_mult = risk_mult
+                risk_mult = risk_mult * sm
+                log(f"{coin} {sig} GATE SIZE_DOWN ×{sm:.2f}: {reason} (mult {old_mult:.2f} → {risk_mult:.2f})")
+            else:
+                log(f"{coin} {sig} GATE ALLOW: {reason}" if reason else f"{coin} {sig} GATE ALLOW")
+        except Exception as e:
+            log(f"{coin} gate err (continuing): {e}")
 
     now = time.time()
     if sig == 'SELL':
