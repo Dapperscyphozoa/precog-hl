@@ -118,6 +118,14 @@ except Exception as _e:
     _MTF_OK = False
     print(f'[mtf_context] import failed (non-fatal): {_e}', flush=True)
 
+# MTF conviction sizing — scales up risk when HTFs strongly confirm the signal.
+# Max multiplier applied to risk_mult. Default 2.5x means a perfect-confluence
+# trade risks 2.5x more than a marginal one. Combined with existing conf_mult
+# (0.5-2x) and adaptive WR mult, hard-capped at RISK_MULT_CEIL to prevent
+# multipliers compounding into reckless sizing.
+MTF_SIZE_MAX = float(os.environ.get('MTF_SIZE_MAX', '2.5'))
+RISK_MULT_CEIL = float(os.environ.get('RISK_MULT_CEIL', '4.0'))  # absolute ceiling
+
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
 # ═══════════════════════════════════════════════════════
@@ -3449,6 +3457,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 return
             else:
                 log(f"{coin} {sig} MTF-OK: {_detail}")
+            # CONVICTION SIZING — scale risk when HTFs strongly confirm.
+            # Multiplier 1.0-MTF_SIZE_MAX based on combined 1h+4h distance
+            # from EMA20 in favorable direction. Applied on top of existing
+            # risk_mult. Final risk_mult hard-capped at RISK_MULT_CEIL.
+            _mtf_mult, _mtf_mdet = _mtf.conviction_mult(coin, sig, max_mult=MTF_SIZE_MAX)
+            if _mtf_mult > 1.0:
+                _old_mult = risk_mult
+                risk_mult = min(RISK_MULT_CEIL, risk_mult * _mtf_mult)
+                log(f"{coin} {sig} MTF-CONVICTION ×{_mtf_mult}: {_mtf_mdet} (risk_mult {_old_mult:.2f} → {risk_mult:.2f})")
         except Exception as _me:
             log(f"{coin} MTF err (fail-open): {_me}")
 
@@ -3952,12 +3969,16 @@ def main():
                                     log(f"WEBHOOK {coin} {side_str} REGIME-BLOCK: {_wrb_reason}")
                                     wh_count += 1; continue
                                 # MTF CONFLUENCE (1h + 4h alignment).
+                                _wh_mtf_mult = 1.0
                                 if _MTF_OK and _mtf is not None:
                                     try:
                                         _wmo, _wmd = _mtf.aligned(coin, side_str)
                                         if not _wmo:
                                             log(f"WEBHOOK {coin} {side_str} MTF-BLOCK: {_wmd}")
                                             wh_count += 1; continue
+                                        _wh_mtf_mult, _wh_mtf_det = _mtf.conviction_mult(coin, side_str, max_mult=MTF_SIZE_MAX)
+                                        if _wh_mtf_mult > 1.0:
+                                            log(f"WEBHOOK {coin} {side_str} MTF-CONVICTION ×{_wh_mtf_mult}: {_wh_mtf_det}")
                                     except Exception as _wme:
                                         log(f"WEBHOOK {coin} MTF err (fail-open): {_wme}")
                                 # R:R FLOOR for webhook entries too.
@@ -4007,7 +4028,7 @@ def main():
                                         log(f"WEBHOOK {coin} gate err: {_ge} — allowing at 1.0x")
 
                                 # Apply both conviction and gate multipliers to size calc
-                                wh_risk_mult = risk_mult * wh_size_mult * wh_gate_mult
+                                wh_risk_mult = min(RISK_MULT_CEIL, risk_mult * wh_size_mult * wh_gate_mult * _wh_mtf_mult)
                                 sz = calc_size(equity, px, risk_pct, wh_risk_mult, coin=coin, side=side_str)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
