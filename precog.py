@@ -126,6 +126,10 @@ except Exception as _e:
 MTF_SIZE_MAX = float(os.environ.get('MTF_SIZE_MAX', '2.5'))
 RISK_MULT_CEIL = float(os.environ.get('RISK_MULT_CEIL', '4.0'))  # absolute ceiling
 
+# Clear-path boost — no verified wall between entry and TP = free run, boost size.
+# Default 1.5x. Env override: CLEAR_PATH_BOOST=2.0 etc.
+CLEAR_PATH_BOOST = float(os.environ.get('CLEAR_PATH_BOOST', '1.5'))
+
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
 # ═══════════════════════════════════════════════════════
@@ -3469,6 +3473,30 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as _me:
             log(f"{coin} MTF err (fail-open): {_me}")
 
+    # CLEAR-PATH MULTIPLIER — no verified wall between entry and TP = free run.
+    # A liquidity wall (≥$500k resting, persistent 5+ min) in the path caps
+    # realistic TP — price typically rejects or consolidates at major walls.
+    # No wall on the path = structural headroom to reach target. Apply boost.
+    # Neutral (1.0x) when a wall is in path OR no orderbook data available.
+    try:
+        _tp_est = None
+        _cfg_for_tp = percoin_configs.get_config(coin) if percoin_configs.ELITE_MODE else None
+        if _cfg_for_tp and _cfg_for_tp.get('TP'):
+            _tp_est = float(_cfg_for_tp['TP'])
+        if _tp_est and _tp_est > 0:
+            _entry_est = get_mid(coin)
+            if _entry_est:
+                _cp_mult, _cp_det = wall_confluence.clear_path_mult(
+                    coin, sig, _entry_est, _tp_est, boost=CLEAR_PATH_BOOST)
+                if _cp_mult > 1.0:
+                    _old = risk_mult
+                    risk_mult = min(RISK_MULT_CEIL, risk_mult * _cp_mult)
+                    log(f"{coin} {sig} CLEAR-PATH ×{_cp_mult}: {_cp_det} (risk_mult {_old:.2f} → {risk_mult:.2f})")
+                elif _cp_det.get('reason') == 'wall_in_path':
+                    log(f"{coin} {sig} WALL-IN-PATH (no boost): {_cp_det}")
+    except Exception as _cpe:
+        log(f"{coin} clear-path err (fail-open): {_cpe}")
+
     # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
     # Reads per-coin SL/TP from percoin_configs (OOS-tuned). Rejects setups
     # where reward < MIN_RR × risk. Prevents the inverted-R:R trades that
@@ -3970,6 +3998,7 @@ def main():
                                     wh_count += 1; continue
                                 # MTF CONFLUENCE (1h + 4h alignment).
                                 _wh_mtf_mult = 1.0
+                                _wh_cp_mult = 1.0
                                 if _MTF_OK and _mtf is not None:
                                     try:
                                         _wmo, _wmd = _mtf.aligned(coin, side_str)
@@ -3981,6 +4010,19 @@ def main():
                                             log(f"WEBHOOK {coin} {side_str} MTF-CONVICTION ×{_wh_mtf_mult}: {_wh_mtf_det}")
                                     except Exception as _wme:
                                         log(f"WEBHOOK {coin} MTF err (fail-open): {_wme}")
+                                # CLEAR-PATH check for webhook entries
+                                try:
+                                    _wcfg = percoin_configs.get_config(coin) if percoin_configs.ELITE_MODE else None
+                                    _wtp_est = float(_wcfg.get('TP')) if _wcfg and _wcfg.get('TP') else None
+                                    if _wtp_est and _wtp_est > 0 and px:
+                                        _wh_cp_mult, _wh_cp_det = wall_confluence.clear_path_mult(
+                                            coin, side_str, px, _wtp_est, boost=CLEAR_PATH_BOOST)
+                                        if _wh_cp_mult > 1.0:
+                                            log(f"WEBHOOK {coin} {side_str} CLEAR-PATH ×{_wh_cp_mult}: {_wh_cp_det}")
+                                        elif _wh_cp_det.get('reason') == 'wall_in_path':
+                                            log(f"WEBHOOK {coin} {side_str} WALL-IN-PATH: {_wh_cp_det}")
+                                except Exception as _cpe2:
+                                    log(f"WEBHOOK {coin} clear-path err: {_cpe2}")
                                 # R:R FLOOR for webhook entries too.
                                 if MIN_RR > 0:
                                     try:
@@ -4028,7 +4070,7 @@ def main():
                                         log(f"WEBHOOK {coin} gate err: {_ge} — allowing at 1.0x")
 
                                 # Apply both conviction and gate multipliers to size calc
-                                wh_risk_mult = min(RISK_MULT_CEIL, risk_mult * wh_size_mult * wh_gate_mult * _wh_mtf_mult)
+                                wh_risk_mult = min(RISK_MULT_CEIL, risk_mult * wh_size_mult * wh_gate_mult * _wh_mtf_mult * _wh_cp_mult)
                                 sz = calc_size(equity, px, risk_pct, wh_risk_mult, coin=coin, side=side_str)
                                 fill = place(coin, is_buy, sz)
                                 if fill:

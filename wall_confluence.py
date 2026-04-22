@@ -35,6 +35,67 @@ def wall_context(coin, side, entry_price):
             'persistence': wall.get('persistence_windows', 0)}
 
 
+def clear_path_mult(coin, side, entry_price, tp_pct, boost=1.5):
+    """Return (multiplier, detail) for 'clear run' sizing boost.
+
+    Checks whether any VERIFIED wall (≥$500k, persistent 5+ min) sits between
+    entry and TP target. If the path is clear, boost the trade. If a wall
+    blocks the path, neutral (1.0x) — the trade may still win but the wall is
+    a structural barrier that caps expected realization.
+
+    For BUY:  path is UP (entry → entry × (1 + tp_pct)). Check 'ask' walls.
+    For SELL: path is DOWN (entry → entry × (1 - tp_pct)). Check 'bid' walls.
+
+    If the coin has no orderbook data at all (not subscribed / thin book),
+    return 1.0 (no boost, no penalty — insufficient information).
+
+    Args:
+      boost: multiplier applied when path is clear (default 1.5x)
+
+    Returns:
+      (multiplier: float, detail: dict)
+    """
+    try:
+        # Verify we actually have orderbook data for this coin
+        with orderbook_ws._LOCK:
+            depth = orderbook_ws._DEPTH.get(coin)
+            has_data = bool(depth and depth.get('mid'))
+        if not has_data:
+            return 1.0, {'reason': 'no_orderbook_data'}
+
+        wall_side = 'ask' if side == 'BUY' else 'bid'
+        walls = orderbook_ws.get_walls(coin)
+        path_walls = [w for w in walls if w.get('side') == wall_side]
+
+        if side == 'BUY':
+            target_px = entry_price * (1 + tp_pct)
+            blockers = [w for w in path_walls if entry_price < w['price'] <= target_px]
+        else:  # SELL
+            target_px = entry_price * (1 - tp_pct)
+            blockers = [w for w in path_walls if target_px <= w['price'] < entry_price]
+
+        if blockers:
+            nearest = min(blockers, key=lambda w: abs(w['price'] - entry_price))
+            dist_pct = abs(nearest['price'] - entry_price) / entry_price * 100
+            return 1.0, {
+                'reason': 'wall_in_path',
+                'wall_px': round(nearest['price'], 6),
+                'wall_usd': int(nearest['usd']),
+                'dist_pct': round(dist_pct, 2),
+                'target_px': round(target_px, 6),
+            }
+
+        # Path is clear — count walls considered (for confidence reporting)
+        return boost, {
+            'reason': 'clear_path',
+            'target_px': round(target_px, 6),
+            'walls_on_side_considered': len(path_walls),
+            'boost': boost,
+        }
+    except Exception as e:
+        return 1.0, {'err': str(e)}
+
+
 def wall_pressure(coin, mid_price, band_pct=0.02):
     """Returns -1 to +1: aggregated bid-ask imbalance within ±band_pct of mid.
     Positive = ask-heavy (resistance dominant, bearish pressure).
