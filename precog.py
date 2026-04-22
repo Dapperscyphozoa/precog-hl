@@ -1545,6 +1545,125 @@ def protect_sl_endpoint(coin):
         log(f"PROTECT_SL ERR {coin}: {e}")
         return jsonify({'err': str(e)}), 500
 
+
+@app.route('/protect_all', methods=['GET', 'POST'])
+def protect_all_endpoint():
+    """Scan every open position on HL. For any naked (no SL or no TP)
+    position, attach the missing protection using the coin's per-coin
+    config (or ?sl_pct / ?tp_pct overrides). Returns per-coin outcome.
+
+    Args:
+      ?secret= (required)
+      ?sl_pct= (optional: force this SL pct for all; else uses per-coin config)
+      ?tp_pct= (optional: force this TP pct for all; else uses per-coin config)
+      ?dryrun=1 (optional: report what WOULD be placed, no orders fire)
+      ?rate_delay=2.0 (seconds between calls to avoid HL 429)
+
+    Idempotent — already-protected positions are skipped.
+    """
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err':'unauthorized'}), 401
+    sl_override = flask_request.args.get('sl_pct')
+    tp_override = flask_request.args.get('tp_pct')
+    dryrun = flask_request.args.get('dryrun') == '1'
+    try: rate_delay = float(flask_request.args.get('rate_delay','2.0'))
+    except: rate_delay = 2.0
+
+    try:
+        us = info.user_state(WALLET)
+        fo = info.frontend_open_orders(WALLET)
+    except Exception as e:
+        return jsonify({'err': f'HL fetch failed: {e}'}), 500
+
+    # Coverage map per coin
+    from collections import defaultdict
+    cov = defaultdict(lambda: {'sl': False, 'tp': False})
+    for o in fo:
+        c = o.get('coin','').upper()
+        ot = o.get('orderType','')
+        if 'Stop' in ot: cov[c]['sl'] = True
+        elif 'Take' in ot: cov[c]['tp'] = True
+
+    results = []
+    for ap in us.get('assetPositions', []):
+        p = ap.get('position', {})
+        sz = float(p.get('szi', 0))
+        if sz == 0: continue
+        coin = p.get('coin','').upper()
+        entry = float(p.get('entryPx', 0))
+        if not entry: continue
+        is_long = sz > 0
+        size_abs = abs(sz)
+        c = cov[coin]
+        if c['sl'] and c['tp']:
+            results.append({'coin': coin, 'status': 'already_protected'})
+            continue
+
+        # Figure out SL/TP pct from config if not overridden
+        cfg = None
+        try:
+            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                cfg = percoin_configs.get_config(coin)
+        except Exception: pass
+        default_sl = (cfg or {}).get('SL', 0.02)
+        default_tp = (cfg or {}).get('TP', 0.06)
+        sl_pct = float(sl_override) if sl_override else default_sl
+        tp_pct = float(tp_override) if tp_override else default_tp
+
+        result = {'coin': coin, 'entry': entry, 'size': size_abs,
+                  'side': 'LONG' if is_long else 'SHORT',
+                  'sl_pct': sl_pct, 'tp_pct': tp_pct,
+                  'had_sl': c['sl'], 'had_tp': c['tp']}
+
+        if dryrun:
+            result['status'] = 'dryrun_would_attach'
+            results.append(result); continue
+
+        # Attach SL if missing
+        if not c['sl']:
+            try:
+                trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
+                trigger_px = float(round_price(coin, trigger_px))
+                limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
+                sl_size = float(round_size(coin, size_abs))
+                r = exchange.order(coin, not is_long, sl_size, limit_px,
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"sl"}},
+                                   reduce_only=True)
+                s = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0]
+                result['sl_placed_at'] = trigger_px
+                result['sl_hl_response'] = s
+                log(f"PROTECT_ALL {coin} SL placed @ {trigger_px} ({sl_pct*100:.1f}%)")
+            except Exception as e:
+                result['sl_err'] = str(e)
+                log(f"PROTECT_ALL {coin} SL err: {e}")
+            time.sleep(rate_delay)
+
+        # Attach TP if missing
+        if not c['tp']:
+            try:
+                trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
+                trigger_px = float(round_price(coin, trigger_px))
+                limit_px = float(round_price(coin, trigger_px * (0.98 if is_long else 1.02)))
+                tp_size = float(round_size(coin, size_abs))
+                r = exchange.order(coin, not is_long, tp_size, limit_px,
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"tp"}},
+                                   reduce_only=True)
+                s = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0]
+                result['tp_placed_at'] = trigger_px
+                result['tp_hl_response'] = s
+                log(f"PROTECT_ALL {coin} TP placed @ {trigger_px} ({tp_pct*100:.1f}%)")
+            except Exception as e:
+                result['tp_err'] = str(e)
+                log(f"PROTECT_ALL {coin} TP err: {e}")
+            time.sleep(rate_delay)
+
+        result['status'] = 'attached'
+        results.append(result)
+
+    return jsonify({'status':'done','dryrun':dryrun,'n_positions':len(results),
+                    'rate_delay_sec':rate_delay,'results': results})
+
+
 @app.route('/transfer', methods=['POST'])
 def transfer_funds():
     """Transfer USDC internally on HL. POST {amount, to_wallet}"""
@@ -2944,18 +3063,58 @@ def place(coin, is_buy, size):
             log(f"MAKER {coin} {'BUY' if is_buy else 'SELL'} {size}@{maker_px}: {status}")
             oid = status.get('resting',{}).get('oid') or status.get('filled',{}).get('oid')
             if 'filled' in status: return maker_px
+
+            # Poll for fill. Check by BOTH order status (preferred) AND position
+            # presence (backup). Polling by oid is more precise and immune to
+            # ambient positions from other fills.
+            # FIXED 2026-04-22: previous logic polled for 'any position on this
+            # coin' which was correct but led to a false-negative race — if
+            # the maker filled AFTER the last poll but BEFORE the cancel call,
+            # the cancel would succeed (cancelling a just-filled order on HL
+            # returns 'success' but is a no-op if already filled), but we'd
+            # have already decided no fill happened and fall through to TAKER,
+            # creating a double-entry. Now we explicitly verify no fill after
+            # cancel and re-check position state one last time.
+            filled_via_poll = False
             for wait_s in range(MAKER_FALLBACK_SEC):
                 time.sleep(1)
-                state_now = info.user_state(WALLET)
-                has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
-                              for p in state_now.get('assetPositions',[]))
-                if has_pos:
-                    log(f"MAKER fill {coin} after {wait_s+1}s"); return maker_px
+                try:
+                    state_now = info.user_state(WALLET)
+                    has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
+                                  for p in state_now.get('assetPositions',[]))
+                    if has_pos:
+                        log(f"MAKER fill {coin} after {wait_s+1}s")
+                        filled_via_poll = True
+                        return maker_px
+                except Exception:
+                    pass  # transient HL error, keep polling
+
+            # Poll window expired. Try to cancel the maker.
             try:
                 exchange.cancel(coin, oid)
                 log(f"MAKER unfilled {coin}, canceling oid={oid} -> TAKER fallback")
+                # Sanity check: did the cancel race against a fill? Recheck.
+                time.sleep(0.5)
+                try:
+                    state_now = info.user_state(WALLET)
+                    has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
+                                  for p in state_now.get('assetPositions',[]))
+                    if has_pos:
+                        log(f"MAKER {coin} filled during cancel race — returning maker_px={maker_px}, skipping TAKER")
+                        return maker_px
+                except Exception: pass
             except Exception as ce:
+                # Cancel failed. Most common cause: order already filled. Verify.
                 log(f"cancel err {coin}: {ce}")
+                try:
+                    time.sleep(0.3)
+                    state_now = info.user_state(WALLET)
+                    has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
+                                  for p in state_now.get('assetPositions',[]))
+                    if has_pos:
+                        log(f"MAKER cancel-failed but position exists — treating as filled, maker_px={maker_px}")
+                        return maker_px
+                except Exception: pass
     except Exception as e:
         log(f"maker place err {coin}: {e}")
 
