@@ -3436,6 +3436,17 @@ def main():
                         try:
                             pnl = close(k)
                             log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
+                            # Feed post-mortem so agents can analyze whiffed trades.
+                            # These are the MOST valuable learning data — positions that
+                            # opened but went nowhere indicate signal quality issues,
+                            # SL/TP misplacement, or regime mismatch.
+                            try:
+                                pos_for_pm = dict(pos_state)
+                                pos_for_pm['exit_reason'] = 'dust_sweep'
+                                pos_for_pm['dust_age_sec'] = age_sec
+                                record_close(pos_for_pm, k, pnl if pnl is not None else 0.0, state)
+                            except Exception as _e:
+                                log(f"dust-sweep postmortem hook err {k}: {_e}")
                             state['positions'].pop(k, None)
                             if pnl is not None:
                                 state['last_pnl_close'] = pnl
