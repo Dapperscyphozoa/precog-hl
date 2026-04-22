@@ -223,10 +223,12 @@ def _run_sync(pos, coin, pnl_pct):
 
     # Fan out agents
     findings = []
+    _fanout_timeout = False
+    pool = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     try:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(_run_one_agent, name, fn, trade, context): name
-                       for name, fn in agents.AGENTS.items()}
+        futures = {pool.submit(_run_one_agent, name, fn, trade, context): name
+                   for name, fn in agents.AGENTS.items()}
+        try:
             for fut in as_completed(futures, timeout=180):
                 try:
                     findings.append(fut.result(timeout=60))
@@ -239,8 +241,30 @@ def _run_sync(pos, coin, pnl_pct):
                         'proposed_delta': [],
                         'proposed_veto': None,
                     })
+        except Exception as e:
+            # as_completed hit the 180s outer timeout with stuck futures pending
+            _fanout_timeout = True
+            _safe_log(f'log_id={log_id} fan-out timeout: {type(e).__name__}: {e}')
+            # Record irrelevant stubs for any unfinished agents so findings length
+            # reflects what was attempted, and the DB entry doesn't stay in "running".
+            done = {f for f in futures if f.done()}
+            for f, name in futures.items():
+                if f not in done:
+                    findings.append({
+                        'agent': name, 'verdict': 'irrelevant',
+                        'confidence': 0.0,
+                        'reasoning': 'agent timed out (fan-out 180s)',
+                        'proposed_delta': [], 'proposed_veto': None,
+                    })
     except Exception as e:
-        _safe_log(f'agent fan-out failed: {e}')
+        _safe_log(f'log_id={log_id} agent fan-out setup failed: {e}')
+    finally:
+        # CRITICAL: wait=False + cancel_futures prevents the pool from blocking
+        # on stuck worker threads. Previously `with ThreadPoolExecutor` called
+        # shutdown(wait=True) which waited forever for hung HTTP calls and left
+        # log entries stuck in "running" forever (see runs 20 AR, 38 TST).
+        try: pool.shutdown(wait=False, cancel_futures=True)
+        except Exception: pass
 
     # Filter out irrelevants before sending to synthesizer to reduce noise
     relevant = [f for f in findings if f.get('verdict') != 'irrelevant']
