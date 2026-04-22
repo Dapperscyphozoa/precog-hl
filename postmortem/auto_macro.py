@@ -176,18 +176,18 @@ def pull_all(force=False):
             except Exception as e:
                 summary['stooq'][canon] = f'err:{type(e).__name__}'
 
-        # Massive.io parallel (only if API key set)
+        # Massive.io — SERIALIZED with 260ms spacing (4 req/sec limit)
         if os.environ.get('MASSIVE_API_KEY') or os.environ.get('MASSIVE_IO_API_KEY'):
-            massive_futs = {ex.submit(_fetch_massive_one, t, c): c for t, c in MASSIVE_SYMBOLS.items()}
-            for fut, canon in massive_futs.items():
+            for ticker, canon in MASSIVE_SYMBOLS.items():
                 try:
-                    result = fut.result(timeout=TIMEOUT + 4)
+                    result = _fetch_massive_one(ticker, canon)
                     if isinstance(result, tuple):
                         summary['massive'][canon] = {'status': result[0], 'detail': result[1]}
                     else:
                         summary['massive'][canon] = result or 'failed'
                 except Exception as e:
                     summary['massive'][canon] = f'err:{type(e).__name__}'
+                time.sleep(0.30)  # respect 4 req/sec rate limit
         else:
             summary['massive'] = 'disabled (MASSIVE_API_KEY not set)'
 
