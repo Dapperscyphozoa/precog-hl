@@ -134,6 +134,27 @@ def init_db():
             pass  # column already exists
         c.commit()
 
+    # ─── Startup reclaim ──────────────────────────────────────────
+    # Mark any orphaned 'running' entries as interrupted. These happen when
+    # the process was killed mid-postmortem (deploy, restart, crash) and the
+    # runner thread couldn't update the entry. Without this, the /log
+    # endpoint shows stuck entries forever (see runs 20 AR, 38 TST in earlier
+    # logs). We mark them and set agents_run=0 so UI can distinguish.
+    try:
+        with _conn() as c:
+            cur = c.execute(
+                "UPDATE postmortem_log "
+                "SET status = 'interrupted:process killed before post-mortem completed' "
+                "WHERE status = 'running' OR status IS NULL"
+            )
+            reclaimed = cur.rowcount
+            c.commit()
+            if reclaimed > 0:
+                try: print(f'[postmortem] reclaimed {reclaimed} orphaned running entries on startup')
+                except Exception: pass
+    except Exception:
+        pass  # don't crash startup on reclaim failure
+
 
 # ─────────────────────────────────────────────────────
 # PARAM READ (hot path — called at every signal tick)
