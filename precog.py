@@ -2786,7 +2786,7 @@ def flatten_all(reason='KILL'):
 def place_native_sl(coin, is_long, entry, size):
     """Place HL native stop-loss order — executes server-side, no tick delay.
     Uses per-coin SL from percoin_configs (OOS-tuned), then postmortem tuner overrides,
-    else global fallback."""
+    else global fallback. Returns the sl_pct that was used (for pos-dict enrichment)."""
     try:
         # Per-coin SL from OOS tuning (5% default — validated WR)
         sl_pct = STOP_LOSS_PCT  # global fallback 2%
@@ -2816,17 +2816,20 @@ def place_native_sl(coin, is_long, entry, size):
             log(f"{coin} NATIVE SL REJECTED: {status['error']}")
         else:
             log(f"{coin} NATIVE SL placed @ {trigger_px} (sl_pct={sl_pct*100:.1f}%)")
+        return sl_pct
     except Exception as e:
         log(f"{coin} native SL err: {e}")
+        return None
 
 def place_native_tp(coin, is_long, entry, size):
     """Place HL native take-profit order using per-coin TP from OOS tuning.
-    Postmortem tuner may override the per-coin TP within bounds."""
+    Postmortem tuner may override the per-coin TP within bounds.
+    Returns the tp_pct that was used, or None if no TP was placed."""
     try:
         if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
-            return  # no per-coin TP for non-elite
+            return None  # no per-coin TP for non-elite
         cfg = percoin_configs.get_config(coin)
-        if not cfg or 'TP' not in cfg: return
+        if not cfg or 'TP' not in cfg: return None
         tp_pct = cfg['TP']
         # Postmortem tuner override
         if _POSTMORTEM_OK and _postmortem is not None:
@@ -2848,8 +2851,10 @@ def place_native_tp(coin, is_long, entry, size):
             log(f"{coin} NATIVE TP REJECTED: {status['error']}")
         else:
             log(f"{coin} NATIVE TP placed @ {trigger_px} (tp_pct={tp_pct*100:.2f}%)")
+        return tp_pct
     except Exception as e:
         log(f"{coin} native TP err: {e}")
+        return None
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
@@ -3273,12 +3278,22 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 fill_px = place(coin, False, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
-                    place_native_sl(coin, False, fill_px, sz)
+                    _sl_pct_used = place_native_sl(coin, False, fill_px, sz)
+                    _tp_pct_used = place_native_tp(coin, False, fill_px, sz)
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
+                    # sigs and other context for post-mortem agents
+                    try:
+                        _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
+                    except Exception:
+                        _sigs_for_pm = None
                     state['positions'][coin] = {'side':'S', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px,
                                                 'engine':signal_engine, 'conf':conf_score,
-                                                'utc_h': time.gmtime(now).tm_hour}
+                                                'utc_h': time.gmtime(now).tm_hour,
+                                                'sl_pct': _sl_pct_used,
+                                                'tp_pct': _tp_pct_used,
+                                                'sigs': _sigs_for_pm,
+                                                'size': sz}
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
@@ -3297,12 +3312,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 fill_px = place(coin, True, calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig))
                 if fill_px:
                     sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
-                    place_native_sl(coin, True, fill_px, sz)
+                    _sl_pct_used = place_native_sl(coin, True, fill_px, sz)
+                    _tp_pct_used = place_native_tp(coin, True, fill_px, sz)
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
+                    try:
+                        _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
+                    except Exception:
+                        _sigs_for_pm = None
                     state['positions'][coin] = {'side':'L', 'opened_at':now, 'entry':fill_px,
                                                 'stage':'initial', 'peak':fill_px,
                                                 'engine':signal_engine, 'conf':conf_score,
-                                                'utc_h': time.gmtime(now).tm_hour}
+                                                'utc_h': time.gmtime(now).tm_hour,
+                                                'sl_pct': _sl_pct_used,
+                                                'tp_pct': _tp_pct_used,
+                                                'sigs': _sigs_for_pm,
+                                                'size': sz}
 
 # ═══════════════════════════════════════════════════════
 
@@ -3404,9 +3428,14 @@ def main():
                 if k not in state['positions']:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
-                    state['positions'][k] = {'side':side, 'opened_at':now - 3600, 'entry':entry_px,
-                                             'stage':'initial', 'peak':entry_px}
-                    log(f"RECONCILE: adopting existing {k} {side} (opened_at set to -1h as safety)")
+                    # opened_at = now (not now-3600). Previous value guaranteed
+                    # dust-sweep would kill adopted positions on the same tick
+                    # because age would immediately exceed DUST_MIN_AGE_SEC (30min).
+                    # Post-deploy positions get a fresh 30min grace window.
+                    state['positions'][k] = {'side':side, 'opened_at':now, 'entry':entry_px,
+                                             'stage':'initial', 'peak':entry_px,
+                                             'engine':'RECONCILED', 'source':'reconcile'}
+                    log(f"RECONCILE: adopting existing {k} {side} (fresh 30min grace window)")
 
             # DUST-SWEEP: close STALE positions (>30min old) with |PnL| <= $0.10 to free margin.
             # Rationale: dust-sweep was killing fresh trades before they could develop edge.
@@ -3436,17 +3465,19 @@ def main():
                         try:
                             pnl = close(k)
                             log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
-                            # Feed post-mortem so agents can analyze whiffed trades.
-                            # These are the MOST valuable learning data — positions that
-                            # opened but went nowhere indicate signal quality issues,
-                            # SL/TP misplacement, or regime mismatch.
-                            try:
-                                pos_for_pm = dict(pos_state)
-                                pos_for_pm['exit_reason'] = 'dust_sweep'
-                                pos_for_pm['dust_age_sec'] = age_sec
-                                record_close(pos_for_pm, k, pnl if pnl is not None else 0.0, state)
-                            except Exception as _e:
-                                log(f"dust-sweep postmortem hook err {k}: {_e}")
+                            # Feed post-mortem ONLY if close() actually succeeded.
+                            # close() returns None when HL reports no position, which
+                            # happens if the position was already closed externally
+                            # (native SL hit, manual close, previous dust-sweep tick).
+                            # Firing record_close on a None pnl creates phantom entries.
+                            if pnl is not None:
+                                try:
+                                    pos_for_pm = dict(pos_state)
+                                    pos_for_pm['exit_reason'] = 'dust_sweep'
+                                    pos_for_pm['dust_age_sec'] = age_sec
+                                    record_close(pos_for_pm, k, pnl, state)
+                                except Exception as _e:
+                                    log(f"dust-sweep postmortem hook err {k}: {_e}")
                             state['positions'].pop(k, None)
                             if pnl is not None:
                                 state['last_pnl_close'] = pnl
@@ -3622,13 +3653,24 @@ def main():
                                 sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
-                                    place_native_sl(coin, is_buy, fill, sz)
+                                    _sl_pct_used = place_native_sl(coin, is_buy, fill, sz)
+                                    _tp_pct_used = place_native_tp(coin, is_buy, fill, sz)
+                                    try:
+                                        _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
+                                    except Exception:
+                                        _sigs_for_pm = None
                                     state['positions'][coin] = {
                                         'side': 'L' if is_buy else 'S',
                                         'opened_at': time.time(),
                                         'entry': fill,
                                         'stage': 'initial', 'peak': fill,
-                                        'source': 'dynapro'
+                                        'source': 'dynapro',
+                                        'engine': 'WEBHOOK',
+                                        'sl_pct': _sl_pct_used,
+                                        'tp_pct': _tp_pct_used,
+                                        'sigs': _sigs_for_pm,
+                                        'size': sz,
+                                        'utc_h': time.gmtime(time.time()).tm_hour,
                                     }
                                     log(f"WEBHOOK OPEN {coin} {side_str} @ {fill} (px_src={'bybit_ws' if px==by_px else 'hl_mid'}, age={by_age}ms)")
                                     log_trade('HL', coin, side_str, fill, 0, 'webhook')
