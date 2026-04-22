@@ -229,6 +229,108 @@ def agent_tp(trade, context):
     return _run_agent('tp', trade, context)
 
 
+# ─────────────────────────────────────────────────────
+# TARGET_REALIZATION — deterministic (no LLM call).
+# Judges whether TP target was actually achievable in this regime.
+# This is a CROSS-component concern (not tp-level correctness — tp-target
+# calibration). The existing `tp` agent judges "did the TP level fire when
+# price got there". This agent judges "should the TP level have been that
+# ambitious in the first place?"
+# ─────────────────────────────────────────────────────
+def agent_target_realization(trade, context):
+    """Evaluate TP calibration by realization ratio.
+
+    realization = |pnl_pct| / (tp_pct * 100)
+
+    If trade dust-swept with realization < 50%, TP was too wide for the regime.
+    Propose tightening TP to 1.5× achieved peak move (bounded by bounds.py).
+    If trade reached ≥80% of TP, pass. Otherwise irrelevant.
+    """
+    try:
+        pnl = abs(float(trade.get('pnl_pct') or 0))
+        tp_pct = trade.get('tp_pct')
+        duration_s = float(trade.get('duration_s') or 0)
+        exit_reason = str(trade.get('exit_reason') or '')
+        coin = trade.get('coin', '?')
+        side = trade.get('side', '?')
+
+        # Without tp_pct we can't judge. Pre-fix trades will have None.
+        if tp_pct is None or tp_pct <= 0:
+            return {
+                'verdict': 'irrelevant',
+                'confidence': 0.95,
+                'reasoning': 'tp_pct not recorded on this trade; cannot compute realization ratio',
+                'proposed_delta': [],
+                'proposed_veto': None,
+            }
+
+        tp_as_pct = float(tp_pct) * 100.0
+
+        # SL exits: target_realization abstains. sl agent owns that.
+        # Check FIRST — an adverse 5% move isn't "reaching target".
+        if exit_reason in ('sl_hit', 'sl', 'native_sl'):
+            return {
+                'verdict': 'irrelevant',
+                'confidence': 0.9,
+                'reasoning': 'SL exit — target_realization has no opinion on SL-hit trades',
+                'proposed_delta': [],
+                'proposed_veto': None,
+            }
+
+        # Only count realization if PnL is in our favor (positive = trade worked).
+        # A negative pnl means price moved AGAINST us → realization = 0.
+        signed_pnl = float(trade.get('pnl_pct') or 0)
+        realization = (signed_pnl / tp_as_pct) if (signed_pnl > 0 and tp_as_pct > 0) else 0.0
+
+        # Sufficient: hit or came close to target
+        if realization >= 0.8 or exit_reason in ('tp_hit', 'tp', 'native_tp'):
+            return {
+                'verdict': 'passed',
+                'confidence': 0.9,
+                'reasoning': (f'{coin} {side} reached {signed_pnl:.2f}% = {realization*100:.0f}% of '
+                              f'TP target ({tp_as_pct:.2f}%) in {duration_s/60:.0f}min. '
+                              f'TP calibration appropriate for this regime.'),
+                'proposed_delta': [],
+                'proposed_veto': None,
+            }
+
+        # Insufficient + dust-sweep = TP was too wide. Propose tightening.
+        if exit_reason == 'dust_sweep' and realization < 0.5:
+            # Propose 1.5x achieved peak move as new TP, floored at bounds min.
+            proposed_tp = max(pnl * 1.5 / 100.0, 0.004)  # min 0.4% (matches bounds)
+            proposed_tp = round(proposed_tp, 4)
+
+            return {
+                'verdict': 'failed',
+                'confidence': 0.85,
+                'reasoning': (f'{coin} {side}: TP={tp_as_pct:.2f}% was not reached in '
+                              f'{duration_s/60:.0f}min. Peak PnL was {pnl:.2f}% = only '
+                              f'{realization*100:.0f}% of target. Trade dust-swept without '
+                              f'finding edge. Regime suggests achievable TP ~{proposed_tp*100:.2f}% '
+                              f'(1.5× achieved). Tighter TP would improve hit rate.'),
+                'proposed_delta': [{'component': 'tp', 'param': 'pct', 'new_value': proposed_tp}],
+                'proposed_veto': None,
+            }
+
+        # In-between: partial realization, not dust-swept. Inconclusive.
+        return {
+            'verdict': 'irrelevant',
+            'confidence': 0.75,
+            'reasoning': (f'Partial realization ({realization*100:.0f}% of TP), '
+                          f'exit={exit_reason}. Not enough signal to tune TP in either direction.'),
+            'proposed_delta': [],
+            'proposed_veto': None,
+        }
+    except Exception as e:
+        return {
+            'verdict': 'irrelevant',
+            'confidence': 0.0,
+            'reasoning': f'target_realization error: {type(e).__name__}: {str(e)[:200]}',
+            'proposed_delta': [],
+            'proposed_veto': None,
+        }
+
+
 # Registry — every agent defined above plus its component key
 AGENTS = {
     'rsi':       agent_rsi,
@@ -252,6 +354,7 @@ AGENTS = {
     'regime':    agent_regime,
     'sl':        agent_sl,
     'tp':        agent_tp,
+    'target_realization': agent_target_realization,
 }
 
 
