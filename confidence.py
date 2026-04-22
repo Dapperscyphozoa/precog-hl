@@ -121,15 +121,32 @@ def _rsi(c, p=14):
     return 100 - 100 / (1 + ag / np.where(al == 0, 1e-10, al))
 
 def size_multiplier(score_val):
-    """DIAL MODE: extreme size divergence by conviction.
-    <30:  0.2x (tiny probe — fees bigger than trade, barely participates)
-    30-49: 0.5x (small)
-    50-64: 1.5x (meaningful)
-    65-79: 3.0x (big — this is the bread and butter)
-    80+:   5.0x (conviction max — rare, huge)
-    Average effective size around 1.0-1.5x across distribution, but winners much bigger."""
-    if score_val < 30: return 0.2
-    if score_val < 50: return 0.5
-    if score_val < 65: return 1.5
-    if score_val < 80: return 3.0
+    """CONVICTION MODE: block low-conviction, scale up steeply at high conviction.
+
+    At $710-$5k equity, 0.2x probe trades result in $10-30 notional positions.
+    Even a perfect 2% TP on those is $0.20-$0.60 profit — below fee threshold
+    and well inside market noise. No edge can accumulate from trades this small.
+
+    Old dial (<30 → 0.2x) let every signal trade. New dial blocks <40 entirely
+    and sizes remaining trades for meaningful $ impact per outcome.
+
+    <40:  0.0x (BLOCKED — not worth fee/slippage/mental-capital overhead)
+    40-49: 1.0x (baseline — acceptable conviction, full base size)
+    50-64: 2.0x (meaningful — clear signal agreement across components)
+    65-79: 3.5x (high — multi-component confluence)
+    80+:   5.0x (conviction max — hard cap 15% equity at SL)
+
+    With $710 equity × 3% base risk:
+       baseline   (1.0x) = $21 risk  → ~$1050 notional at 2% SL  → $21/trade at 2% TP
+       meaningful (2.0x) = $42 risk  → ~$2100 notional           → $42/trade
+       high       (3.5x) = $74 risk  → ~$3700 notional           → $74/trade
+       max        (5.0x) = $107 risk → ~$5300 notional           → $107/trade
+
+    Returning 0.0 signals process() to skip — the explicit conviction-floor
+    check must also exist at the caller (calc_size returning 0 would attempt
+    a 0-size order which HL rejects noisily)."""
+    if score_val < 40: return 0.0   # BLOCKED
+    if score_val < 50: return 1.0
+    if score_val < 65: return 2.0
+    if score_val < 80: return 3.5
     return 5.0
