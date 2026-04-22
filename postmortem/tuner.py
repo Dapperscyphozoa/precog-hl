@@ -47,6 +47,31 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
     kb_written = 0
     side = trade.get('side')
 
+    # ─── Exit-quality classification ─────────────────────────────
+    # Dust-sweep closes happen when a position has |PnL| <= $0.10 for >30min.
+    # This is an OPERATIONAL exit driven by position sizing, not a signal/
+    # exit-level outcome. Tuning entry or exit params based on dust-swept
+    # trades is harmful: the trade never ran to completion, so neither TP
+    # realization nor SL hit-rate reflects market reality. A $13-notional
+    # position showing +0.25% PnL is dust-swept; that tells us nothing
+    # about whether the 2% TP target was correctly calibrated.
+    #
+    # Components we refuse to tune from dust-swept or tiny-notional trades:
+    exit_reason = str(trade.get('exit_reason') or '').lower()
+    entry_px = float(trade.get('entry_px') or 0)
+    size = float(trade.get('size') or 0)
+    notional = abs(entry_px * size) if entry_px and size else 0.0
+    dust_exit = (exit_reason in ('dust_sweep', 'unknown', ''))
+    micro_notional = (0 < notional < 30.0)  # <$30 is below meaningful signal test
+    _block_signal_tuning = dust_exit or micro_notional
+    BLOCKED_COMPONENTS_ON_DUST = {
+        'tp', 'sl',                       # exit levels — can't learn from operational close
+        'rsi', 'pivot', 'bollinger',      # entry signals — trade never ran
+        'adx', 'ema', 'macd',             # momentum/trend filters
+        'structure', 'fvg', 'ob', 'fib',  # price-action filters
+        'fear_greed', 'funding', 'oi',    # macro filters
+    }
+
     # ALWAYS record findings (audit trail)
     for f in findings:
         db.record_finding(
@@ -116,7 +141,13 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
             if samples_since < min_samples:
                 continue
 
-            # Gate 5: bounds clamp (final safety)
+            # Gate 6: dust-sweep / micro-notional guard
+            # Do not tune entry or exit parameters from operational closes.
+            # The trade's realization reflects position sizing, not signal quality.
+            if _block_signal_tuning and comp in BLOCKED_COMPONENTS_ON_DUST:
+                continue
+
+            # Gate 7: bounds clamp (final safety)
             current = db.read_param(coin, comp, param)
             clamped = bounds.clamp_delta(comp, param, current, float(new_val))
             if clamped is None:

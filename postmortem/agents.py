@@ -151,13 +151,24 @@ Your job:
 3. Did the trade exit via SL/TP hit, trail, dust_sweep, or reversal?
 
 Key heuristic — target realization:
-  If exit_reason in (dust_sweep, signal_reversal, unknown) AND peak PnL < 50% of TP:
-    → TP was too ambitious. Propose tp.pct → max(1.5 × achieved_peak / 100, 0.004)
-  If SL was hit: evaluate whether SL was too tight for regime volatility
-  If trade won at TP: passed
+  If exit_reason = SL hit: evaluate whether SL was too tight for regime volatility
+  If exit_reason = TP hit: passed (no tuning needed)
+  If exit_reason = trail_exit AND peak PnL > TP: trail worked — no tuning
+  If exit_reason = signal_reversal AND peak PnL < 50% of TP:
+    → TP may have been too ambitious. Propose tp.pct → max(1.5 × peak / 100, 0.004)
+
+CRITICAL — dust_sweep handling:
+  exit_reason = dust_sweep means the position had |PnL| <= $0.10 for >30min
+  and was closed OPERATIONALLY to free margin. This is a SIZING outcome,
+  NOT a signal/exit-level outcome. The trade never ran to completion.
+  → Do NOT propose tp.pct deltas on dust-swept trades.
+  → Do NOT propose sl.pct deltas on dust-swept trades.
+  → The correct component to flag is position_sizing (not tunable here —
+    classify as 'DEFER' and note 'operational exit, sizing investigation').
 
 DO NOT propose tp.pct changes for SL-hit trades (SL owns that).
-DO NOT propose sl.pct changes for TP-hit or dust-swept trades (unless volatility evidence).
+DO NOT propose sl.pct changes for TP-hit trades (unless volatility evidence).
+DO NOT propose tp.pct or sl.pct changes for dust_sweep or unknown exits.
 
 {_SHARED_SCHEMA}'''
 
@@ -239,14 +250,27 @@ def _target_realization_delta(trade):
     """Return a proposed tp.pct delta based on realization ratio, or None.
 
     Pure deterministic — no LLM call. This is injected into agent_exit's output
-    so one Haiku call does qualitative + the deterministic math in a single pass."""
+    so one Haiku call does qualitative + the deterministic math in a single pass.
+
+    CRITICAL: dust_sweep and unknown exits are OPERATIONAL (position too small,
+    pipeline bug) — never tune TP based on these because the trade didn't run
+    to completion. Only tune TP on signal_reversal with low realization, where
+    we have genuine evidence the target was too ambitious.
+    """
     try:
         pnl = abs(float(trade.get('pnl_pct') or 0))
         tp_pct = trade.get('tp_pct')
-        exit_reason = str(trade.get('exit_reason') or '')
+        exit_reason = str(trade.get('exit_reason') or '').lower()
         if tp_pct is None or tp_pct <= 0:
             return None
         if exit_reason in ('sl_hit', 'sl', 'native_sl'):
+            return None
+        # Micro-notional positions dust-sweep regardless of signal quality —
+        # their realization ratio is meaningless for TP calibration.
+        entry_px = float(trade.get('entry_px') or 0)
+        size = float(trade.get('size') or 0)
+        notional = abs(entry_px * size) if entry_px and size else 0.0
+        if 0 < notional < 30.0:
             return None
         signed_pnl = float(trade.get('pnl_pct') or 0)
         tp_as_pct = float(tp_pct) * 100.0
@@ -254,14 +278,15 @@ def _target_realization_delta(trade):
         TP_EXITS = ('tp_hit', 'tp', 'native_tp', 'tp_lock_exit', 'trail_exit')
         if realization >= 0.8 or exit_reason in TP_EXITS:
             return None
-        LOW_REAL_EXITS = ('dust_sweep', 'signal_reversal', 'unknown', '', None)
-        if realization < 0.5 and exit_reason in LOW_REAL_EXITS:
+        # Only signal_reversal is a legitimate "target too far" signal.
+        # dust_sweep / unknown / '' indicate operational exits — skip.
+        if realization < 0.5 and exit_reason == 'signal_reversal':
             proposed_tp = max(pnl * 1.5 / 100.0, 0.004)
             proposed_tp = round(proposed_tp, 4)
             return {
                 'component': 'tp', 'param': 'pct', 'new_value': proposed_tp,
                 'rationale': f'realization={realization*100:.0f}%, achieved peak {pnl:.2f}%, '
-                             f'proposed tp→{proposed_tp*100:.2f}% (1.5x achieved)'
+                             f'proposed tp→{proposed_tp*100:.2f}% (1.5x achieved, post signal_reversal)'
             }
         return None
     except Exception:
