@@ -1980,8 +1980,11 @@ USE_ISOLATED_MARGIN = True
 TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global multiplier needed).
                      # Per-coin 15m OOS optimization: PROMPT 10%, ETH 10%, ALT 6%, ASTER 6%, etc.
                      # Prior value 2.0 was bandaid before per-coin tuning existed.
-MAX_POSITIONS = 80  # was 40 — with 5/3/3/3 risk we can support more concurrent
-MAX_SAME_SIDE = 40  # was 15 — let regime-aware system pick directions
+MAX_POSITIONS = 8   # was 80 — concentrate capital into fewer, meaningful-size trades.
+                    # At $710 equity, 80 slots = $8.90/slot capital base, forcing dust-size
+                    # positions even with high-conf multipliers. 8 slots = ~$90/slot base,
+                    # matches 3% × 5-slot concurrency for meaningful notional per trade.
+MAX_SAME_SIDE = 5   # was 40 — cap same-side exposure for risk concentration discipline
 MAX_TOTAL_RISK = 0.92    # 8% reserve
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
@@ -3202,6 +3205,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
         size_mult = confidence.size_multiplier(conf_score)
+        # CONVICTION FLOOR: size_multiplier returns 0.0 for conf<40. Skip trade
+        # entirely rather than attempting a 0-size order. This pivots from "every
+        # signal trades with size scaled by conf" to "only meaningful-conviction
+        # signals trade, each at meaningful size".
+        if size_mult <= 0.0:
+            log(f"{coin} {sig} SKIP: conf={conf_score} below conviction floor {conf_breakdown}")
+            return
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
         risk_mult = risk_mult * size_mult * adapt
