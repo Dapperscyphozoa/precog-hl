@@ -143,6 +143,15 @@ def _build_context(coin, trade):
             ctx['percoin_config'] = percoin_configs.get_config(coin)
     except Exception: pass
 
+    # Market context: news, macro, calendar (for context-aware forensics)
+    try:
+        from . import context as _ctx
+        mkt = _ctx.for_coin(coin)
+        ctx['news_for_coin'] = mkt.get('news_for_coin', [])[:4]  # compact
+        ctx['macro'] = mkt.get('macro', {})
+        ctx['calendar_2h'] = mkt.get('calendar_2h', [])
+    except Exception: pass
+
     return ctx
 
 

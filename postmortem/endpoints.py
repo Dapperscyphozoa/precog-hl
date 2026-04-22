@@ -161,4 +161,87 @@ def register_endpoints(app):
         entry_gate.clear_cache(coin)
         return jsonify({'ok': True, 'coin': coin or 'all'})
 
+    # ─────────────────────────────────────────────────────
+    # Market context endpoints (news / macro / calendar)
+    # ─────────────────────────────────────────────────────
+    from . import news, macro, calendar as cal_mod, context as ctx_mod, trade_finder
+
+    @app.route('/postmortem/news', methods=['GET'])
+    def pm_news():
+        coin = request.args.get('coin')
+        if coin:
+            items = news.recent_for_coin(coin,
+                                         window_sec=int(request.args.get('window', 3600)),
+                                         max_items=int(request.args.get('max', 10)))
+        else:
+            items = news.fetch_all()
+        return jsonify({'ok': True, 'count': len(items), 'items': items[:50]})
+
+    @app.route('/postmortem/macro', methods=['GET'])
+    def pm_macro():
+        return jsonify({'ok': True, 'snapshot': macro.fetch_all()})
+
+    @app.route('/postmortem/calendar', methods=['GET'])
+    def pm_calendar():
+        window = int(request.args.get('window', 7200))
+        impact = request.args.get('impact', 'high')
+        cur = request.args.get('currencies')
+        cur_list = cur.split(',') if cur else None
+        return jsonify({
+            'ok': True,
+            'events': cal_mod.upcoming(window_sec=window, impact_min=impact, currencies=cur_list)
+        })
+
+    @app.route('/postmortem/context', methods=['GET'])
+    def pm_context():
+        coin = request.args.get('coin')
+        if coin:
+            return jsonify({'ok': True, 'coin': coin, 'context': ctx_mod.for_coin(coin)})
+        return jsonify({'ok': True, 'global': ctx_mod.global_context(), 'health': ctx_mod.health()})
+
+    @app.route('/postmortem/context/refresh', methods=['POST'])
+    def pm_context_refresh():
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        ctx_mod.invalidate()
+        return jsonify({'ok': True, 'refreshed_at': time.time()})
+
+    # ─────────────────────────────────────────────────────
+    # Independent trade finder
+    # ─────────────────────────────────────────────────────
+    @app.route('/postmortem/finder/scan', methods=['GET', 'POST'])
+    def pm_finder_scan():
+        coins = None
+        if request.method == 'POST':
+            d = request.get_json(silent=True) or {}
+            coins = d.get('coins')
+        result = trade_finder.scan(coins=coins)
+        return jsonify(result)
+
+    @app.route('/postmortem/finder/fire', methods=['POST'])
+    def pm_finder_fire():
+        """Fire a specific proposal through the webhook pipeline. Requires auth."""
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        d = request.get_json(silent=True) or {}
+        return jsonify(trade_finder.fire_proposal(d))
+
+    @app.route('/postmortem/finder/status', methods=['GET'])
+    def pm_finder_status():
+        return jsonify({'ok': True, 'status': trade_finder.status()})
+
+    @app.route('/postmortem/finder/auto/start', methods=['POST'])
+    def pm_finder_auto_start():
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        started = trade_finder.start_auto()
+        return jsonify({'ok': True, 'started': started})
+
+    @app.route('/postmortem/finder/auto/stop', methods=['POST'])
+    def pm_finder_auto_stop():
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        trade_finder.stop_auto()
+        return jsonify({'ok': True, 'stopped': True})
+
     return app

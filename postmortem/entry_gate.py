@@ -30,7 +30,7 @@ import time
 import json
 import threading
 
-from . import db, bounds, kb, params_api
+from . import db, bounds, kb, params_api, context as ctx_mod
 
 try:
     from anthropic import Anthropic
@@ -66,33 +66,43 @@ You receive:
 - Active component vetos for this coin
 - Top relevant knowledge-base entries from post-mortem analysis of past trades
 - Live market context (regime, funding, session)
+- Macro snapshot (DXY, SPX, VIX, gold, BTC.D, crypto mcap)
+- Upcoming high-impact economic calendar events
+- Recent news headlines for this coin + macro news
 
 You decide ONE of:
-- ALLOW       — trade is aligned with learned patterns, fire at full size
+- ALLOW       — trade is aligned with evidence, fire at full size
 - SIZE_DOWN   — trade has warning signs but not disqualifying; reduce size
-- BLOCK       — trade matches a failing pattern or contradicts hard-learned rules
+- BLOCK       — trade matches a failing pattern, contradicts hard-learned rules,
+                or fires into a hostile near-term event/news catalyst
 
 Rules:
-- BLOCK only when KB evidence is strong (weight >= 2.5 from multiple reinforcements)
-  OR an active veto applies to the primary signal component.
-- SIZE_DOWN when confluence is marginal: moderate KB warnings, conflicting regime,
-  wrong session, or component param tuned aggressively away from default.
+- BLOCK on high-impact econ event within 15 minutes of entry (FOMC, CPI, NFP, rate decisions)
+  unless specifically trading the event.
+- BLOCK on high-impact breaking news in opposing direction within last 15 minutes
+  (e.g. short into a news-pump; long into a news-dump).
+- BLOCK when KB evidence weight >= 2.5 from multiple reinforcements OR an active veto
+  applies to the primary signal component.
+- SIZE_DOWN when macro is mildly hostile (DXY spiking >0.5% for shorts on risk-on,
+  VIX spike for longs, BTC.D climbing for alt longs), KB entries are mildly negative,
+  or an event is 15-60min out.
+- SIZE_DOWN when conflict exists between signal direction and macro regime
+  (e.g. shorting during BTC.D drop + SPX rally = risk-on rally regime).
 - ALLOW by default when no contrary signal exists. Do not block on vibes.
 - When SIZE_DOWN, choose a specific size_mult between 0.3 and 0.7.
-  0.3 = heavy warning, minimum size. 0.7 = mild warning.
 - ALLOW uses size_mult 1.0. BLOCK uses size_mult 0.0.
-- Reason must be one sentence, ≤ 160 chars. Cite specific evidence.
+- Reason must be one sentence, <=160 chars. Cite specific evidence.
 
 Output JSON only. No markdown. Exact shape:
 {
   "decision": "ALLOW" | "SIZE_DOWN" | "BLOCK",
   "size_mult": 0.0,
   "reason": "string",
-  "citations": ["pattern_key_or_veto_or_param_change", ...]
+  "citations": ["pattern_key_or_veto_or_param_or_news_or_event", ...]
 }'''
 
 
-def _build_prompt(coin, side, signal_ctx, tuned_params, vetos, kb_block):
+def _build_prompt(coin, side, signal_ctx, tuned_params, vetos, kb_block, market_ctx_block):
     ctx_summary = {
         'coin': coin,
         'side': side,
@@ -134,6 +144,8 @@ ACTIVE COMPONENT VETOS:
 
 RELEVANT KB ENTRIES (post-mortem learnings for this coin/side):
 {kb_block}
+
+{market_ctx_block}
 
 Decide now. JSON only.'''
 
@@ -273,9 +285,16 @@ def evaluate_entry(coin, side, signal_ctx):
         # Build KB context
         extras = _resolve_regime_state(signal_ctx)
         kb_entries = kb.read_relevant(coin, side, extra_pattern_keys=extras, max_entries=6)
-        kb_block = kb.format_for_prompt(kb_entries, max_chars=1200)
+        kb_block = kb.format_for_prompt(kb_entries, max_chars=1000)
 
-        prompt = _build_prompt(coin, side, signal_ctx, tuned, vetos, kb_block)
+        # Build market context (news + macro + calendar) — defensive, never raises
+        try:
+            mkt_ctx = ctx_mod.for_coin(coin)
+            market_ctx_block = ctx_mod.format_for_prompt(mkt_ctx, max_total_chars=2800)
+        except Exception as _e:
+            market_ctx_block = f'(market context unavailable: {type(_e).__name__})'
+
+        prompt = _build_prompt(coin, side, signal_ctx, tuned, vetos, kb_block, market_ctx_block)
         text = _call_claude_with_timeout(_GATE_SYSTEM, prompt, TIMEOUT_SEC)
         if not text:
             verdict = _fail_open('claude timeout')
