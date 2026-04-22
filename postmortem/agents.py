@@ -94,54 +94,207 @@ def _parse_verdict(text):
 # skips irrelevant findings entirely.
 
 # Shared prompt template; each agent gets a specialized block of instructions
-_BASE_SYSTEM = '''You are a forensic component analyst for a crypto perps trading system.
-You analyze one specific signal component per trade close and decide:
-1. Did this component behave correctly for this trade?
-2. If not, what single-parameter change would most likely have prevented the bad behavior?
 
-Output ONLY valid JSON in this exact shape:
+
+_SHARED_SCHEMA = '''Output ONLY valid JSON. No markdown fences. Exact shape:
 {
   "verdict": "passed" | "failed" | "irrelevant",
   "confidence": 0.0,
-  "reasoning": "concise explanation",
+  "reasoning": "<=300 chars, plain english",
   "proposed_delta": [{"component": "...", "param": "...", "new_value": 0.0}],
   "proposed_veto": null
 }
 
+UNIT CONVENTIONS:
+- pnl_pct is ALREADY in percent. -0.158 means -0.158%, not -15.8%. Do NOT multiply by 100.
+- Always use pnl_display (e.g. "-0.158%") when referring to trade outcome.
+- sl_pct and tp_pct are decimals (0.02 = 2%, 0.08 = 8%).
+
 Rules:
-- If your component did not apply to this trade, return "irrelevant" with empty delta and no veto.
-- If your component behaved correctly even though the trade lost, return "passed" — not every
-  loss is a component failure. Losses can come from other components.
-- Propose at most ONE delta per run. Never propose deltas for components outside your responsibility.
-- If the same pattern has failed repeatedly (3+ times with same root cause), propose a veto
-  instead of a delta, with expires_in_sec = 43200 (12h).
-- Be conservative. Do not propose changes if reasoning is weak.
-- Never include markdown fences. Pure JSON only.'''
+- If none of your components applied, return "irrelevant" with empty delta.
+- If all components behaved correctly even on a loss, return "passed" — losses can come from elsewhere.
+- You may propose MULTIPLE deltas in one call if multiple of your components warrant tuning.
+- Be conservative. No proposal > reasoning is weak.'''
 
 
-def _build_prompt(component_name, trade, context, param_bounds):
-    return f'''Component under analysis: {component_name}
+_ENTRY_SIGNAL_SYSTEM = f'''You are the Entry-Signal Specialist for a crypto perps trading system.
+You own three components that gate trade entry:
 
-TRADE:
+  rsi:       buy_threshold (RL, default 25-45), sell_threshold (RH, default 55-90), period
+  pivot:     lookback (default 5, range 2-20 bars)
+  bollinger: period (default 20), std_mult (default 2.0), rsi_buffer (default 5)
+
+These three components together determine WHETHER an entry fires. Your job:
+1. Given this closed trade, did the entry conditions actually justify the trade?
+2. If the trade lost AND your components share blame, propose parameter delta(s).
+3. If the trade won or your components weren't the failure point, verdict = passed.
+
+Typical tuning signals:
+- Repeated losing entries at RSI borderline (e.g. RSI=74 for short with RH=75) → tighten RH
+- Pivot lookback too short for regime → LB up (misses broader trend)
+- Bollinger too wide (std_mult>2) → catches too many false reversals
+- Bollinger rsi_buffer too small → signals fire without RSI confirmation
+
+{_SHARED_SCHEMA}'''
+
+
+_EXIT_SYSTEM = f'''You are the Exit Specialist for a crypto perps trading system.
+You own two wired components and one deterministic metric:
+
+  sl:  pct (stop-loss %, e.g. 0.02 = 2%)
+  tp:  pct (take-profit %, e.g. 0.06 = 6%)
+  target_realization: ratio of achieved PnL to TP target (pre-computed)
+
+Your job:
+1. Was SL the right distance for this trade's volatility?
+2. Was TP realistic for the regime and holding period?
+3. Did the trade exit via SL/TP hit, trail, dust_sweep, or reversal?
+
+Key heuristic — target realization:
+  If exit_reason in (dust_sweep, signal_reversal, unknown) AND peak PnL < 50% of TP:
+    → TP was too ambitious. Propose tp.pct → max(1.5 × achieved_peak / 100, 0.004)
+  If SL was hit: evaluate whether SL was too tight for regime volatility
+  If trade won at TP: passed
+
+DO NOT propose tp.pct changes for SL-hit trades (SL owns that).
+DO NOT propose sl.pct changes for TP-hit or dust-swept trades (unless volatility evidence).
+
+{_SHARED_SCHEMA}'''
+
+
+_REGIME_CONTEXT_SYSTEM = f'''You are the Regime/Context Specialist for a crypto perps trading system.
+You analyze whether the trade's direction was aligned with the market regime.
+You DO NOT tune parameters. You propose VETOS when regime mismatch caused the loss.
+
+Dimensions you evaluate:
+  regime:  bull-calm / bear-calm / chop / squeeze / high-vol
+  funding: positive / negative / flat (and magnitude bps)
+  session: asian / london / ny (entries in thin liquidity = less reliable)
+  macro:   BTC dominance, total mcap change, cross-venue funding divergence
+
+Common veto-worthy patterns:
+- Shorts in bull-calm with positive macro funding → regime-incompatible entry
+- Longs in bear-calm with negative funding → regime-incompatible entry
+- Asian session entries on low-liquidity alts that dust-swept → session filter needed
+
+When proposing a veto, use component names that match the tuner's veto system
+(e.g. "pivot", "bollinger") or "regime_filter" for cross-engine suppression.
+Typical expires_in_sec: 43200 (12h) for one-off, 86400 (24h) for repeated pattern.
+
+{_SHARED_SCHEMA}
+
+Additional: "proposed_veto" field may be:
+  null  OR  {{"component": "...", "expires_in_sec": 43200, "reason": "..."}}'''
+
+
+_EXECUTION_SYSTEM = f'''You are the Execution Forensics Specialist for a crypto perps trading system.
+You analyze OPERATIONAL issues — not signal quality, not regime fit, but how the trade
+was actually executed and exited.
+
+Dimensions you evaluate:
+  exit_reason: dust_sweep, sl_hit, tp_hit, signal_reversal, trail_exit, unknown
+  duration_s:  how long was the position held
+  size:        position size (may be too small → dust threshold)
+  leverage:    applied leverage
+  entry_px:    absolute price (micro-cap vs large-cap behavior differs)
+
+Tell-tale execution problems:
+- dust_sweep after <10min: undersized position, never had chance to play out
+- dust_sweep with ~0% pnl: operational close, no directional info
+- exit_reason=unknown with non-zero pnl: missed exit tag (pipeline bug)
+- Multiple dust_sweeps on same coin: sizing logic needs review
+
+Your proposals should focus on VETOS for coins/regimes showing operational failure,
+NOT param deltas (you don't own any wired params).
+
+{_SHARED_SCHEMA}
+
+Additional: "proposed_veto" field may be:
+  null  OR  {{"component": "...", "expires_in_sec": 43200, "reason": "..."}}'''
+
+
+_HISTORICAL_SYSTEM = f'''You are the Historical Pattern Specialist.
+You have access to this coin's prior knowledge-base entries AND patterns from
+structurally similar coins. You look for RECURRING failure modes.
+
+Your job:
+1. Does this trade match a known failure pattern from the KB?
+2. Is this the Nth occurrence of the same mistake?
+3. Should we escalate from "one-off observation" to "enforced veto"?
+
+You are the memory-weighted voice. If the same pattern has failed 3+ times
+(reinforced_count >= 3 on a matching KB entry), propose a HARD VETO even if
+the other specialists only propose deltas.
+
+{_SHARED_SCHEMA}
+
+Additional: "proposed_veto" field may be:
+  null  OR  {{"component": "...", "expires_in_sec": 86400, "reason": "..."}}'''
+
+
+# ─────────────────────────────────────────────────────
+# Deterministic helper — used inside agent_exit
+# ─────────────────────────────────────────────────────
+def _target_realization_delta(trade):
+    """Return a proposed tp.pct delta based on realization ratio, or None.
+
+    Pure deterministic — no LLM call. This is injected into agent_exit's output
+    so one Haiku call does qualitative + the deterministic math in a single pass."""
+    try:
+        pnl = abs(float(trade.get('pnl_pct') or 0))
+        tp_pct = trade.get('tp_pct')
+        exit_reason = str(trade.get('exit_reason') or '')
+        if tp_pct is None or tp_pct <= 0:
+            return None
+        if exit_reason in ('sl_hit', 'sl', 'native_sl'):
+            return None
+        signed_pnl = float(trade.get('pnl_pct') or 0)
+        tp_as_pct = float(tp_pct) * 100.0
+        realization = (signed_pnl / tp_as_pct) if (signed_pnl > 0 and tp_as_pct > 0) else 0.0
+        TP_EXITS = ('tp_hit', 'tp', 'native_tp', 'tp_lock_exit', 'trail_exit')
+        if realization >= 0.8 or exit_reason in TP_EXITS:
+            return None
+        LOW_REAL_EXITS = ('dust_sweep', 'signal_reversal', 'unknown', '', None)
+        if realization < 0.5 and exit_reason in LOW_REAL_EXITS:
+            proposed_tp = max(pnl * 1.5 / 100.0, 0.004)
+            proposed_tp = round(proposed_tp, 4)
+            return {
+                'component': 'tp', 'param': 'pct', 'new_value': proposed_tp,
+                'rationale': f'realization={realization*100:.0f}%, achieved peak {pnl:.2f}%, '
+                             f'proposed tp→{proposed_tp*100:.2f}% (1.5x achieved)'
+            }
+        return None
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────
+# 5 SPECIALIST AGENTS
+# ─────────────────────────────────────────────────────
+# Each takes (trade, context), makes ONE Haiku call, returns a verdict dict
+# that may contain MULTIPLE proposed deltas (for multiple components under
+# that agent's responsibility).
+
+def _run_specialist(system_prompt, components, trade, context):
+    """Generic specialist runner. Bundles bounds for this agent's components."""
+    try:
+        param_bounds = {}
+        for comp in components:
+            for p in bounds.params_for(comp):
+                key = f'{comp}.{p}'
+                param_bounds[key] = bounds.get_bounds(comp, p)
+
+        prompt = f'''TRADE:
 {json.dumps(trade, indent=2, default=str)}
 
-COMPONENT CONTEXT AT ENTRY:
+ENTRY CONTEXT (snapshot at entry):
 {json.dumps(context, indent=2, default=str)}
 
-CURRENT PARAMETERS AND BOUNDS FOR YOUR COMPONENT:
+YOUR COMPONENTS AND THEIR BOUNDS (default, min, max, max_step, min_samples):
 {json.dumps(param_bounds, indent=2, default=str)}
 
-Analyze this trade from the perspective of the {component_name} component only.
-Output the JSON verdict as specified.'''
-
-
-def _run_agent(component_name, trade, context):
-    """Generic agent runner. Returns parsed verdict dict or None on failure."""
-    try:
-        param_bounds = {p: bounds.get_bounds(component_name, p)
-                        for p in bounds.params_for(component_name)}
-        prompt = _build_prompt(component_name, trade, context, param_bounds)
-        text = _call_claude(_BASE_SYSTEM, prompt)
+Analyze this trade from your specialist perspective. Output the JSON verdict.'''
+        text = _call_claude(system_prompt, prompt, max_tokens=1000)
         verdict = _parse_verdict(text)
         if verdict:
             verdict['_raw'] = text[:500]
@@ -150,216 +303,123 @@ def _run_agent(component_name, trade, context):
         return {
             'verdict': 'irrelevant',
             'confidence': 0.0,
-            'reasoning': f'agent error: {type(e).__name__}: {str(e)[:200]}',
+            'reasoning': f'specialist error: {type(e).__name__}: {str(e)[:200]}',
             'proposed_delta': [],
             'proposed_veto': None,
             '_error': traceback.format_exc()[:1000],
         }
 
 
-# ─────────────────────────────────────────────────────
-# COMPONENT AGENTS
-# ─────────────────────────────────────────────────────
-# Each function accepts (trade, context) and returns a verdict dict.
-# `trade` = {coin, side, pnl_pct, entry_px, exit_px, entry_ts, exit_ts,
-#            duration_s, engine, exit_reason, is_win}
-# `context` = per-component snapshot (candles, indicators, features at entry)
-
-def agent_rsi(trade, context):
-    return _run_agent('rsi', trade, context)
-
-def agent_pivot(trade, context):
-    return _run_agent('pivot', trade, context)
-
-def agent_cooldown(trade, context):
-    return _run_agent('cooldown', trade, context)
-
-def agent_bollinger(trade, context):
-    return _run_agent('bollinger', trade, context)
-
-def agent_adx(trade, context):
-    return _run_agent('adx', trade, context)
-
-def agent_ema(trade, context):
-    return _run_agent('ema', trade, context)
-
-def agent_ob(trade, context):
-    return _run_agent('ob', trade, context)
-
-def agent_wall(trade, context):
-    return _run_agent('wall', trade, context)
-
-def agent_cvd(trade, context):
-    return _run_agent('cvd', trade, context)
-
-def agent_fvg(trade, context):
-    return _run_agent('fvg', trade, context)
-
-def agent_fib(trade, context):
-    return _run_agent('fib', trade, context)
-
-def agent_sr(trade, context):
-    return _run_agent('sr', trade, context)
-
-def agent_structure(trade, context):
-    return _run_agent('structure', trade, context)
-
-def agent_funding(trade, context):
-    return _run_agent('funding', trade, context)
-
-def agent_session(trade, context):
-    return _run_agent('session', trade, context)
-
-def agent_oi(trade, context):
-    return _run_agent('oi', trade, context)
-
-def agent_whale(trade, context):
-    return _run_agent('whale', trade, context)
-
-def agent_liq(trade, context):
-    return _run_agent('liq', trade, context)
-
-def agent_regime(trade, context):
-    return _run_agent('regime', trade, context)
-
-def agent_sl(trade, context):
-    return _run_agent('sl', trade, context)
-
-def agent_tp(trade, context):
-    return _run_agent('tp', trade, context)
+def agent_entry_signal(trade, context):
+    """Covers: rsi (buy/sell thresh), pivot.lookback, bollinger (all 3 params)."""
+    return _run_specialist(_ENTRY_SIGNAL_SYSTEM, ['rsi', 'pivot', 'bollinger'], trade, context)
 
 
-# ─────────────────────────────────────────────────────
-# TARGET_REALIZATION — deterministic (no LLM call).
-# Judges whether TP target was actually achievable in this regime.
-# This is a CROSS-component concern (not tp-level correctness — tp-target
-# calibration). The existing `tp` agent judges "did the TP level fire when
-# price got there". This agent judges "should the TP level have been that
-# ambitious in the first place?"
-# ─────────────────────────────────────────────────────
-def agent_target_realization(trade, context):
-    """Evaluate TP calibration by realization ratio.
+def agent_exit(trade, context):
+    """Covers: sl.pct, tp.pct. Augments LLM output with deterministic target_realization delta."""
+    verdict = _run_specialist(_EXIT_SYSTEM, ['sl', 'tp'], trade, context)
+    # Always run the deterministic target_realization math and merge if applicable
+    tr_delta = _target_realization_delta(trade)
+    if tr_delta:
+        existing = verdict.get('proposed_delta', []) or []
+        # Check if LLM already proposed a tp.pct delta; if so, keep the LLM's value
+        # but annotate with the deterministic target realization rationale. If not,
+        # append the deterministic proposal.
+        has_tp = any(d.get('component') == 'tp' and d.get('param') == 'pct' for d in existing)
+        if not has_tp:
+            existing.append({k: v for k, v in tr_delta.items() if k != 'rationale'})
+            verdict['proposed_delta'] = existing
+            rz = verdict.get('reasoning', '') or ''
+            verdict['reasoning'] = (rz + f' [+target_realization: {tr_delta["rationale"]}]')[:500]
+            # Only bump verdict to 'failed' if LLM said passed/irrelevant
+            if verdict.get('verdict') in ('passed', 'irrelevant'):
+                verdict['verdict'] = 'failed'
+                if verdict.get('confidence', 0) < 0.7:
+                    verdict['confidence'] = 0.7
+    return verdict
 
-    realization = |pnl_pct| / (tp_pct * 100)
 
-    If trade dust-swept with realization < 50%, TP was too wide for the regime.
-    Propose tightening TP to 1.5× achieved peak move (bounded by bounds.py).
-    If trade reached ≥80% of TP, pass. Otherwise irrelevant.
-    """
+def agent_regime_context(trade, context):
+    """Covers: regime + funding + session + macro. Vetoes only, no param tuning."""
+    return _run_specialist(_REGIME_CONTEXT_SYSTEM,
+                           ['regime', 'funding', 'session'], trade, context)
+
+
+def agent_execution(trade, context):
+    """Covers: dust_sweep patterns, duration, size, exit_reason. Vetoes only."""
+    # No direct component bounds — this agent is operational.
     try:
-        pnl = abs(float(trade.get('pnl_pct') or 0))
-        tp_pct = trade.get('tp_pct')
-        duration_s = float(trade.get('duration_s') or 0)
-        exit_reason = str(trade.get('exit_reason') or '')
-        coin = trade.get('coin', '?')
-        side = trade.get('side', '?')
+        prompt = f'''TRADE:
+{json.dumps(trade, indent=2, default=str)}
 
-        # Without tp_pct we can't judge. Pre-fix trades will have None.
-        if tp_pct is None or tp_pct <= 0:
-            return {
-                'verdict': 'irrelevant',
-                'confidence': 0.95,
-                'reasoning': 'tp_pct not recorded on this trade; cannot compute realization ratio',
-                'proposed_delta': [],
-                'proposed_veto': None,
-            }
+ENTRY CONTEXT:
+{json.dumps(context, indent=2, default=str)}
 
-        tp_as_pct = float(tp_pct) * 100.0
-
-        # SL exits: target_realization abstains. sl agent owns that.
-        # Check FIRST — an adverse 5% move isn't "reaching target".
-        if exit_reason in ('sl_hit', 'sl', 'native_sl'):
-            return {
-                'verdict': 'irrelevant',
-                'confidence': 0.9,
-                'reasoning': 'SL exit — target_realization has no opinion on SL-hit trades',
-                'proposed_delta': [],
-                'proposed_veto': None,
-            }
-
-        # Only count realization if PnL is in our favor (positive = trade worked).
-        # A negative pnl means price moved AGAINST us → realization = 0.
-        signed_pnl = float(trade.get('pnl_pct') or 0)
-        realization = (signed_pnl / tp_as_pct) if (signed_pnl > 0 and tp_as_pct > 0) else 0.0
-
-        # Sufficient: hit or came close to target
-        TP_EXITS = ('tp_hit', 'tp', 'native_tp', 'tp_lock_exit', 'trail_exit')
-        if realization >= 0.8 or exit_reason in TP_EXITS:
-            return {
-                'verdict': 'passed',
-                'confidence': 0.9,
-                'reasoning': (f'{coin} {side} reached {signed_pnl:.2f}% = {realization*100:.0f}% of '
-                              f'TP target ({tp_as_pct:.2f}%) in {duration_s/60:.0f}min. '
-                              f'Exit={exit_reason}. TP calibration appropriate for this regime.'),
-                'proposed_delta': [],
-                'proposed_veto': None,
-            }
-
-        # Insufficient + ANY non-TP/non-SL exit = TP was too wide for this trade.
-        # Includes: dust_sweep, signal_reversal, trail_exit pre-TP-lock, unknown, etc.
-        # All share the same learning signal: target was never realized.
-        LOW_REAL_EXITS = ('dust_sweep', 'signal_reversal', 'unknown', '', None)
-        if realization < 0.5 and exit_reason in LOW_REAL_EXITS:
-            # Propose 1.5x achieved peak move as new TP, floored at bounds min.
-            proposed_tp = max(pnl * 1.5 / 100.0, 0.004)  # min 0.4% (matches bounds)
-            proposed_tp = round(proposed_tp, 4)
-
-            return {
-                'verdict': 'failed',
-                'confidence': 0.85,
-                'reasoning': (f'{coin} {side}: TP={tp_as_pct:.2f}% was not reached in '
-                              f'{duration_s/60:.0f}min (exit={exit_reason}). Peak PnL was '
-                              f'{pnl:.2f}% = only {realization*100:.0f}% of target. '
-                              f'Regime suggests achievable TP ~{proposed_tp*100:.2f}% '
-                              f'(1.5× achieved). Tighter TP would improve hit rate.'),
-                'proposed_delta': [{'component': 'tp', 'param': 'pct', 'new_value': proposed_tp}],
-                'proposed_veto': None,
-            }
-
-        # In-between: partial realization, inconclusive.
-        return {
-            'verdict': 'irrelevant',
-            'confidence': 0.75,
-            'reasoning': (f'Partial realization ({realization*100:.0f}% of TP), '
-                          f'exit={exit_reason}. Not enough signal to tune TP in either direction.'),
-            'proposed_delta': [],
-            'proposed_veto': None,
-        }
+Analyze the OPERATIONAL execution of this trade (not signal quality, not regime fit).
+Output the JSON verdict.'''
+        text = _call_claude(_EXECUTION_SYSTEM, prompt, max_tokens=800)
+        verdict = _parse_verdict(text)
+        if verdict:
+            verdict['_raw'] = text[:500]
+        return verdict
     except Exception as e:
         return {
-            'verdict': 'irrelevant',
-            'confidence': 0.0,
-            'reasoning': f'target_realization error: {type(e).__name__}: {str(e)[:200]}',
-            'proposed_delta': [],
-            'proposed_veto': None,
+            'verdict': 'irrelevant', 'confidence': 0.0,
+            'reasoning': f'execution agent error: {type(e).__name__}: {str(e)[:200]}',
+            'proposed_delta': [], 'proposed_veto': None,
         }
 
 
-# Registry — every agent defined above plus its component key
+def agent_historical(trade, context):
+    """Covers: KB retrieval for this coin + similar patterns. Escalates repeat failures."""
+    try:
+        coin = trade.get('coin', '?')
+        side = trade.get('side', '?')
+        # Pull existing KB entries for this coin+side
+        try:
+            from . import kb
+            kb_entries = kb.read_relevant(coin, side, max_entries=8)
+            kb_block = kb.format_for_prompt(kb_entries, max_chars=1500) if kb_entries else '(no prior entries)'
+        except Exception:
+            kb_block = '(kb module unavailable)'
+
+        prompt = f'''TRADE:
+{json.dumps(trade, indent=2, default=str)}
+
+ENTRY CONTEXT:
+{json.dumps(context, indent=2, default=str)}
+
+EXISTING KNOWLEDGE-BASE ENTRIES FOR {coin} {side}:
+{kb_block}
+
+Analyze whether this trade matches a recurring pattern. If reinforced_count on any
+matching KB entry is >= 3, propose a HARD VETO (expires_in_sec 86400). Otherwise
+verdict=passed unless you see a clear pattern match.
+
+Output the JSON verdict.'''
+        text = _call_claude(_HISTORICAL_SYSTEM, prompt, max_tokens=800)
+        verdict = _parse_verdict(text)
+        if verdict:
+            verdict['_raw'] = text[:500]
+        return verdict
+    except Exception as e:
+        return {
+            'verdict': 'irrelevant', 'confidence': 0.0,
+            'reasoning': f'historical agent error: {type(e).__name__}: {str(e)[:200]}',
+            'proposed_delta': [], 'proposed_veto': None,
+        }
+
+
+# Registry — 5 specialists.
 AGENTS = {
-    'rsi':       agent_rsi,
-    'pivot':     agent_pivot,
-    'cooldown':  agent_cooldown,
-    'bollinger': agent_bollinger,
-    'adx':       agent_adx,
-    'ema':       agent_ema,
-    'ob':        agent_ob,
-    'wall':      agent_wall,
-    'cvd':       agent_cvd,
-    'fvg':       agent_fvg,
-    'fib':       agent_fib,
-    'sr':        agent_sr,
-    'structure': agent_structure,
-    'funding':   agent_funding,
-    'session':   agent_session,
-    'oi':        agent_oi,
-    'whale':     agent_whale,
-    'liq':       agent_liq,
-    'regime':    agent_regime,
-    'sl':        agent_sl,
-    'tp':        agent_tp,
-    'target_realization': agent_target_realization,
+    'entry_signal':   agent_entry_signal,
+    'exit':           agent_exit,
+    'regime_context': agent_regime_context,
+    'execution':      agent_execution,
+    'historical':     agent_historical,
 }
+
+
 
 
 # ─────────────────────────────────────────────────────
