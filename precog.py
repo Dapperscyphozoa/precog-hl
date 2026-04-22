@@ -2476,7 +2476,18 @@ INITIAL_RISK_PCT = 0.03  # DIAL MODE: 1.5x base. Conf multiplier 0.2x-5.0x. Max 
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
-LOOP_SEC = 2  # tight outer loop (Bybit WS push)
+LOOP_SEC = 15  # 2026-04-22: raised 2s → 15s.
+               # Signals are 5m-candle based — the candle closes every 300s.
+               # Checking every 2s generated ~30 ticks per candle-bar, producing
+               # 2000 fills/hour (~33/min) on the order tape and $57/hour in
+               # fees — FEES WERE LARGER THAN LOSSES.
+               # Root cause: signal-generator fixes + signal whitelist produced
+               # 120 eligible coins, an 8-worker pool processed 60 coin-evals
+               # per second, and every signal that passed gates triggered an
+               # order + SL + TP (3 exchange.order calls) causing HL to
+               # IP-throttle the whole endpoint.
+               # 15s loop = 20 ticks per 5m candle. Still 20x faster than
+               # candle cadence. Catches all signals, drops order rate ~8x.
 USE_ISOLATED_MARGIN = True
 
 TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global multiplier needed).
@@ -2548,6 +2559,57 @@ def _init_exchange_with_retry(account, max_attempts=8):
 info = _init_hl_with_retry()
 account = Account.from_key(PRIV_KEY)
 exchange = _init_exchange_with_retry(account)
+
+# ─── ORDER RATE GOVERNOR ───────────────────────────────────────────────
+# 2026-04-22: HL IP-throttles the order endpoint when we burst too many
+# exchange.order calls. Symptom this session: 2000 fills/hour, $57/hour
+# fees, and 429s on every protect_sl/protect_all retry for 30+ minutes.
+# The governor enforces a min-interval between order calls (default 120ms
+# = ~8 orders/sec max) and an absolute burst cap (max 20 orders in any
+# rolling 5-sec window). When either limit is about to trip, the call
+# sleeps just enough to stay within the limit.
+# Can be tuned via env: ORDER_MIN_INTERVAL_MS, ORDER_BURST_WINDOW_SEC,
+# ORDER_BURST_MAX. Default values are conservative — tune down once we
+# see the actual HL order rate that doesn't trigger 429s.
+_ORDER_MIN_INTERVAL = float(os.environ.get('ORDER_MIN_INTERVAL_MS', '125')) / 1000.0
+_ORDER_BURST_WINDOW = float(os.environ.get('ORDER_BURST_WINDOW_SEC', '5'))
+_ORDER_BURST_MAX = int(os.environ.get('ORDER_BURST_MAX', '20'))
+_order_times = []
+_order_lock = threading.Lock()
+_last_order_ts = [0.0]  # mutable holder for last order time
+
+_orig_exchange_order = exchange.order
+def _rate_limited_order(*args, **kwargs):
+    """Rate-limit wrapper around exchange.order.
+    Enforces: (1) min-interval between consecutive orders, (2) absolute
+    burst cap in a rolling window. Waits just enough to stay legal."""
+    with _order_lock:
+        now = time.time()
+        # Min-interval check
+        gap = now - _last_order_ts[0]
+        if gap < _ORDER_MIN_INTERVAL:
+            delay = _ORDER_MIN_INTERVAL - gap
+            time.sleep(delay)
+            now = time.time()
+        # Burst cap check — trim window
+        cutoff = now - _ORDER_BURST_WINDOW
+        while _order_times and _order_times[0] < cutoff: _order_times.pop(0)
+        # If at burst cap, sleep until oldest order drops out of window
+        if len(_order_times) >= _ORDER_BURST_MAX:
+            sleep_for = _order_times[0] + _ORDER_BURST_WINDOW - now
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+                now = time.time()
+                # Re-trim after sleep
+                cutoff = now - _ORDER_BURST_WINDOW
+                while _order_times and _order_times[0] < cutoff: _order_times.pop(0)
+        # Record + fire
+        _order_times.append(now)
+        _last_order_ts[0] = now
+    return _orig_exchange_order(*args, **kwargs)
+
+exchange.order = _rate_limited_order
+# ───────────────────────────────────────────────────────────────────────
 
 _META_CACHE = None
 def _get_sz_decimals(coin):
