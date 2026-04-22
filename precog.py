@@ -3486,16 +3486,27 @@ def place_native_sl(coin, is_long, entry, size):
 
         # AUTHORITATIVE POSITION SIZE: query HL, don't trust caller.
         # Retry up to 3s for settlement delay on taker fills.
+        # CRITICAL 2026-04-22: bypass _cached_user_state here. The cache has
+        # a 5-sec TTL, but this function runs ~500ms after exchange.order fill,
+        # when the new position is NOT yet in the cached response. Using the
+        # cached value would return "no position found" for EVERY fresh fill,
+        # causing the bot to open positions without SL attachment — exactly the
+        # 'naked position' bug we've been chasing all session. Direct HL read
+        # is required here; we only pay the /info cost on actual fills, not
+        # every gate check. Fallback path keeps cache for tuner bounds etc.
         actual_size = None
         for attempt in range(6):
             try:
-                us = _cached_user_state()
+                us = info.user_state(WALLET)  # DIRECT — no cache
                 for ap in us.get('assetPositions', []):
                     p = ap.get('position', {})
                     if p.get('coin','').upper() == coin.upper():
                         szi = float(p.get('szi', 0))
                         if abs(szi) > 1e-12:
                             actual_size = abs(szi)
+                            # Also refresh the shared cache while we're here
+                            _cache['state'] = us
+                            _cache['state_ts'] = time.time()
                             break
                 if actual_size is not None:
                     break
@@ -3556,16 +3567,20 @@ def place_native_tp(coin, is_long, entry, size):
         # AUTHORITATIVE POSITION SIZE: same logic as place_native_sl.
         # Partial fills + settlement delay mean `size` from calc_size can
         # differ from what HL actually has. reduce_only with wrong qty = reject.
+        # CRITICAL 2026-04-22: bypass _cached_user_state — cache staleness was
+        # blocking TP placement on fresh fills (root cause of naked positions).
         actual_size = None
         for attempt in range(6):
             try:
-                us = _cached_user_state()
+                us = info.user_state(WALLET)  # DIRECT — no cache
                 for ap in us.get('assetPositions', []):
                     p = ap.get('position', {})
                     if p.get('coin','').upper() == coin.upper():
                         szi = float(p.get('szi', 0))
                         if abs(szi) > 1e-12:
                             actual_size = abs(szi)
+                            _cache['state'] = us
+                            _cache['state_ts'] = time.time()
                             break
                 if actual_size is not None:
                     break
