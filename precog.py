@@ -3665,16 +3665,31 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
         if pos and ((pos.get('side')=='L' and sig=='SELL') or (pos.get('side')=='S' and sig=='BUY')):
-            # Check current PnL — only flip if we're in profit
+            # CRITICAL 2026-04-22: raised threshold from $0.10 to 50% of TP target.
+            # The old $0.10 floor was closing EVERY position that had any counter-signal
+            # once it crossed breakeven+fees — even at 0.5% profit on a 6% TP trade.
+            # Fill-tape audit showed: AERO closed at +0.76% ($2.02) on a 6% TP target
+            # via this path. ZEC +0.87%, MANTA +0.65%, etc — all 80%+ of winners
+            # closed here, far below real TP. This is THE profit leak.
+            # New rule: flip only if we're at ≥50% of TP. Below that, ignore the
+            # counter-signal and let native SL/TP handle the exit.
             try:
                 live = live_positions.get(coin, {})
                 cur_pnl = live.get('pnl', 0) if live else 0
-                if cur_pnl > 0.10:  # only flip if at least $0.10 in profit
+                entry_px = pos.get('entry', 0)
+                tp_pct = pos.get('tp_pct')
+                size_abs = abs(live.get('size', 0))
+                notional = size_abs * entry_px if entry_px else 0
+                # Target threshold: 50% of TP target (in dollar terms)
+                threshold = notional * (tp_pct or 0.06) * 0.50 if notional else 0.10
+                if cur_pnl >= threshold:
                     close(coin)
-                    log(f"{coin} OPP-EXIT on {sig} signal (locking +${cur_pnl:.3f})")
+                    log(f"{coin} OPP-EXIT on {sig} signal (locking +${cur_pnl:.2f} >= 50%TP threshold ${threshold:.2f})")
                 else:
-                    # Don't flip a losing or flat position — let SL work
-                    log(f"{coin} OPP-EXIT skipped: pos at ${cur_pnl:+.3f} not profitable enough to flip")
+                    # Don't flip — position hasn't captured enough of the TP yet.
+                    # Native SL/TP will handle it, OR signal-reversal guard (line 4213)
+                    # will take over if profit grows enough.
+                    log(f"{coin} OPP-EXIT skipped: pos at ${cur_pnl:+.2f} below 50%TP threshold ${threshold:.2f}")
                     sig = None; signal_engine = None
             except Exception as e:
                 log(f"opp-exit err {coin}: {e}")
