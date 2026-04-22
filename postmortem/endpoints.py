@@ -59,7 +59,32 @@ def register_endpoints(app):
 
     @app.route('/postmortem/findings/<int:log_id>', methods=['GET'])
     def pm_findings(log_id):
-        return jsonify({'log_id': log_id, 'findings': db.list_findings(log_id)})
+        # Include synthesis from postmortem_log if present
+        synth = None
+        try:
+            with db._conn() as c:
+                row = c.execute(
+                    'SELECT synthesis_json, status FROM postmortem_log WHERE id=?',
+                    (log_id,)
+                ).fetchone()
+            if row:
+                if row['synthesis_json']:
+                    import json as _json
+                    try:
+                        synth = _json.loads(row['synthesis_json'])
+                    except Exception:
+                        synth = None
+                # Fall back to status field if synthesis_json not set (legacy rows)
+                if synth is None and row['status']:
+                    synth = {'root_cause': row['status'].replace('complete:', '', 1),
+                             'decisions': [], 'new_vetos': [], 'kb_entries': []}
+        except Exception:
+            synth = None
+        return jsonify({
+            'log_id': log_id,
+            'findings': db.list_findings(log_id),
+            'synthesis': synth,
+        })
 
     @app.route('/postmortem/history', methods=['GET'])
     def pm_history():

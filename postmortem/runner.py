@@ -255,7 +255,8 @@ def _run_sync(pos, coin, pnl_pct):
         log_id,
         agents_run=len(findings),
         deltas_applied=deltas_applied,
-        status=f'complete:{synthesis.get("root_cause","")[:120]}',
+        status=f'complete:{synthesis.get("root_cause","")[:500]}',
+        synthesis_json=json.dumps(synthesis, default=str),
     )
     _safe_log(f'log_id={log_id} coin={coin} pnl={pnl_pct:.2f}% agents={len(findings)} '
               f'relevant={len(relevant)} deltas={deltas_applied}')

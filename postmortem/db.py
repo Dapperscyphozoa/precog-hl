@@ -76,7 +76,8 @@ def init_db():
             pos_json    TEXT,
             agents_run  INTEGER DEFAULT 0,
             deltas_applied INTEGER DEFAULT 0,
-            status      TEXT DEFAULT 'pending'
+            status      TEXT DEFAULT 'pending',
+            synthesis_json TEXT
         );
 
         CREATE TABLE IF NOT EXISTS agent_findings (
@@ -126,6 +127,11 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_kb_coin_side ON kb_entries(coin, side, updated_at);
         CREATE INDEX IF NOT EXISTS idx_kb_pattern ON kb_entries(pattern_key);
         ''')
+        # Migrations for existing DBs (SQLite ADD COLUMN is idempotent-by-exception)
+        try:
+            c.execute('ALTER TABLE postmortem_log ADD COLUMN synthesis_json TEXT')
+        except Exception:
+            pass  # column already exists
         c.commit()
 
 
@@ -221,12 +227,14 @@ def create_log_entry(coin, side, engine, pnl_pct, entry_px, exit_reason, duratio
         return cur.lastrowid
 
 
-def update_log_entry(log_id, agents_run=None, deltas_applied=None, status=None):
+def update_log_entry(log_id, agents_run=None, deltas_applied=None, status=None,
+                     synthesis_json=None):
     with _LOCK, _conn() as c:
         parts = []; args = []
         if agents_run is not None: parts.append('agents_run=?'); args.append(agents_run)
         if deltas_applied is not None: parts.append('deltas_applied=?'); args.append(deltas_applied)
         if status is not None: parts.append('status=?'); args.append(status)
+        if synthesis_json is not None: parts.append('synthesis_json=?'); args.append(synthesis_json)
         if parts:
             args.append(log_id)
             c.execute(f'UPDATE postmortem_log SET {", ".join(parts)} WHERE id=?', args)
