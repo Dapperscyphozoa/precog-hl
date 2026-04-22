@@ -2707,7 +2707,7 @@ def place(coin, is_buy, size):
     notional_usd = size * px
     MIN_NOTIONAL_USD = 50.0
     if notional_usd < MIN_NOTIONAL_USD:
-        log(f"{coin} {'BUY' if is_buy else 'SELL'} SKIP: notional ${notional_usd:.2f} below \${MIN_NOTIONAL_USD:.0f} min (size={size}, px={px})")
+        log(f"{coin} {'BUY' if is_buy else 'SELL'} SKIP: notional ${notional_usd:.2f} below ${MIN_NOTIONAL_USD:.0f} min (size={size}, px={px})")
         return None
 
     # Bybit-lead limit: capture HL lag using Bybit's current price
@@ -3531,7 +3531,7 @@ def main():
                             log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
-            if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=max(${DUST_THRESHOLD_FIXED:.2f},0.1%%notional), age>={DUST_MIN_AGE_SEC/60:.0f}min)")
+            if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=max($0.10,0.1%%notional), age>={DUST_MIN_AGE_SEC/60:.0f}min)")
 
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
