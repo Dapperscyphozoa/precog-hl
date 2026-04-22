@@ -4158,11 +4158,60 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             log(f"{coin} gate err (continuing): {e}")
 
     now = time.time()
+
+    # SIGNAL-REVERSAL PROFIT-FLOOR GUARD
+    # 2026-04-22: Analysis of last 30 closes showed avg win ~$0.09-$0.36 on
+    # $200 notional positions (0.05-0.15% move) — far below the 6-8% TP target.
+    # Root cause: when a weak counter-signal fires on an existing position,
+    # the bot closes it immediately (regardless of PnL) and reverses. Most
+    # reversals happen while the position is in tiny profit, killing winners
+    # before TP can fire. Trades that survive signal churn return to proper
+    # 1-2% wins (MANTA +$1.04, PAXG +$1.83, REZ +$0.74); trades that get
+    # flipped return $0.05-$0.28.
+    #
+    # Guard logic: reversal is ALLOWED only if at least one of:
+    #   (a) Position is at a loss — reversal confirms we were wrong
+    #   (b) Position has reached ≥50% of TP target — peak-taking is valid
+    #   (c) Position is older than MIN_HOLD_SEC (15 min) — signal churn
+    #       protection; give setups time to play out before flipping
+    # Otherwise: ignore the opposite signal. Let SL/TP or max-hold handle it.
+    MIN_HOLD_BEFORE_REVERSE_SEC = 900  # 15 min
+    MIN_FAV_FRAC_FOR_REVERSE = 0.50    # need 50% of TP to bail
+    def _allow_reversal(live_pos, pos_state):
+        """Return (allow: bool, reason: str)."""
+        if not live_pos or not pos_state: return True, "no_state"
+        pnl = live_pos.get('pnl') or live_pos.get('upnl') or 0.0
+        # (a) in loss
+        if pnl < 0: return True, f"loss(${pnl:.2f})"
+        # (b) fav >= 50% of TP target
+        entry = pos_state.get('entry', 0)
+        tp_pct = pos_state.get('tp_pct')
+        if entry and tp_pct:
+            cur_px = get_mid(live_pos.get('coin', '') if hasattr(live_pos,'get') else '')
+            # fallback: derive from pnl + notional
+            notional = abs(live_pos.get('size', 0)) * entry
+            if notional > 0:
+                fav_frac = pnl / notional  # fraction of notional gained
+                if fav_frac >= tp_pct * MIN_FAV_FRAC_FOR_REVERSE:
+                    return True, f"fav={fav_frac*100:.2f}%>=50%TP({tp_pct*100:.1f}%)"
+        # (c) age > min_hold
+        opened_at = pos_state.get('opened_at', now)
+        age = now - opened_at
+        if age > MIN_HOLD_BEFORE_REVERSE_SEC:
+            return True, f"age={age/60:.0f}min"
+        return False, f"pnl=${pnl:.2f} age={age/60:.0f}min — hold"
+
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar_ts
         if live and live['size']>0:
             prev_pos = dict(state.get('positions', {}).get(coin, {}))
+            # Guard: don't flip a winning long on a weak SELL signal
+            allow, reason = _allow_reversal({**live, 'coin':coin}, prev_pos)
+            if not allow:
+                log(f"{coin} SELL reversal SKIPPED: long position held ({reason})")
+                return
             prev_pos['exit_reason'] = 'signal_reversal'
+            log(f"{coin} SELL reversal ALLOWED: {reason}")
             pnl_pct = close(coin)
             if pnl_pct is not None:
                 record_close(prev_pos, coin, pnl_pct, state)
@@ -4202,7 +4251,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
             prev_pos = dict(state.get('positions', {}).get(coin, {}))
+            # Guard: don't flip a winning short on a weak BUY signal
+            allow, reason = _allow_reversal({**live, 'coin':coin}, prev_pos)
+            if not allow:
+                log(f"{coin} BUY reversal SKIPPED: short position held ({reason})")
+                return
             prev_pos['exit_reason'] = 'signal_reversal'
+            log(f"{coin} BUY reversal ALLOWED: {reason}")
             pnl_pct = close(coin)
             if pnl_pct is not None:
                 record_close(prev_pos, coin, pnl_pct, state)
