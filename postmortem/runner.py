@@ -37,7 +37,8 @@ def _safe_log(msg):
 
 def _build_trade(pos, coin, pnl_pct):
     now = time.time()
-    entry_ts = pos.get('entry_ts') or pos.get('open_ts') or pos.get('ts') or now
+    entry_ts = (pos.get('entry_ts') or pos.get('open_ts') or pos.get('opened_at')
+                or pos.get('ts') or now)
     return {
         'coin': coin,
         'side': pos.get('side', '?'),
