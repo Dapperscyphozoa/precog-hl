@@ -2504,11 +2504,15 @@ MAX_POSITIONS = 25  # 2026-04-22: raised 8 → 25 for data-gathering phase.
                     # cost ~$0.03/trade with >500x headroom). MAX_TOTAL_RISK
                     # at 92% remains the real safety ceiling — position count
                     # is now advisory, not the primary risk gate.
-MAX_SAME_SIDE = 20  # 2026-04-22: raised 5 → 20. The 5-cap was choking
-                    # regime-aligned bull-trend trades (hit it in 4 BUY
-                    # signals this session). In a bullish regime we EXPECT
-                    # most trades to be long; capping same-side at 5 fights
-                    # the trend. Keep cap as sanity ceiling, not throttle.
+MAX_SAME_SIDE = 8   # 2026-04-22: reverted 20 → 8. 20 cap let 21 longs
+                    # stack up in a bull-calm regime. Then intraday pullback
+                    # turned all 21 red simultaneously — uPnL -$16 in
+                    # 30 minutes. Same-side concentration IS a risk, not
+                    # just a throttle. 8 is still 60% larger than the
+                    # original 5 (which was too tight for signal flow),
+                    # but forces the bot to be selective about which
+                    # regime-aligned trades it accepts instead of trying
+                    # to take them all.
 MAX_TOTAL_RISK = 0.92    # 8% reserve — unchanged, this is the real safety net
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
@@ -3885,6 +3889,36 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if not live and same_side_count >= MAX_SAME_SIDE:
         log(f"{coin} {sig} SKIP (side cap {MAX_SAME_SIDE})")
         return
+
+    # ─── DRAWDOWN CIRCUIT BREAKER ──────────────────────────────────────
+    # 2026-04-22: Added after observing a correlation disaster — bot
+    # stacked 21 longs in bull-calm, then intraday pullback turned every
+    # single one red simultaneously (uPnL -$16 in 30min, ~2.5% of equity).
+    # Individual-position risk checks don't protect against this because
+    # each position is sized to its own risk budget; it's the AGGREGATE
+    # that turns catastrophic when correlation spikes.
+    # Gate logic: if aggregate uPnL across all open positions is worse
+    # than DRAWDOWN_FLOOR % of equity, block new entries on the same side
+    # as the majority of losing positions. Still allows opposite-side
+    # entries (which would be hedging) and allows exits (reduce-only).
+    if not live and live_positions:
+        aggregate_upnl = sum(p.get('upnl', 0) for p in live_positions.values())
+        drawdown_pct = abs(aggregate_upnl) / equity if equity > 0 else 0
+        DRAWDOWN_FLOOR = float(os.environ.get('DRAWDOWN_FLOOR', '0.02'))  # 2% default
+        if aggregate_upnl < 0 and drawdown_pct > DRAWDOWN_FLOOR:
+            # Find which side is the loser. If majority of losing positions
+            # are longs, block further BUYs. If shorts, block SELLs.
+            losing_longs = sum(1 for p in live_positions.values()
+                               if p.get('upnl', 0) < 0 and p.get('size', 0) > 0)
+            losing_shorts = sum(1 for p in live_positions.values()
+                                if p.get('upnl', 0) < 0 and p.get('size', 0) < 0)
+            losing_side = 'BUY' if losing_longs > losing_shorts else 'SELL'
+            if sig == losing_side:
+                log(f"{coin} {sig} SKIP (drawdown circuit: uPnL=${aggregate_upnl:.2f} "
+                    f"= {drawdown_pct*100:.1f}% > floor {DRAWDOWN_FLOOR*100:.0f}%, "
+                    f"losing side = {losing_side})")
+                return
+    # ───────────────────────────────────────────────────────────────────
 
     risk_pct = current_risk_pct(equity)
     total_locked = get_total_margin()
