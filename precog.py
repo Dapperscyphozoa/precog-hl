@@ -1005,6 +1005,13 @@ if _POSTMORTEM_OK and _postmortem is not None:
             _postmortem.init_db()
         except Exception as _e:
             print(f'[postmortem] db init deferred: {_e}', flush=True)
+        # Auto-start trade finder daemon if env says so
+        try:
+            _started = _postmortem.trade_finder_module.start_auto()
+            if _started:
+                print('[postmortem] trade finder auto-started', flush=True)
+        except Exception as _e:
+            print(f'[postmortem] finder auto-start err (non-fatal): {_e}', flush=True)
     except Exception as _e:
         print(f'[postmortem] endpoint registration failed (non-fatal): {_e}', flush=True)
 

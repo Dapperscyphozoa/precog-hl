@@ -30,6 +30,11 @@ from .params_api import get_param, get_veto, params_summary
 from .entry_gate import evaluate_entry
 from .db import init_db
 from . import kb as kb_module
+from . import context as context_module
+from . import news as news_module
+from . import macro as macro_module
+from . import calendar as calendar_module
+from . import trade_finder as trade_finder_module
 
 __all__ = [
     'run_postmortem_async',
@@ -39,4 +44,9 @@ __all__ = [
     'evaluate_entry',
     'init_db',
     'kb_module',
+    'context_module',
+    'news_module',
+    'macro_module',
+    'calendar_module',
+    'trade_finder_module',
 ]
