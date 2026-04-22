@@ -63,13 +63,20 @@ def score(candles5, candles4h, coin, side, btc_dir):
             elif (side == 'BUY' and price > e9_5[i]) or (side == 'SELL' and price < e9_5[i]):
                 total += 5; breakdown['mom5'] = 5
 
-        # BTC correlation (15pts)
+        # BTC correlation (15pts) — FIXED 2026-04-22.
+        # Previous logic awarded 8 pts to BOTH sides when btc_dir==0 (neutral).
+        # Combined with a too-strict 15min-based btc_dir classifier, btc_dir was
+        # neutral ~90% of the time in slow-grind markets, causing confidence score
+        # to reward BOTH directions equally — one of the mechanisms behind the
+        # 90% SELL bias. New logic: only the aligned side gets points. Neutral
+        # BTC → zero BTC contribution, not free 8pts for wrong-side trades.
         if coin in ('BTC','ETH'):
             total += 15; breakdown['btc'] = 15  # majors exempt
-        elif btc_dir == 0:
-            total += 8; breakdown['btc'] = 8
         elif (side == 'BUY' and btc_dir == 1) or (side == 'SELL' and btc_dir == -1):
-            total += 15; breakdown['btc'] = 15
+            total += 15; breakdown['btc'] = 15  # aligned with BTC trend
+        elif (side == 'BUY' and btc_dir == -1) or (side == 'SELL' and btc_dir == 1):
+            total -= 10; breakdown['btc'] = -10  # opposing BTC trend — actively penalized
+        # else btc_dir == 0 (neutral): no points, no penalty
 
         # RSI depth (10pts)
         r = rsi14[i] if not np.isnan(rsi14[i]) else 50
