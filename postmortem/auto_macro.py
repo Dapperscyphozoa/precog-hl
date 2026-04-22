@@ -80,12 +80,15 @@ def _parse_stooq_csv(body_bytes):
 
 
 def _fetch_stooq_one(stooq_sym, canonical):
-    """Fetch one Stooq symbol and write to tv_cache."""
+    """Fetch one Stooq symbol and write to tv_cache. Returns tuple (status, detail)."""
     try:
         url = f'https://stooq.com/q/l/?s={stooq_sym}&f=sd2t2ohlcvn&h&e=csv'
         body = _http(url, timeout=TIMEOUT)
         parsed = _parse_stooq_csv(body)
-        if not parsed: return None
+        if not parsed:
+            # Return first 100 chars of body for diagnostic
+            snippet = body[:120].decode('utf-8', errors='replace').replace('\n','|')
+            return ('parse_failed', snippet)
         price, prev_close = parsed
         written = tv_cache.write(
             symbol=canonical,
@@ -94,9 +97,11 @@ def _fetch_stooq_one(stooq_sym, canonical):
             timeframe='1d',
             raw={'source': 'stooq', 'stooq_sym': stooq_sym},
         )
-        return written
+        return ('ok', written or 'write_failed')
+    except urllib.error.HTTPError as e:
+        return (f'http_{e.code}', str(e)[:100])
     except Exception as e:
-        return None
+        return (f'err_{type(e).__name__}', str(e)[:100])
 
 
 def _fetch_massive_one(ticker, canonical):
@@ -149,7 +154,12 @@ def pull_all(force=False):
         stooq_futs = {ex.submit(_fetch_stooq_one, s, c): c for s, c in STOOQ_SYMBOLS.items()}
         for fut, canon in stooq_futs.items():
             try:
-                summary['stooq'][canon] = fut.result(timeout=TIMEOUT + 4) or 'failed'
+                result = fut.result(timeout=TIMEOUT + 4)
+                # _fetch_stooq_one now returns tuple (status, detail)
+                if isinstance(result, tuple):
+                    summary['stooq'][canon] = {'status': result[0], 'detail': result[1]}
+                else:
+                    summary['stooq'][canon] = result or 'failed'
             except Exception as e:
                 summary['stooq'][canon] = f'err:{type(e).__name__}'
 
