@@ -373,6 +373,20 @@ _SYNTH_SYSTEM = '''You are the head of a forensic tuning team. Individual compon
 analysts have each analyzed a closed trade from the perspective of their
 single component. You see all their verdicts at once.
 
+CRITICAL UNIT CONVENTIONS — read carefully:
+- pnl_pct is ALREADY IN PERCENT. A value of -0.158 means -0.158% (less than
+  one-fifth of one percent), NOT -15.8%. Do NOT multiply by 100.
+- Always use the pnl_display field (e.g. "-0.158%", "+0.410%") when referring
+  to trade outcome in your root_cause and KB summaries.
+- sl_pct and tp_pct in the trade dict are DECIMAL FRACTIONS (0.02 = 2%, 0.08 = 8%).
+- When quoting percent values in prose, render them as percent (e.g. "2%", "8%"),
+  not as decimals.
+
+DO NOT SPECULATE ABOUT CONFIG MISMATCH:
+- You do not see the percoin config file. Only compare trade parameters to
+  values you have direct evidence for. Never claim "config says X, trade says Y"
+  unless the discrepancy is present in the findings you received.
+
 Your job:
 1. Write a concise root-cause summary (<=4 sentences) of why the trade lost or won.
 2. For each proposed delta, decide: APPROVE, REJECT, or DEFER.

@@ -39,13 +39,20 @@ def _build_trade(pos, coin, pnl_pct):
     now = time.time()
     entry_ts = (pos.get('entry_ts') or pos.get('open_ts') or pos.get('opened_at')
                 or pos.get('ts') or now)
+    pnl = float(pnl_pct)
+    # pnl_pct is ALREADY in percent units (e.g. -0.158 means -0.158%, not -15.8%).
+    # LLMs reading raw JSON often misinterpret small decimals as fractional returns
+    # and multiply by 100. Add an unambiguous human-readable field.
+    pnl_display = f'{pnl:+.3f}%'  # e.g. "-0.158%", "+0.410%"
     return {
         'coin': coin,
         'side': pos.get('side', '?'),
         'engine': pos.get('engine', 'UNKNOWN'),
         'entry_px': pos.get('entry') or pos.get('entryPx'),
-        'pnl_pct': float(pnl_pct),
-        'is_win': pnl_pct > 0,
+        'pnl_pct': pnl,
+        'pnl_display': pnl_display,  # unambiguous "+X.XXX%" format
+        'pnl_note': 'pnl_pct is already in percent; -0.158 means -0.158%, not -15.8%',
+        'is_win': pnl > 0,
         'entry_ts': entry_ts,
         'exit_ts': now,
         'duration_s': now - entry_ts if entry_ts else None,
