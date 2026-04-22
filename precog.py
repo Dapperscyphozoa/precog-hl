@@ -95,10 +95,28 @@ def regime_blocks_side(coin, side):
         return False, ''
     return False, ''
 
-# Max TP cap (bug fix 2026-04-22): 0 TP hits in 48 trades. Realized peak
-# favorable moves average 0.4-0.8%. Per-coin configs set TP to 2-6% which
-# never gets reached. Cap at 1.2% globally until realization improves.
-MAX_TP_PCT = 0.012
+# Max TP cap REMOVED 2026-04-22 — was a bandage for dust_sweep snipping
+# winners at the noise level. With dust_sweep disabled and MTF confluence
+# gating entries, trades now have time and structure to reach their natural
+# per-coin TPs (often 4-6% = matching the 1:3+ R:R the setups warrant).
+# If you need a cap, set env MAX_TP_PCT=0.02 etc.
+MAX_TP_PCT = float(os.environ.get('MAX_TP_PCT', '0') or 0)  # 0 = no cap
+
+# R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
+# Per-coin configs have been scattered (some 1:0.4 inverted, some 1:3 correct).
+# Any entry where TP < MIN_RR × SL is rejected. This prevents the inverted-
+# risk trades that were structurally guaranteed to bleed. Env override:
+# MIN_RR=3.0 (default 3:1), set MIN_RR=0 to disable.
+MIN_RR = float(os.environ.get('MIN_RR', '3.0'))
+
+# Multi-timeframe confluence — import new module (fail-soft if missing)
+try:
+    import mtf_context as _mtf
+    _MTF_OK = True
+except Exception as _e:
+    _mtf = None
+    _MTF_OK = False
+    print(f'[mtf_context] import failed (non-fatal): {_e}', flush=True)
 
 # ═══════════════════════════════════════════════════════
 # TRADE LOG — persistent CSV for real WR tracking
@@ -3000,10 +3018,9 @@ def place_native_tp(coin, is_long, entry, size):
             try:
                 tp_pct = float(_postmortem.get_param(coin, 'tp', 'pct', default=tp_pct))
             except Exception: pass
-        # GLOBAL TP CAP — 0 TP hits in 48-trade audit, average peak move 0.4-0.8%.
-        # Cap at MAX_TP_PCT (1.2%) so TP is actually reachable within hold window.
-        if tp_pct > MAX_TP_PCT:
-            log(f"{coin} TP capped: cfg={tp_pct*100:.1f}% → {MAX_TP_PCT*100:.1f}% (realization-based)")
+        # TP cap (optional, env MAX_TP_PCT). Default 0 = no cap.
+        if MAX_TP_PCT > 0 and tp_pct > MAX_TP_PCT:
+            log(f"{coin} TP capped: cfg={tp_pct*100:.1f}% → {MAX_TP_PCT*100:.1f}%")
             tp_pct = MAX_TP_PCT
         # AUTHORITATIVE POSITION SIZE: same logic as place_native_sl.
         # Partial fills + settlement delay mean `size` from calc_size can
@@ -3418,6 +3435,39 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if _rb:
         log(f"{coin} {sig} REGIME-BLOCK: {_rb_reason}")
         return
+
+    # MTF CONFLUENCE — 15m signal must align with 1h + 4h bias.
+    # 4h = dominant trend (regime confirmation at coin level, not just BTC).
+    # 1h = thesis (where the actual swing structure lives).
+    # 15m = trigger (we're here because a 15m signal fired).
+    # Blocks when either HTF is EXPLICITLY opposite. Neutral passes through.
+    if _MTF_OK and _mtf is not None:
+        try:
+            _ok, _detail = _mtf.aligned(coin, sig)
+            if not _ok:
+                log(f"{coin} {sig} MTF-BLOCK: {_detail}")
+                return
+            else:
+                log(f"{coin} {sig} MTF-OK: {_detail}")
+        except Exception as _me:
+            log(f"{coin} MTF err (fail-open): {_me}")
+
+    # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
+    # Reads per-coin SL/TP from percoin_configs (OOS-tuned). Rejects setups
+    # where reward < MIN_RR × risk. Prevents the inverted-R:R trades that
+    # were bleeding the account before strategic layer got fixed.
+    if MIN_RR > 0:
+        try:
+            _cfg = percoin_configs.get_config(coin) if percoin_configs.ELITE_MODE else None
+            _sl_cfg = (_cfg or {}).get('SL')
+            _tp_cfg = (_cfg or {}).get('TP')
+            if _sl_cfg and _tp_cfg and _sl_cfg > 0:
+                _rr = _tp_cfg / _sl_cfg
+                if _rr < MIN_RR:
+                    log(f"{coin} {sig} R:R REJECT: TP={_tp_cfg*100:.2f}% / SL={_sl_cfg*100:.2f}% = {_rr:.2f} < {MIN_RR}")
+                    return
+        except Exception as _rre:
+            log(f"{coin} R:R check err (fail-open): {_rre}")
 
     # ─────────────────────────────────────────────────────
     # ENTRY LLM GATE — final semantic pre-trade check.
@@ -3901,6 +3951,27 @@ def main():
                                 if _wrb:
                                     log(f"WEBHOOK {coin} {side_str} REGIME-BLOCK: {_wrb_reason}")
                                     wh_count += 1; continue
+                                # MTF CONFLUENCE (1h + 4h alignment).
+                                if _MTF_OK and _mtf is not None:
+                                    try:
+                                        _wmo, _wmd = _mtf.aligned(coin, side_str)
+                                        if not _wmo:
+                                            log(f"WEBHOOK {coin} {side_str} MTF-BLOCK: {_wmd}")
+                                            wh_count += 1; continue
+                                    except Exception as _wme:
+                                        log(f"WEBHOOK {coin} MTF err (fail-open): {_wme}")
+                                # R:R FLOOR for webhook entries too.
+                                if MIN_RR > 0:
+                                    try:
+                                        _wcfg = percoin_configs.get_config(coin) if percoin_configs.ELITE_MODE else None
+                                        _wsl = (_wcfg or {}).get('SL')
+                                        _wtp = (_wcfg or {}).get('TP')
+                                        if _wsl and _wtp and _wsl > 0:
+                                            _wrr = _wtp / _wsl
+                                            if _wrr < MIN_RR:
+                                                log(f"WEBHOOK {coin} {side_str} R:R REJECT: {_wrr:.2f} < {MIN_RR}")
+                                                wh_count += 1; continue
+                                    except Exception: pass
                                 wh_gate_mult = 1.0
                                 if _POSTMORTEM_OK and _postmortem is not None:
                                     try:
