@@ -1440,7 +1440,7 @@ def cancel_stale_makers():
     coin_filter = (flask_request.args.get('coin') or '').upper() or None
     dryrun = flask_request.args.get('dryrun') == '1'
     try:
-        us = info.user_state(WALLET)
+        us = _cached_user_state()
         pos_by_coin = {}
         for ap in us.get('assetPositions', []):
             p = ap.get('position', {})
@@ -1448,7 +1448,7 @@ def cancel_stale_makers():
             if sz == 0: continue
             pos_by_coin[p.get('coin','').upper()] = sz
 
-        fo = info.frontend_open_orders(WALLET)
+        fo = _cached_frontend_orders()
         cancelled = []; skipped = []
         for o in fo:
             c = o.get('coin','').upper()
@@ -1500,7 +1500,7 @@ def protect_sl_endpoint(coin):
         return jsonify({'err':'unauthorized'}), 401
     coin = coin.upper()
     try:
-        us = info.user_state(WALLET)
+        us = _cached_user_state()
         # Find this coin's open position on HL
         target = None
         for ap in us.get('assetPositions', []):
@@ -1574,8 +1574,8 @@ def retune_exits_endpoint():
     except: rate_delay = 2.5
 
     try:
-        us = info.user_state(WALLET)
-        fo = info.frontend_open_orders(WALLET)
+        us = _cached_user_state()
+        fo = _cached_frontend_orders()
     except Exception as e:
         return jsonify({'err': f'HL fetch failed: {e}'}), 500
 
@@ -1741,8 +1741,8 @@ def protect_all_endpoint():
     except: rate_delay = 2.0
 
     try:
-        us = info.user_state(WALLET)
-        fo = info.frontend_open_orders(WALLET)
+        us = _cached_user_state()
+        fo = _cached_frontend_orders()
     except Exception as e:
         return jsonify({'err': f'HL fetch failed: {e}'}), 500
 
@@ -2973,6 +2973,7 @@ def get_total_margin():
 # ═══════════════════════════════════════════════════════
 _cache = {'mids': None, 'mids_ts': 0, 'state': None, 'state_ts': 0}
 CACHE_TTL = 5  # seconds
+CACHE_TTL_ORDERS = 3  # orders change more — shorter cache
 
 def _cached_mids():
     now = time.time()
@@ -2991,6 +2992,21 @@ def _cached_user_state():
             _cache['state_ts'] = now
         except Exception: pass
     return _cache['state'] or {}
+
+_cache['fo'] = None; _cache['fo_ts'] = 0
+def _cached_frontend_orders():
+    """Cache frontend_open_orders to avoid hammering HL. 4 call sites in this
+    file hit this endpoint — protect_sl, protect_all, retune_exits, mt4
+    flatten-check — often in rapid succession. Unbounded requests → 429.
+    3-sec cache is still fresh enough for trigger-order checks without
+    missing rapidly-placed SL/TP."""
+    now = time.time()
+    if _cache['fo'] is None or now - _cache['fo_ts'] > CACHE_TTL_ORDERS:
+        try:
+            _cache['fo'] = info.frontend_open_orders(WALLET)
+            _cache['fo_ts'] = now
+        except Exception: pass
+    return _cache['fo'] or []
 
 def get_mid(coin):
     """Get latest mid price. Bybit WS FIRST (no rate limit, ~500ms lead on HL),
@@ -3407,7 +3423,7 @@ def place_native_sl(coin, is_long, entry, size):
         actual_size = None
         for attempt in range(6):
             try:
-                us = info.user_state(WALLET)
+                us = _cached_user_state()
                 for ap in us.get('assetPositions', []):
                     p = ap.get('position', {})
                     if p.get('coin','').upper() == coin.upper():
@@ -3477,7 +3493,7 @@ def place_native_tp(coin, is_long, entry, size):
         actual_size = None
         for attempt in range(6):
             try:
-                us = info.user_state(WALLET)
+                us = _cached_user_state()
                 for ap in us.get('assetPositions', []):
                     p = ap.get('position', {})
                     if p.get('coin','').upper() == coin.upper():
