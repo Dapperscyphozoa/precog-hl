@@ -2192,12 +2192,23 @@ USE_ISOLATED_MARGIN = True
 TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global multiplier needed).
                      # Per-coin 15m OOS optimization: PROMPT 10%, ETH 10%, ALT 6%, ASTER 6%, etc.
                      # Prior value 2.0 was bandaid before per-coin tuning existed.
-MAX_POSITIONS = 8   # was 80 — concentrate capital into fewer, meaningful-size trades.
-                    # At $710 equity, 80 slots = $8.90/slot capital base, forcing dust-size
-                    # positions even with high-conf multipliers. 8 slots = ~$90/slot base,
-                    # matches 3% × 5-slot concurrency for meaningful notional per trade.
-MAX_SAME_SIDE = 5   # was 40 — cap same-side exposure for risk concentration discipline
-MAX_TOTAL_RISK = 0.92    # 8% reserve
+MAX_POSITIONS = 25  # 2026-04-22: raised 8 → 25 for data-gathering phase.
+                    # With the signal-generator bias fix live, signals are
+                    # now properly filtered at 3 layers (conv floor, MTF gate,
+                    # R:R floor). The tight filtering means the remaining
+                    # signals that actually fire are high-quality, so we want
+                    # to capture most of them rather than artificially capping.
+                    # At $660 equity with 25 slots and 3-5% risk per trade,
+                    # per-slot notional = $200-$500 (meaningful, covers LLM
+                    # cost ~$0.03/trade with >500x headroom). MAX_TOTAL_RISK
+                    # at 92% remains the real safety ceiling — position count
+                    # is now advisory, not the primary risk gate.
+MAX_SAME_SIDE = 20  # 2026-04-22: raised 5 → 20. The 5-cap was choking
+                    # regime-aligned bull-trend trades (hit it in 4 BUY
+                    # signals this session). In a bullish regime we EXPECT
+                    # most trades to be long; capping same-side at 5 fights
+                    # the trend. Keep cap as sanity ceiling, not throttle.
+MAX_TOTAL_RISK = 0.92    # 8% reserve — unchanged, this is the real safety net
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
