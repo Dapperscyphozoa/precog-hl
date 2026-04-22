@@ -103,11 +103,11 @@ def regime_blocks_side(coin, side):
 MAX_TP_PCT = float(os.environ.get('MAX_TP_PCT', '0') or 0)  # 0 = no cap
 
 # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
-# Per-coin configs have been scattered (some 1:0.4 inverted, some 1:3 correct).
-# Any entry where TP < MIN_RR × SL is rejected. This prevents the inverted-
-# risk trades that were structurally guaranteed to bleed. Env override:
-# MIN_RR=3.0 (default 3:1), set MIN_RR=0 to disable.
-MIN_RR = float(os.environ.get('MIN_RR', '3.0'))
+# Per-coin configs mostly range 2.0-4.0 R:R (typical: 3% SL / 6% TP = 2.0).
+# Default 2.0 accepts normal configs, rejects actually-inverted setups
+# (where TP < SL). Env override: MIN_RR=2.0 (default), set MIN_RR=0 to disable.
+# (Was 3.0 originally — rejected half the coin universe, produced 0 trades.)
+MIN_RR = float(os.environ.get('MIN_RR', '2.0'))
 
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
