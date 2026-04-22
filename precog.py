@@ -1546,6 +1546,177 @@ def protect_sl_endpoint(coin):
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/retune_exits', methods=['GET', 'POST'])
+def retune_exits_endpoint():
+    """For every open position, cancel existing TP and SL trigger orders
+    and re-place them at the config-derived TP/SL percentages. Fixes
+    positions that were opened when the tuner was still overriding TP/SL
+    to micro values (~2.6%).
+
+    Args:
+      ?secret= (required)
+      ?coin=   (optional: restrict to one coin)
+      ?dryrun=1 (optional: report what WOULD happen, no changes)
+      ?rate_delay=2.5 (default gap between HL calls; raise if you see 429s)
+      ?new_sl_pct= (optional: force SL pct for all; else uses per-coin config TP)
+      ?new_tp_pct= (optional: force TP pct for all; else uses per-coin config TP)
+
+    Policy-safe: only operates on trigger orders (isTrigger=True), does NOT
+    touch resting entry limits or other order types.
+    """
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err':'unauthorized'}), 401
+    coin_filter = (flask_request.args.get('coin') or '').upper() or None
+    dryrun = flask_request.args.get('dryrun') == '1'
+    new_sl = flask_request.args.get('new_sl_pct')
+    new_tp = flask_request.args.get('new_tp_pct')
+    try: rate_delay = float(flask_request.args.get('rate_delay','2.5'))
+    except: rate_delay = 2.5
+
+    try:
+        us = info.user_state(WALLET)
+        fo = info.frontend_open_orders(WALLET)
+    except Exception as e:
+        return jsonify({'err': f'HL fetch failed: {e}'}), 500
+
+    # Existing trigger orders per coin
+    from collections import defaultdict
+    triggers = defaultdict(list)
+    for o in fo:
+        c = o.get('coin','').upper()
+        ot = o.get('orderType','')
+        if 'Stop' in ot or 'Take' in ot:
+            triggers[c].append({
+                'oid': o.get('oid'),
+                'type': 'sl' if 'Stop' in ot else 'tp',
+                'triggerPx': o.get('triggerPx'),
+                'side': o.get('side'),
+            })
+
+    results = []
+    for ap in us.get('assetPositions', []):
+        p = ap.get('position', {})
+        sz = float(p.get('szi', 0))
+        if sz == 0: continue
+        coin = p.get('coin','').upper()
+        if coin_filter and coin != coin_filter: continue
+        entry = float(p.get('entryPx', 0))
+        if not entry: continue
+        is_long = sz > 0
+        size_abs = abs(sz)
+
+        # Source intended SL/TP from config
+        cfg = None
+        try:
+            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                cfg = percoin_configs.get_config(coin)
+        except Exception: pass
+        cfg_sl = (cfg or {}).get('SL', 0.02)
+        cfg_tp = (cfg or {}).get('TP', 0.06)
+        sl_pct = float(new_sl) if new_sl else cfg_sl
+        tp_pct = float(new_tp) if new_tp else cfg_tp
+
+        # Inspect existing triggers
+        existing = triggers.get(coin, [])
+        existing_tp = [t for t in existing if t['type'] == 'tp']
+        existing_sl = [t for t in existing if t['type'] == 'sl']
+
+        # Compute existing trigger distances from entry
+        def dist_pct(trigger_px):
+            try:
+                tp = float(trigger_px)
+                return abs(tp - entry) / entry
+            except: return None
+
+        existing_tp_pct = dist_pct(existing_tp[0]['triggerPx']) if existing_tp else None
+        existing_sl_pct = dist_pct(existing_sl[0]['triggerPx']) if existing_sl else None
+
+        result = {
+            'coin': coin,
+            'side': 'LONG' if is_long else 'SHORT',
+            'size': size_abs,
+            'entry': entry,
+            'existing_tp_pct': round(existing_tp_pct*100,2) if existing_tp_pct is not None else None,
+            'existing_sl_pct': round(existing_sl_pct*100,2) if existing_sl_pct is not None else None,
+            'target_tp_pct': round(tp_pct*100,2),
+            'target_sl_pct': round(sl_pct*100,2),
+        }
+
+        # Decide what to do
+        # Retune TP if existing differs meaningfully from target (>0.5% delta)
+        needs_tp_retune = (existing_tp_pct is None) or abs(existing_tp_pct - tp_pct) > 0.005
+        needs_sl_retune = (existing_sl_pct is None) or abs(existing_sl_pct - sl_pct) > 0.005
+
+        if not needs_tp_retune and not needs_sl_retune:
+            result['status'] = 'no_change_needed'
+            results.append(result); continue
+
+        if dryrun:
+            result['would_cancel_tps'] = [t['oid'] for t in existing_tp] if needs_tp_retune else []
+            result['would_cancel_sls'] = [t['oid'] for t in existing_sl] if needs_sl_retune else []
+            result['status'] = 'dryrun_would_retune'
+            results.append(result); continue
+
+        # Execute: cancel old TP, re-place
+        if needs_tp_retune:
+            # Cancel old TP(s)
+            for t in existing_tp:
+                try:
+                    exchange.cancel(coin, t['oid'])
+                    log(f"RETUNE {coin} cancelled old TP oid={t['oid']} @ {t['triggerPx']}")
+                except Exception as e:
+                    log(f"RETUNE {coin} cancel TP err: {e}")
+            time.sleep(rate_delay)
+            # Place new TP
+            try:
+                trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
+                trigger_px = float(round_price(coin, trigger_px))
+                limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+                tp_size = float(round_size(coin, size_abs))
+                r = exchange.order(coin, not is_long, tp_size, limit_px,
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"tp"}},
+                                   reduce_only=True)
+                s = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0]
+                result['new_tp_placed_at'] = trigger_px
+                result['new_tp_response'] = s
+                log(f"RETUNE {coin} new TP placed @ {trigger_px} ({tp_pct*100:.1f}%)")
+            except Exception as e:
+                result['tp_err'] = str(e)
+                log(f"RETUNE {coin} new TP err: {e}")
+            time.sleep(rate_delay)
+
+        if needs_sl_retune:
+            for t in existing_sl:
+                try:
+                    exchange.cancel(coin, t['oid'])
+                    log(f"RETUNE {coin} cancelled old SL oid={t['oid']} @ {t['triggerPx']}")
+                except Exception as e:
+                    log(f"RETUNE {coin} cancel SL err: {e}")
+            time.sleep(rate_delay)
+            try:
+                trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
+                trigger_px = float(round_price(coin, trigger_px))
+                limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
+                sl_size = float(round_size(coin, size_abs))
+                r = exchange.order(coin, not is_long, sl_size, limit_px,
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"sl"}},
+                                   reduce_only=True)
+                s = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0]
+                result['new_sl_placed_at'] = trigger_px
+                result['new_sl_response'] = s
+                log(f"RETUNE {coin} new SL placed @ {trigger_px} ({sl_pct*100:.1f}%)")
+            except Exception as e:
+                result['sl_err'] = str(e)
+                log(f"RETUNE {coin} new SL err: {e}")
+            time.sleep(rate_delay)
+
+        result['status'] = 'retuned'
+        results.append(result)
+
+    return jsonify({'status':'done','dryrun':dryrun,'n_positions':len(results),
+                    'rate_delay_sec':rate_delay,'results':results})
+
+
 @app.route('/protect_all', methods=['GET', 'POST'])
 def protect_all_endpoint():
     """Scan every open position on HL. For any naked (no SL or no TP)
