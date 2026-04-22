@@ -33,9 +33,15 @@ _TABLE_READY = False
 
 # Allowed symbols (case-insensitive on write, stored uppercase)
 ALLOWED = {
-    'DXY', 'SPX', 'SPY', 'VIX', 'GOLD', 'XAUUSD', 'OIL', 'USOIL', 'WTI',
-    'US10Y', 'TNX', 'TLT', 'DJI', 'NDX', 'QQQ', 'ES', 'NQ',
+    # Equities / indices
+    'DXY', 'SPX', 'SPY', 'VIX', 'GOLD', 'GOLD_INTRADAY', 'XAUUSD',
+    'OIL', 'USOIL', 'WTI', 'US10Y', 'TNX', 'TLT', 'DJI', 'NDX', 'QQQ', 'ES', 'NQ',
+    'FTSE', 'DAX', 'N225',
+    # Crypto dominance / mcap
     'BTC_D', 'BTC.D', 'ETH_D', 'ETH.D', 'TOTAL', 'TOTAL2', 'TOTAL3',
+    # FX majors
+    'EURUSD', 'GBPUSD', 'USDJPY', 'USDCAD', 'USDCHF', 'AUDUSD', 'NZDUSD',
+    'EURJPY', 'GBPJPY', 'EURGBP',
 }
 
 # Normalize incoming symbol → canonical key we store under
