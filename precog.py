@@ -3225,11 +3225,11 @@ def place_native_sl(coin, is_long, entry, size):
                 if cfg and 'SL' in cfg:
                     sl_pct = cfg['SL']  # OOS-validated per-coin SL
         except Exception: pass
-        # Postmortem tuner override (applies on top of OOS baseline)
-        if _POSTMORTEM_OK and _postmortem is not None:
-            try:
-                sl_pct = float(_postmortem.get_param(coin, 'sl', 'pct', default=sl_pct))
-            except Exception: pass
+        # TUNER OVERRIDE REMOVED 2026-04-22. See place_native_tp for rationale.
+        # SL bounds in postmortem/bounds.py allow 0.3%-5% drift from closures,
+        # which the tuner was using to tighten stops down below swing structure.
+        # SL is policy (derived from config + swing structure), not a learnable
+        # param. Operational closes don't indicate whether the stop was correct.
 
         # AUTHORITATIVE POSITION SIZE: query HL, don't trust caller.
         # Retry up to 3s for settlement delay on taker fills.
@@ -3286,11 +3286,16 @@ def place_native_tp(coin, is_long, entry, size):
         cfg = percoin_configs.get_config(coin)
         if not cfg or 'TP' not in cfg: return None
         tp_pct = cfg['TP']
-        # Postmortem tuner override
-        if _POSTMORTEM_OK and _postmortem is not None:
-            try:
-                tp_pct = float(_postmortem.get_param(coin, 'tp', 'pct', default=tp_pct))
-            except Exception: pass
+        # TUNER OVERRIDE REMOVED 2026-04-22. The postmortem tuner's bounds
+        # (bounds.py line 103: tp.pct bounded 0.004-0.20) allow it to drift
+        # TP all the way down to 0.4%. In practice it was writing ~2.6% TP
+        # overrides based on recent operational closes, which overrode the
+        # swing-safe config (6-8% from percoin_configs). Every position in
+        # the current session (13 of 13) had TP at 2.6% because of this
+        # layer. TP is policy, not a learnable parameter from trade-close
+        # telemetry — a loss doesn't prove the TP was too aggressive, it
+        # proves the entry was wrong. Let the config/base_tier decide TP.
+        # Same change applied to place_native_sl.
         # TP cap (optional, env MAX_TP_PCT). Default 0 = no cap.
         if MAX_TP_PCT > 0 and tp_pct > MAX_TP_PCT:
             log(f"{coin} TP capped: cfg={tp_pct*100:.1f}% → {MAX_TP_PCT*100:.1f}%")
