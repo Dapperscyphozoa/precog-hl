@@ -29,22 +29,51 @@ def _samples_since_last_tune(coin, component, param_name):
 
 
 def apply_decisions(coin, trade, findings, synthesis, log_id):
-    """Apply the synthesizer's approved decisions. Returns count of deltas applied."""
+    """Apply the synthesizer's approved decisions. Returns count of deltas applied.
+
+    DRY_RUN blocks:
+      - param writes (tuned values)
+      - veto writes (component disables)
+
+    DRY_RUN does NOT block:
+      - finding records (audit trail)
+      - KB entries (semantic memory — observational, read by entry_gate)
+
+    KB is NOT a param change. It's the knowledge base the entry_gate reads
+    to inform future decisions. Blocking it in dry-run loses all pattern
+    learning from the observation period."""
     applied_count = 0
     vetos_applied = 0
+    kb_written = 0
+    side = trade.get('side')
+
+    # ALWAYS record findings (audit trail)
+    for f in findings:
+        db.record_finding(
+            log_id, f.get('agent'),
+            f.get('verdict', 'unknown'),
+            f.get('confidence', 0.0),
+            f.get('reasoning', ''),
+            f.get('proposed_delta', []),
+            applied=False,  # applied status set below for non-dry-run
+        )
+
+    # ALWAYS write KB entries (semantic memory accumulates during dry-run)
+    for entry in synthesis.get('kb_entries', []) or []:
+        pk = (entry.get('pattern_key') or '').strip()
+        summary = (entry.get('summary') or '').strip()
+        if not pk or not summary: continue
+        if len(pk) > 120: pk = pk[:120]
+        if len(summary) > 400: summary = summary[:400]
+        evidence = entry.get('evidence') or {}
+        evidence['log_id'] = log_id
+        evidence['root_cause'] = synthesis.get('root_cause', '')[:300]
+        if kb.write_entry(coin=coin, side=side, pattern_key=pk,
+                          summary=summary, evidence=evidence, log_id=log_id):
+            kb_written += 1
 
     if DRY_RUN:
-        # Still record every finding for audit; just don't write params.
-        for f in findings:
-            db.record_finding(
-                log_id, f.get('agent'),
-                f.get('verdict', 'unknown'),
-                f.get('confidence', 0.0),
-                f.get('reasoning', ''),
-                f.get('proposed_delta', []),
-                applied=False,
-            )
-        return 0
+        return kb_written  # findings already recorded above, KB just written
 
     # Build quick-lookup from synthesis
     decisions_by_key = {}
@@ -58,7 +87,6 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
         confidence = float(f.get('confidence', 0.0))
         reasoning = f.get('reasoning', '')
         deltas = f.get('proposed_delta', []) or []
-        any_applied = False
 
         for d in deltas:
             comp = d.get('component')
@@ -93,7 +121,6 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
             clamped = bounds.clamp_delta(comp, param, current, float(new_val))
             if clamped is None:
                 continue
-            # If clamped equals current, skip (no effective change)
             if current is not None and abs(clamped - current) < 1e-9:
                 continue
 
@@ -108,10 +135,6 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
                 agent_name=agent_name,
             )
             applied_count += 1
-            any_applied = True
-
-        # Record finding with applied flag
-        db.record_finding(log_id, agent_name, verdict, confidence, reasoning, deltas, any_applied)
 
     # Apply synthesizer-proposed vetos
     for v in synthesis.get('new_vetos', []) or []:
@@ -126,23 +149,5 @@ def apply_decisions(coin, trade, findings, synthesis, log_id):
             log_id=log_id,
         )
         vetos_applied += 1
-
-    # Write KB entries from synthesizer — semantic memory for entry gate
-    kb_written = 0
-    side = trade.get('side')
-    for entry in synthesis.get('kb_entries', []) or []:
-        pk = (entry.get('pattern_key') or '').strip()
-        summary = (entry.get('summary') or '').strip()
-        if not pk or not summary: continue
-        # Guardrails on pattern_key length and summary length
-        if len(pk) > 120: pk = pk[:120]
-        if len(summary) > 400: summary = summary[:400]
-        evidence = entry.get('evidence') or {}
-        # Ensure evidence references the log for traceability
-        evidence['log_id'] = log_id
-        evidence['root_cause'] = synthesis.get('root_cause', '')[:300]
-        if kb.write_entry(coin=coin, side=side, pattern_key=pk,
-                          summary=summary, evidence=evidence, log_id=log_id):
-            kb_written += 1
 
     return applied_count + vetos_applied + kb_written
