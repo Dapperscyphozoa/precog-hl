@@ -63,8 +63,11 @@ except Exception as _e:
 #
 # Set env REGIME_SIDE_BLOCK=0 to disable (not recommended).
 _REGIME_BLOCK_ENABLED = os.environ.get('REGIME_SIDE_BLOCK', '1') != '0'
-# Funding cutoff: above +0.3 bps in bull or below -0.3 in bear = regime confirmed
-_REGIME_FUNDING_CUTOFF_BPS = 0.3
+# Funding cutoff: any positive funding in bull regime = confirmed, block shorts
+# (Was +0.3 bps initially but HL perps routinely sit at +0.125 bps, letting
+# regime-mismatched shorts through. Tightened to 0.0 — any pos funding in bull
+# regime blocks all shorts; any neg funding in bear regime blocks all longs.)
+_REGIME_FUNDING_CUTOFF_BPS = 0.0
 
 def regime_blocks_side(coin, side):
     """Return (blocked, reason). side='BUY' or 'SELL'.
