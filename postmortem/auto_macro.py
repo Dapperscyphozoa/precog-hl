@@ -105,34 +105,47 @@ def _fetch_stooq_one(stooq_sym, canonical):
 
 
 def _fetch_massive_one(ticker, canonical):
-    """Fetch latest hourly bar from Massive.io for forex/metals."""
+    """Fetch latest daily bar from Massive.io for forex/metals.
+
+    Note: this account tier returns DELAYED/empty on /range/1/hour/.
+    Daily bars work fine. For intraday, upgrade Massive.io subscription.
+    Returns tuple (status, detail) for diagnostics.
+    """
     api_key = os.environ.get('MASSIVE_API_KEY') or os.environ.get('MASSIVE_IO_API_KEY')
-    if not api_key: return None
+    if not api_key:
+        return ('no_key', 'MASSIVE_API_KEY not set')
     try:
-        # Last 4h window to catch the most recent hourly bar
+        # 7-day window to handle weekend gaps (FX closed Sat/Sun)
         now_ms = int(time.time() * 1000)
-        from_ms = now_ms - 4 * 3600 * 1000
-        url = (f'https://api.massive.com/v2/aggs/ticker/{ticker}/range/1/hour/'
-               f'{from_ms}/{now_ms}?adjusted=true&sort=desc&limit=2&apiKey={api_key}')
+        from_ms = now_ms - 7 * 24 * 3600 * 1000
+        url = (f'https://api.massive.com/v2/aggs/ticker/{ticker}/range/1/day/'
+               f'{from_ms}/{now_ms}?adjusted=true&sort=desc&limit=3&apiKey={api_key}')
         body = _http(url, timeout=TIMEOUT)
         d = json.loads(body.decode())
+        if d.get('status') == 'ERROR':
+            return ('api_error', d.get('error', 'unknown')[:100])
         results = d.get('results') or []
-        if not results: return None
+        if not results:
+            return ('empty_results', f'status={d.get("status","?")} count={d.get("resultsCount",0)}')
         latest = results[0]
         prev = results[1] if len(results) > 1 else latest
         price = latest.get('c')
         prev_close = prev.get('c') if prev is not latest else latest.get('o')
-        if price is None: return None
+        if price is None:
+            return ('no_close', 'results missing close price')
         written = tv_cache.write(
             symbol=canonical,
             price=float(price),
             prev_close=float(prev_close) if prev_close is not None else None,
-            timeframe='1h',
-            raw={'source': 'massive', 'ticker': ticker, 'bar_ts': latest.get('t')},
+            timeframe='1d',
+            raw={'source': 'massive', 'ticker': ticker, 'bar_ts': latest.get('t'),
+                 'api_status': d.get('status')},
         )
-        return written
-    except Exception:
-        return None
+        return ('ok', written or 'write_failed')
+    except urllib.error.HTTPError as e:
+        return (f'http_{e.code}', str(e)[:100])
+    except Exception as e:
+        return (f'err_{type(e).__name__}', str(e)[:100])
 
 
 def pull_all(force=False):
@@ -168,7 +181,11 @@ def pull_all(force=False):
             massive_futs = {ex.submit(_fetch_massive_one, t, c): c for t, c in MASSIVE_SYMBOLS.items()}
             for fut, canon in massive_futs.items():
                 try:
-                    summary['massive'][canon] = fut.result(timeout=TIMEOUT + 4) or 'failed'
+                    result = fut.result(timeout=TIMEOUT + 4)
+                    if isinstance(result, tuple):
+                        summary['massive'][canon] = {'status': result[0], 'detail': result[1]}
+                    else:
+                        summary['massive'][canon] = result or 'failed'
                 except Exception as e:
                     summary['massive'][canon] = f'err:{type(e).__name__}'
         else:

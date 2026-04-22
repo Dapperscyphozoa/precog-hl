@@ -13,7 +13,7 @@ import os
 import time
 from flask import jsonify, request
 
-from . import db, bounds, params_api, runner
+from . import db, bounds, params_api, runner, tuner
 
 
 def _auth_ok(req):
@@ -34,7 +34,7 @@ def register_endpoints(app):
             return jsonify({
                 'ok': True,
                 'enabled': runner.ENABLED,
-                'dry_run': runner.DRY_RUN if hasattr(runner, 'DRY_RUN') else False,
+                'dry_run': getattr(tuner, 'DRY_RUN', os.environ.get('POSTMORTEM_DRY_RUN', '0') == '1'),
                 'recent_runs': recent,
                 'total_components': len(bounds.components_list()),
                 'has_api_key': bool(os.environ.get('ANTHROPIC_API_KEY')),
