@@ -208,12 +208,21 @@ def _parse(text):
 
 
 def _resolve_regime_state(signal_ctx):
-    """Build pattern_key suffixes from context for KB lookup."""
+    """Build pattern_key suffixes from context for KB lookup.
+
+    Pattern keys are stored as '{coin}:{side_db}:...' where side_db is 'S'/'L',
+    matching how the post-mortem synthesizer writes them."""
     extras = []
     coin = signal_ctx.get('coin')
-    side = signal_ctx.get('side')
-    if not coin or not side: return extras
-    prefix = f'{coin}:{side}'
+    # Prefer normalized side_db (set by evaluate_entry); fall back to raw side if needed
+    side_db = signal_ctx.get('side_db')
+    if not side_db:
+        raw = signal_ctx.get('side')
+        if raw == 'BUY': side_db = 'L'
+        elif raw == 'SELL': side_db = 'S'
+        else: side_db = raw
+    if not coin or not side_db: return extras
+    prefix = f'{coin}:{side_db}'
 
     regime = signal_ctx.get('regime_state')
     if regime: extras.append(f'{prefix}:regime={regime}')
@@ -233,13 +242,21 @@ def _resolve_regime_state(signal_ctx):
 
 
 def evaluate_entry(coin, side, signal_ctx):
-    """Main entry point. Returns verdict dict. Never raises."""
+    """Main entry point. Returns verdict dict. Never raises.
+
+    Accepts side in precog.py's format ('BUY' / 'SELL') but internally
+    normalizes to KB/DB storage format ('L' / 'S') for all lookups,
+    since close-logging writes pos['side'] as 'L'/'S' (short abbrev).
+    Mismatch previously caused kb_matches=0 for every gate evaluation."""
     if not ENABLED:
         return _fail_open('gate disabled')
     if not coin or side not in ('BUY', 'SELL'):
         return _fail_open('bad args')
 
-    # Cache check
+    # Normalize side for all downstream lookups (KB, vetos stored as L/S)
+    side_db = 'L' if side == 'BUY' else 'S'
+
+    # Cache check (use precog side for cache key to match call signature)
     ckey = (coin, side)
     now = time.time()
     with _LOCK:
@@ -250,7 +267,8 @@ def evaluate_entry(coin, side, signal_ctx):
     try:
         signal_ctx = dict(signal_ctx or {})
         signal_ctx['coin'] = coin
-        signal_ctx['side'] = side
+        signal_ctx['side'] = side  # keep precog-native form for the prompt (more readable)
+        signal_ctx['side_db'] = side_db  # also expose normalized form
 
         tuned = params_api.params_summary(coin=coin) or []
         vetos = [v for v in db.list_vetos(active_only=True) if v['coin'] == coin]
@@ -282,9 +300,9 @@ def evaluate_entry(coin, side, signal_ctx):
             with _LOCK: _CACHE[ckey] = (verdict, now + _CACHE_TTL)
             return verdict
 
-        # Build KB context
+        # Build KB context — use normalized side_db (KB stores 'L'/'S' not 'BUY'/'SELL')
         extras = _resolve_regime_state(signal_ctx)
-        kb_entries = kb.read_relevant(coin, side, extra_pattern_keys=extras, max_entries=6)
+        kb_entries = kb.read_relevant(coin, side_db, extra_pattern_keys=extras, max_entries=6)
         kb_block = kb.format_for_prompt(kb_entries, max_chars=1000)
 
         # Build market context (news + macro + calendar) — defensive, never raises
