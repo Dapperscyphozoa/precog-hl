@@ -289,4 +289,27 @@ def register_endpoints(app):
     def pm_tv_macro_one(symbol):
         return jsonify({'entry': tv_cache.read(symbol)})
 
+    # ─────────────────────────────────────────────────────
+    # Auto macro puller (Stooq + Massive.io) — zero user config
+    # ─────────────────────────────────────────────────────
+    from . import auto_macro
+
+    @app.route('/postmortem/automacro/pull', methods=['POST'])
+    def pm_automacro_pull():
+        """Force-refresh auto-pulled macro (Stooq + Massive.io) into tv_cache."""
+        if not _auth_ok(request):
+            return jsonify({'ok': False, 'err': 'unauthorized'}), 401
+        summary = auto_macro.pull_all(force=True)
+        return jsonify(summary)
+
+    @app.route('/postmortem/automacro/status', methods=['GET'])
+    def pm_automacro_status():
+        return jsonify({
+            'daemon_alive': auto_macro.daemon_alive(),
+            'stooq_symbols': list(auto_macro.STOOQ_SYMBOLS.values()),
+            'massive_enabled': bool(os.environ.get('MASSIVE_API_KEY') or os.environ.get('MASSIVE_IO_API_KEY')),
+            'massive_symbols': list(auto_macro.MASSIVE_SYMBOLS.values()) if os.environ.get('MASSIVE_API_KEY') or os.environ.get('MASSIVE_IO_API_KEY') else [],
+            'ttl_sec': auto_macro.TTL,
+        })
+
     return app
