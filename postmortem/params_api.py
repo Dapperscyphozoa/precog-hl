@@ -50,10 +50,15 @@ def get_param(coin, component, param_name, default=None):
 
 
 def _fallback(component, param_name, default):
-    b = bounds.get_default(component, param_name)
-    if b is not None:
-        return b
-    return default
+    """Caller-supplied default wins. bounds.get_default() is a last-resort
+    fallback only when the caller didn't supply one.
+
+    Rationale: the caller passes the percoin OOS-validated config (e.g.
+    ME's TP=0.08). bounds.get_default is a generic safety default (TP=0.06).
+    The OOS config is more authoritative than the generic default."""
+    if default is not None:
+        return default
+    return bounds.get_default(component, param_name)
 
 
 def get_veto(coin, component):
