@@ -1800,7 +1800,12 @@ COINS = [
     'MINA','ICP','GMX',
     'FXS','DYDX','SNX','CRV','COMP','ILV',
     'TURBO','MEW','GOAT','PNUT','KAS','MEME','NEIROETH',
-    'HBAR','TRX','MANTA','HMSTR','SEI','ZK'
+    'HBAR','TRX','MANTA','HMSTR','SEI','ZK',
+    # Tier 4 expansion: high-volume HL perps missing from roster (24h volume > $500k)
+    # ETH added — previously absent despite $1.28B/day volume (second-largest crypto).
+    # HYPE = Hyperliquid native, $318M/day. DOGE/ARB/NEAR/BCH = major caps missing.
+    'ETH','HYPE','DOGE','ARB','NEAR','BCH','STRK','ENA','ZRO','TRUMP',
+    'ETHFI','ONDO','EIGEN','AVNT','PAXG','GRASS','FET','SKY','ASTER','CHIP'
 
 ]
 

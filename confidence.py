@@ -121,31 +121,33 @@ def _rsi(c, p=14):
     return 100 - 100 / (1 + ag / np.where(al == 0, 1e-10, al))
 
 def size_multiplier(score_val):
-    """CONVICTION MODE: block low-conviction, scale up steeply at high conviction.
+    """CONVICTION MODE: block very low conviction, scale up at high conviction.
 
     At $710-$5k equity, 0.2x probe trades result in $10-30 notional positions.
     Even a perfect 2% TP on those is $0.20-$0.60 profit — below fee threshold
-    and well inside market noise. No edge can accumulate from trades this small.
+    and inside market noise.
 
-    Old dial (<30 → 0.2x) let every signal trade. New dial blocks <40 entirely
-    and sizes remaining trades for meaningful $ impact per outcome.
+    Floor lowered 40 → 30 after observing that the 32-trade sample had 0 trades
+    above conf=33. Floor=40 would have blocked 100% of historical flow. Floor=30
+    lets SPX/STX-grade setups through (conf 30-39 range) while still excluding
+    the dust-prone 15-29 tier that was burning fees with no directional edge.
 
-    <40:  0.0x (BLOCKED — not worth fee/slippage/mental-capital overhead)
-    40-49: 1.0x (baseline — acceptable conviction, full base size)
-    50-64: 2.0x (meaningful — clear signal agreement across components)
-    65-79: 3.5x (high — multi-component confluence)
-    80+:   5.0x (conviction max — hard cap 15% equity at SL)
+    <30:   0.0x  (BLOCKED — fees/noise overwhelm edge at this conviction)
+    30-49: 1.0x  (baseline meaningful)
+    50-64: 2.0x  (solid confluence)
+    65-79: 3.5x  (high conviction)
+    80+:   5.0x  (conviction max — hard cap at 15% equity at SL)
 
-    With $710 equity × 3% base risk:
-       baseline   (1.0x) = $21 risk  → ~$1050 notional at 2% SL  → $21/trade at 2% TP
-       meaningful (2.0x) = $42 risk  → ~$2100 notional           → $42/trade
-       high       (3.5x) = $74 risk  → ~$3700 notional           → $74/trade
-       max        (5.0x) = $107 risk → ~$5300 notional           → $107/trade
+    With $710 equity × 3% base risk × leverage:
+       baseline   (1.0x) target: $20-30/trade at 2% TP
+       meaningful (2.0x) target: $40-60/trade
+       high       (3.5x) target: $70-100/trade
+       max conv   (5.0x) target: $100+/trade
 
     Returning 0.0 signals process() to skip — the explicit conviction-floor
-    check must also exist at the caller (calc_size returning 0 would attempt
+    check at the caller must also exist (calc_size returning 0 would attempt
     a 0-size order which HL rejects noisily)."""
-    if score_val < 40: return 0.0   # BLOCKED
+    if score_val < 30: return 0.0   # BLOCKED
     if score_val < 50: return 1.0
     if score_val < 65: return 2.0
     if score_val < 80: return 3.5
