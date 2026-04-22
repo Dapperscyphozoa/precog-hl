@@ -2695,6 +2695,21 @@ def place(coin, is_buy, size):
     if size <= 0:
         log(f"{coin} size rounded to 0 — skip"); return None
 
+    # MIN-NOTIONAL GUARD. Refuse to open positions below $50 notional.
+    # Below this, the $0.10 dust-sweep threshold fires on <0.2% price moves
+    # and closes the position before TP/SL has a chance. Every trade in the
+    # post-mortem log from the first 40 runs dust-swept at 30min because
+    # notional was \$13-\$37 — winners and losers both killed prematurely.
+    # This guard is the cheapest, cleanest fix: if calc_size produces a dust
+    # position, we skip rather than trade. Post-mortem log stops filling with
+    # garbage. Entry sizing that's too small to matter is still too small to
+    # trade. Clean cutoff.
+    notional_usd = size * px
+    MIN_NOTIONAL_USD = 50.0
+    if notional_usd < MIN_NOTIONAL_USD:
+        log(f"{coin} {'BUY' if is_buy else 'SELL'} SKIP: notional ${notional_usd:.2f} below \${MIN_NOTIONAL_USD:.0f} min (size={size}, px={px})")
+        return None
+
     # Bybit-lead limit: capture HL lag using Bybit's current price
     side = 'BUY' if is_buy else 'SELL'
     edge = bybit_lead.compute_edge_price(coin, side, px)
@@ -3457,11 +3472,16 @@ def main():
                                              'engine':'RECONCILED', 'source':'reconcile'}
                     log(f"RECONCILE: adopting existing {k} {side} (fresh 30min grace window)")
 
-            # DUST-SWEEP: close STALE positions (>30min old) with |PnL| <= $0.10 to free margin.
+            # DUST-SWEEP: close STALE positions (>30min old) with |PnL| <= threshold to free margin.
             # Rationale: dust-sweep was killing fresh trades before they could develop edge.
             # Only sweep positions that have had time to work and are going nowhere.
             # Exception: don't sweep PURE tier positions (100% WR — let them work toward TP)
-            DUST_THRESHOLD = 0.10  # $0.10
+            #
+            # Threshold scales with position notional: absolute $0.10 floor AND 0.1% of
+            # notional. Prior bug: fixed $0.10 killed 100% of $13 positions at <0.77% move,
+            # including winners. A $500 position needs to actually move <0.02% to sweep.
+            DUST_THRESHOLD_FIXED = 0.10   # $0.10 minimum floor
+            DUST_THRESHOLD_PCT = 0.001    # 0.1% of notional — below this is truly dust
             DUST_MIN_AGE_SEC = 1800  # 30 min — fresh positions get time to reach TP
             now_ts = time.time()
             swept = 0
@@ -3480,11 +3500,15 @@ def main():
                     if age_sec < DUST_MIN_AGE_SEC: continue  # too fresh, let it work
                     # Use HL's reported PnL directly (no get_mid 429 issues)
                     unrealized_usd = lp.get('pnl', 0)
-                    if abs(unrealized_usd) <= DUST_THRESHOLD:
-                        notional = abs(sz) * entry
+                    notional = abs(sz) * entry
+                    # Scale threshold: max of $0.10 absolute floor AND 0.1% of notional.
+                    # A $13 position gets $0.10 threshold (0.77% of notional = huge);
+                    # a $500 position gets $0.50 threshold (0.1% of notional = noise).
+                    dust_threshold = max(DUST_THRESHOLD_FIXED, notional * DUST_THRESHOLD_PCT)
+                    if abs(unrealized_usd) <= dust_threshold:
                         try:
                             pnl = close(k)
-                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
+                            log(f"DUST-SWEEP {k} ({pos_tier or 'NONE'}) pnl=${unrealized_usd:+.3f} threshold=${dust_threshold:.3f} age={age_sec/60:.0f}min notional=${notional:.0f} (freeing margin)")
                             # Feed post-mortem ONLY if close() actually succeeded.
                             # close() returns None when HL reports no position, which
                             # happens if the position was already closed externally
@@ -3507,7 +3531,7 @@ def main():
                             log(f"dust-sweep err {k}: {e}")
                 except Exception as e:
                     log(f"dust-sweep scan err {k}: {e}")
-            if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=${DUST_THRESHOLD:.2f}, age>={DUST_MIN_AGE_SEC/60:.0f}min)")
+            if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=max(${DUST_THRESHOLD_FIXED:.2f},0.1%%notional), age>={DUST_MIN_AGE_SEC/60:.0f}min)")
 
             # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
             for k, lp in live_positions.items():
@@ -3665,12 +3689,71 @@ def main():
                             if px:
                                 is_buy = (action == 'buy')
                                 side_str = 'BUY' if is_buy else 'SELL'
-                                # GATE — webhook must clear same filter as internal signal
+                                # GATE 1 — webhook must clear same ticker/trend filter as internal signal
                                 candles_for_gate = fetch(coin)
                                 if not apply_ticker_gate(coin, side_str, px, candles_for_gate):
                                     log(f"WEBHOOK {coin} {side_str} GATED (trend/ticker filter)")
                                     wh_count += 1; continue
-                                sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
+
+                                # GATE 2 — CONVICTION FLOOR. Webhook signals must pass the same
+                                # conf=30 floor as internal signals. Without this, TradingView
+                                # alerts bypass the sizing filter and trade at default 1.0x
+                                # even at near-noise levels. Score the candles, apply floor.
+                                wh_size_mult = 1.0
+                                wh_conf = 0
+                                wh_conf_brk = None
+                                try:
+                                    _btc_d = btc_correlation.get_state().get('btc_dir', 0)
+                                    # Use "BUY"/"SELL" as engine name when scoring (confidence.score
+                                    # needs a sig string). It maps to direction-aware scoring.
+                                    wh_conf, wh_conf_brk = confidence.score(
+                                        candles_for_gate, [], coin, side_str, _btc_d)
+                                    wh_size_mult = confidence.size_multiplier(wh_conf)
+                                    if wh_size_mult <= 0.0:
+                                        log(f"WEBHOOK {coin} {side_str} SKIP: conf={wh_conf} below conviction floor {wh_conf_brk}")
+                                        wh_count += 1; continue
+                                except Exception as _ce:
+                                    log(f"WEBHOOK {coin} conf err: {_ce} — allowing at 1.0x")
+
+                                # GATE 3 — ENTRY LLM GATE. Check KB + vetos + regime before placing.
+                                # Fail-open: any error returns ALLOW at 1.0x.
+                                wh_gate_mult = 1.0
+                                if _POSTMORTEM_OK and _postmortem is not None:
+                                    try:
+                                        _session_h = time.gmtime(time.time()).tm_hour
+                                        _session = ('asian' if 0 <= _session_h < 8
+                                                    else 'london' if 8 <= _session_h < 13
+                                                    else 'ny' if 13 <= _session_h < 21
+                                                    else 'overnight')
+                                        try:
+                                            _funding_bps = get_funding_rate(coin) * 10000.0
+                                        except Exception:
+                                            _funding_bps = None
+                                        _signal_ctx = {
+                                            'engine': 'WEBHOOK',
+                                            'conf_score': wh_conf,
+                                            'conf_breakdown': wh_conf_brk,
+                                            'price': px,
+                                            'session': _session,
+                                            'funding_rate_bps': _funding_bps,
+                                            'btc_dir': _btc_d if '_btc_d' in dir() else 0,
+                                            'equity': equity,
+                                            'open_positions': len(live_positions),
+                                        }
+                                        _v = _postmortem.evaluate_entry(coin, side_str, _signal_ctx)
+                                        _dec = _v.get('decision', 'ALLOW')
+                                        wh_gate_mult = float(_v.get('size_mult', 1.0))
+                                        if _dec == 'BLOCK':
+                                            log(f"WEBHOOK {coin} {side_str} GATE BLOCK: {_v.get('reason','')}")
+                                            wh_count += 1; continue
+                                        if _dec == 'SIZE_DOWN':
+                                            log(f"WEBHOOK {coin} {side_str} GATE SIZE_DOWN ×{wh_gate_mult}: {_v.get('reason','')}")
+                                    except Exception as _ge:
+                                        log(f"WEBHOOK {coin} gate err: {_ge} — allowing at 1.0x")
+
+                                # Apply both conviction and gate multipliers to size calc
+                                wh_risk_mult = risk_mult * wh_size_mult * wh_gate_mult
+                                sz = calc_size(equity, px, risk_pct, wh_risk_mult, coin=coin, side=side_str)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
                                     _sl_pct_used = place_native_sl(coin, is_buy, fill, sz)
@@ -3691,6 +3774,9 @@ def main():
                                         'sigs': _sigs_for_pm,
                                         'size': sz,
                                         'utc_h': time.gmtime(time.time()).tm_hour,
+                                        'conf': wh_conf,
+                                        'conf_mult': wh_size_mult,
+                                        'gate_mult': wh_gate_mult,
                                     }
                                     log(f"WEBHOOK OPEN {coin} {side_str} @ {fill} (px_src={'bybit_ws' if px==by_px else 'hl_mid'}, age={by_age}ms)")
                                     log_trade('HL', coin, side_str, fill, 0, 'webhook')
