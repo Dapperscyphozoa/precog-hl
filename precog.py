@@ -1422,6 +1422,74 @@ def close_one_position(coin):
         return jsonify({'status':'error','coin':coin,'error':str(e)}), 500
 
 
+@app.route('/cancel_stale_makers', methods=['GET', 'POST'])
+def cancel_stale_makers():
+    """Cancel maker-limit orders that are stale — i.e. there's already a
+    filled position of the same size and side, meaning the order either
+    got double-placed or the bot missed the fill. If ?coin=X is given,
+    only scan that coin; else scan all.
+
+    Args:
+      ?secret= (required)
+      ?coin=  (optional: restrict to one coin)
+      ?dryrun=1  (optional: report what WOULD be cancelled, no action)
+
+    Returns list of cancelled oids with reasons."""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err':'unauthorized'}), 401
+    coin_filter = (flask_request.args.get('coin') or '').upper() or None
+    dryrun = flask_request.args.get('dryrun') == '1'
+    try:
+        us = info.user_state(WALLET)
+        pos_by_coin = {}
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            sz = float(p.get('szi', 0))
+            if sz == 0: continue
+            pos_by_coin[p.get('coin','').upper()] = sz
+
+        fo = info.frontend_open_orders(WALLET)
+        cancelled = []; skipped = []
+        for o in fo:
+            c = o.get('coin','').upper()
+            if coin_filter and c != coin_filter: continue
+            # Skip trigger-type orders (SL/TP); only target vanilla limits
+            if o.get('isTrigger'): continue
+            if o.get('orderType','') != 'Limit': continue
+            # We only flag STALE makers — where there's an open position
+            # in the same direction AND same size already
+            pos_sz = pos_by_coin.get(c, 0)
+            if pos_sz == 0: continue  # no position → limit is legit (entry)
+            side_is_buy = o.get('side') == 'B'
+            pos_is_long = pos_sz > 0
+            if side_is_buy != pos_is_long: continue  # opposite side → legit reduce
+            order_sz = float(o.get('sz', 0))
+            # Stale if order size matches position size (within 1%)
+            if abs(order_sz - abs(pos_sz)) / abs(pos_sz) > 0.01: continue
+            oid = o.get('oid')
+            info_dict = {'coin':c,'oid':oid,'side':o.get('side'),
+                         'px':o.get('limitPx'),'sz':order_sz,'pos_sz':pos_sz,
+                         'reason':'stale_maker_duplicate_of_filled_position'}
+            if dryrun:
+                skipped.append(info_dict)
+                continue
+            try:
+                r = exchange.cancel(c, oid)
+                status = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+                info_dict['hl_response'] = status
+                cancelled.append(info_dict)
+                log(f"STALE-MAKER CANCELLED {c} oid={oid} px={o.get('limitPx')} sz={order_sz} (pos={pos_sz})")
+            except Exception as e:
+                info_dict['err'] = str(e)
+                cancelled.append(info_dict)
+                log(f"STALE-MAKER CANCEL ERR {c} oid={oid}: {e}")
+        return jsonify({'status':'done','dryrun':dryrun,
+                        'cancelled': cancelled, 'would_cancel': skipped})
+    except Exception as e:
+        log(f"CANCEL_STALE ERR: {e}")
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/protect_sl/<coin>', methods=['GET', 'POST'])
 def protect_sl_endpoint(coin):
     """Place a native SL on an existing HL position that lacks one.
