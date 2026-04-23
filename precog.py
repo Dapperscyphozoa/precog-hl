@@ -114,6 +114,16 @@ except Exception as _e:
     _IA_OK = False
     print(f'[abstain] import failed (non-fatal): {_e}', flush=True)
 
+# Edge decay monitor — LIVE rolling-window drift detector.
+# Alerts (not trading gates) on decay_slow/fast/broken state transitions.
+try:
+    import edge_decay as _edge_decay
+    _ED_OK = True
+except Exception as _e:
+    _edge_decay = None
+    _ED_OK = False
+    print(f'[edge_decay] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -372,6 +382,32 @@ def record_close(pos, coin, pnl_pct, state):
                 win=pnl_pct > 0,
                 bar_ts=pos.get('bar_ts') or pos.get('ts'),
                 exit_reason=pos.get('exit_reason'),
+            )
+        except Exception:
+            pass
+
+    # Edge decay monitor — live alerts on WR drift / R:R compression / hold expansion.
+    # No trading gate; log-only alerts at state transitions.
+    if _ED_OK and _edge_decay is not None:
+        try:
+            _hold_sec = 0
+            if pos.get('ts'):
+                _hold_sec = time.time() - float(pos.get('ts'))
+            _cur_reg = None
+            try:
+                import regime_detector as _rd
+                _cur_reg = _rd.get_regime()
+            except Exception: pass
+            _edge_decay.record_close(
+                coin=coin,
+                engine=pos.get('engine'),
+                regime=_cur_reg,
+                pnl_pct=pnl_pct,
+                hold_seconds=_hold_sec,
+                win=pnl_pct > 0,
+                exit_reason=pos.get('exit_reason'),
+                regime_at_entry=pos.get('regime'),
+                config_source=pos.get('_regime_source') or pos.get('config_source'),
             )
         except Exception:
             pass
@@ -1592,6 +1628,18 @@ def abstain_status():
         if not _IA_OK or _inaction is None:
             return jsonify({'error': 'optimal_inaction not loaded'}), 503
         return jsonify(_inaction.get_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/edge_decay', methods=['GET'])
+def edge_decay_status():
+    """Edge decay monitor — live WR drift / R:R compression / hold expansion.
+    Returns current trend (increasing/stable/decaying_slow/decaying_fast/broken)
+    and half-life estimate for current edge."""
+    try:
+        if not _ED_OK or _edge_decay is None:
+            return jsonify({'error': 'edge_decay not loaded'}), 503
+        return jsonify(_edge_decay.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
