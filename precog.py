@@ -2585,9 +2585,14 @@ exchange = _init_exchange_with_retry(account)
 # Can be tuned via env: ORDER_MIN_INTERVAL_MS, ORDER_BURST_WINDOW_SEC,
 # ORDER_BURST_MAX. Default values are conservative — tune down once we
 # see the actual HL order rate that doesn't trigger 429s.
-_ORDER_MIN_INTERVAL = float(os.environ.get('ORDER_MIN_INTERVAL_MS', '125')) / 1000.0
+# 2026-04-22: Raised 125→300ms min interval, 20→10 burst cap. Observed
+# 429s on SL/TP placement even with 125ms spacing during multi-position
+# open bursts. HL's per-IP rate limit appears ~5-6 orders/sec sustained;
+# 300ms gives 3.3/sec steady, 10-in-5s burst = 2/sec average. Tighter
+# but reliable. Can retighten once HL WS userEvents replaces REST polling.
+_ORDER_MIN_INTERVAL = float(os.environ.get('ORDER_MIN_INTERVAL_MS', '300')) / 1000.0
 _ORDER_BURST_WINDOW = float(os.environ.get('ORDER_BURST_WINDOW_SEC', '5'))
-_ORDER_BURST_MAX = int(os.environ.get('ORDER_BURST_MAX', '20'))
+_ORDER_BURST_MAX = int(os.environ.get('ORDER_BURST_MAX', '10'))
 _order_times = []
 _order_lock = threading.Lock()
 _last_order_ts = [0.0]  # mutable holder for last order time
