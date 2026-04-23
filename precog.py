@@ -2482,7 +2482,7 @@ BP['rsi_lo'] = 30  # 2026-04-22: 35→30. Previous 35 was asymmetric (15 below 5
                    # are 20 points from 50 — neutral signal generation.
 
 
-INITIAL_RISK_PCT = 0.03  # DIAL MODE: 1.5x base. Conf multiplier 0.2x-5.0x. Max conf = 15% equity at SL (hard cap).
+INITIAL_RISK_PCT = float(os.environ.get('RISK_PCT', '0.01'))  # 1% per user directive (was 0.03 DIAL MODE: 1.5x base. Conf multiplier 0.2x-5.0x. Max conf = 15% equity at SL (hard cap).
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
@@ -2503,7 +2503,7 @@ USE_ISOLATED_MARGIN = True
 TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global multiplier needed).
                      # Per-coin 15m OOS optimization: PROMPT 10%, ETH 10%, ALT 6%, ASTER 6%, etc.
                      # Prior value 2.0 was bandaid before per-coin tuning existed.
-MAX_POSITIONS = 25  # 2026-04-22: raised 8 → 25 for data-gathering phase.
+MAX_POSITIONS = int(os.environ.get('MAX_POSITIONS', '10'))  # 10 default (was 25  # 2026-04-22: raised 8 → 25 for data-gathering phase.
                     # With the signal-generator bias fix live, signals are
                     # now properly filtered at 3 layers (conv floor, MTF gate,
                     # R:R floor). The tight filtering means the remaining
