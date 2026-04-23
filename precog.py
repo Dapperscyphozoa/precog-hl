@@ -49,6 +49,16 @@ except Exception as _e:
     _POSTMORTEM_OK = False
     print(f'[postmortem] import failed (non-fatal): {_e}', flush=True)
 
+# Microstructure annotator — post-hoc classifier (non-blocking).
+# Defers execution timing refinement work until 200+ closes accumulated.
+try:
+    import microstructure as _microstructure
+    _MS_OK = True
+except Exception as _e:
+    _microstructure = None
+    _MS_OK = False
+    print(f'[microstructure] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
 # ═══════════════════════════════════════════════════════
@@ -206,6 +216,30 @@ def record_close(pos, coin, pnl_pct, state):
             _postmortem.run_postmortem_async(pos, coin, pnl_pct)
         except Exception as _e:
             pass  # never let post-mortem crash the close path
+
+    # ─────────────────────────────────────────────────────
+    # MICROSTRUCTURE ANNOTATION — post-hoc classifier.
+    # Records every close with momentum/absorption/fake-breakout labels.
+    # Triggers discussion flag at 200 classified closes.
+    # Non-blocking (runs in daemon thread).
+    # ─────────────────────────────────────────────────────
+    if _MS_OK and _microstructure is not None:
+        try:
+            _microstructure.annotate_close(
+                coin=coin,
+                side=pos.get('side', '?'),
+                entry_price=float(pos.get('entry', 0) or 0),
+                sl_price=float(pos.get('sl', 0) or 0),
+                tp_price=float(pos.get('tp', 0) or 0),
+                entry_ts=pos.get('ts', time.time()),
+                pnl_pct=pnl_pct,
+                engine=pos.get('engine'),
+                regime=pos.get('regime'),
+                conf=pos.get('conf'),
+                wilson_lb=pos.get('wilson_lb'),
+            )
+        except Exception:
+            pass  # never block close path
 
 def wr_to_mult(wr, n, min_n=5):
     """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
@@ -1341,6 +1375,17 @@ def regime_status():
             'config_coverage': regime_configs.coverage_stats(),
             'total_coins_with_regime_configs': len(regime_configs.REGIME_CONFIGS),
         })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/microstructure', methods=['GET'])
+def microstructure_status():
+    """Microstructure annotator — post-hoc classification of closes.
+    Accumulates data silently; at 200 closes flags discussion trigger."""
+    try:
+        if not _MS_OK or _microstructure is None:
+            return jsonify({'error': 'microstructure module not loaded'}), 503
+        return jsonify(_microstructure.get_stats())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
