@@ -92,6 +92,17 @@ except Exception as _e:
     _CF_OK = False
     print(f'[counterfactual] import failed (non-fatal): {_e}', flush=True)
 
+# Red team defenses — cheap structural safeguards.
+# Chop cooldown multiplier, regime staleness check, funding exit audit.
+try:
+    import red_team as _red_team
+    _red_team.funding_exit_audit()
+    _RT_OK = True
+except Exception as _e:
+    _red_team = None
+    _RT_OK = False
+    print(f'[red_team] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
 # ═══════════════════════════════════════════════════════
@@ -1508,6 +1519,17 @@ def counterfactual_status():
         if not _CF_OK or _counterfactual is None:
             return jsonify({'error': 'counterfactual not loaded'}), 503
         return jsonify(_counterfactual.get_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/red_team', methods=['GET'])
+def red_team_status():
+    """Red team defenses — cheap structural safeguards.
+    Chop cooldown extension, regime staleness check, funding exit audit."""
+    try:
+        if not _RT_OK or _red_team is None:
+            return jsonify({'error': 'red_team not loaded'}), 503
+        return jsonify(_red_team.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3857,6 +3879,22 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
     signal_engine = 'PIVOT' if sig else None
 
+    # RED TEAM: extend cooldown in chop regime (2x) to prevent Zone C signal
+    # clustering. Applies after all engine-level CD checks.
+    if sig and _RT_OK and _red_team is not None:
+        try:
+            import regime_detector as _rd
+            _cur_reg = _rd.get_regime()
+            _mult = _red_team.chop_cooldown_multiplier(_cur_reg)
+            if _mult > 1.0:
+                _last = last_s if sig == 'SELL' else last_b
+                _extended_cd = int(CD_MS * _mult)
+                if bar_ts - _last < _extended_cd:
+                    log(f"{coin} {sig} SKIP: chop cooldown extension (mult={_mult}x)")
+                    sig = None; signal_engine = None
+        except Exception:
+            pass  # fail-open
+
     # PER-COIN FILTER: for ELITE coins, apply tuned sigs whitelist + filter
     # Each coin's allowed sigs list and filter (ema200/adx25/etc) comes from OOS tuning
     if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
@@ -4308,6 +4346,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         conf_score = 0
 
     log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} engine={signal_engine} risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score}")
+
+    # RED TEAM: regime staleness gate. If BTC 1h data is stale, the regime
+    # classifier is running on cached/wrong data. Abort rather than trade on lies.
+    if _RT_OK and _red_team is not None:
+        try:
+            if not _red_team.regime_staleness_ok():
+                log(f"{coin} {sig} SKIP: BTC 1h regime data stale (red_team gate)")
+                return
+        except Exception:
+            pass  # fail-open
 
     # Parallel telemetry for future mutual information analysis.
     # Records which engine fired + confluence state; non-blocking.
