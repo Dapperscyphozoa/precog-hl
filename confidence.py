@@ -12,9 +12,9 @@ def ema_arr(arr, period):
         e[i] = arr[i]*k + e[i-1]*(1-k)
     return e
 
-def score(candles5, candles4h, coin, side, btc_dir):
+def score(candles15, candles4h, coin, side, btc_dir):
     """Compute 0-100 confidence score for a signal.
-    candles5: list of [ts,o,h,l,c,v] (most recent last)
+    candles15: list of [ts,o,h,l,c,v] on 15m timeframe (most recent last)
     candles4h: list of [ts,o,h,l,c,v]
     side: 'BUY' or 'SELL'
     btc_dir: +1/-1/0
@@ -22,15 +22,15 @@ def score(candles5, candles4h, coin, side, btc_dir):
     """
     breakdown = {}
     total = 0
-    if len(candles5) < 50: return 50, {'insufficient': True}
+    if len(candles15) < 50: return 50, {'insufficient': True}
     try:
-        arr5 = np.array(candles5)
+        arr5 = np.array(candles15)
         c5 = arr5[:,4].astype(float); h5 = arr5[:,2].astype(float); l5 = arr5[:,3].astype(float); v5 = arr5[:,5].astype(float)
         rsi14 = _rsi(c5, 14)
         e9_5 = ema_arr(c5, 9)
-        # 1H EMA20
-        c1h = []; 
-        for i in range(0, len(c5)-11, 12): c1h.append(c5[i+11])
+        # 1H EMA20 — 15m × 4 = 1h, step-4
+        c1h = []
+        for i in range(0, len(c5)-3, 4): c1h.append(c5[i+3])
         c1h = np.array(c1h); ema1h_20 = ema_arr(c1h, 20) if len(c1h)>=20 else None
         # 4H EMA9
         e4h_9 = None

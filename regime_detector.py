@@ -1,93 +1,121 @@
-"""Live regime detector. Determines current market regime from BTC 4h data.
-Caches result for 5 minutes (regime can't shift faster than that with hysteresis)."""
+"""Live regime detector — BTC 1h primary + 30m confirm.
+
+Classifies market regime from BTC 1h candles. Requires 30m agreement before
+flipping. Hysteresis + caching prevents oscillation.
+
+Regimes:  bull-calm | bull-storm | bear-calm | bear-storm | chop
+
+Input: HL candle API (1h and 30m BTC).
+Cache: 5 min.
+"""
 import time, urllib.request, json
 import numpy as np
 
-_CACHE = {'regime': None, 'ts': 0, 'history': []}
-CACHE_SEC = 300  # 5 min
-TREND_BUFFER = 0.005  # ±0.5% from EMA9 = chop
-HYSTERESIS = 3  # bars
-VOL_MEDIAN = 0.00957  # from 90d historical (regenerate weekly)
+_CACHE = {'regime': None, 'ts': 0, 'history_1h': [], 'history_30m': []}
+CACHE_SEC = 300
+EMA_PERIOD = 20
+VOL_WINDOW = 24       # 24h of 1h returns
+TREND_BUF = 0.005     # 0.5% from EMA20 = chop band
+HYSTERESIS = 2        # 2 confirming 1h closes to flip
+VOL_SPLIT = 0.00957   # 1h return stdev split
+
 
 def _ema(vals, period):
     if len(vals) < period: return None
-    e = sum(vals[:period])/period
-    k = 2/(period+1)
+    e = sum(vals[:period]) / period
+    k = 2 / (period + 1)
     for v in vals[period:]:
-        e = v*k + e*(1-k)
+        e = v * k + e * (1 - k)
     return e
 
-def _fetch_btc_4h(n_bars=40):
-    """Fetch last n_bars of BTC 4h candles."""
-    end_ms = int(time.time()*1000)
-    start_ms = end_ms - n_bars*4*3600*1000
+
+def _fetch_btc_candles(interval, n_bars):
+    end_ms = int(time.time() * 1000)
+    ms_per_bar = {'1h': 3600_000, '30m': 1800_000}[interval]
+    start_ms = end_ms - n_bars * ms_per_bar
+    body = json.dumps({
+        'type': 'candleSnapshot',
+        'req': {'coin': 'BTC', 'interval': interval,
+                'startTime': start_ms, 'endTime': end_ms}
+    }).encode()
     req = urllib.request.Request('https://api.hyperliquid.xyz/info',
-        data=json.dumps({"type":"candleSnapshot",
-                         "req":{"coin":"BTC","interval":"4h","startTime":start_ms,"endTime":end_ms}}).encode(),
-        headers={'Content-Type':'application/json'})
+        data=body, method='POST',
+        headers={'Content-Type': 'application/json'})
     return json.loads(urllib.request.urlopen(req, timeout=10).read())
 
+
+def _classify(closes):
+    """Return (regime, dist_pct, vol_pct). None tuple if insufficient data."""
+    if len(closes) < EMA_PERIOD + VOL_WINDOW:
+        return (None, None, None)
+    ema = _ema(closes, EMA_PERIOD)
+    if ema is None: return (None, None, None)
+    dist = (closes[-1] - ema) / ema
+    rets = [(closes[i] / closes[i - 1] - 1) for i in range(len(closes) - VOL_WINDOW, len(closes))]
+    vol = float(np.std(rets))
+    if abs(dist) < TREND_BUF:
+        return ('chop', dist, vol)
+    trend = 'bull' if dist > 0 else 'bear'
+    vol_label = 'storm' if vol > VOL_SPLIT else 'calm'
+    return (f'{trend}-{vol_label}', dist, vol)
+
+
 def get_regime(force=False):
-    """Returns current regime: bull-calm/bull-storm/bear-calm/bear-storm/chop, or None on error."""
     now = time.time()
     if not force and _CACHE['regime'] and (now - _CACHE['ts']) < CACHE_SEC:
         return _CACHE['regime']
-    
     try:
-        bars = _fetch_btc_4h(40)
-        if len(bars) < 12: return _CACHE['regime']  # fallback to last known
-        closes = [float(b['c']) for b in bars]
-        ema9 = _ema(closes, 9)
-        if ema9 is None: return _CACHE['regime']
-        
-        last_px = closes[-1]
-        dist = (last_px - ema9) / ema9
-        
-        # Vol: stdev of last 30 returns (or what we have)
-        rets = [(closes[i]/closes[i-1]-1) for i in range(1, len(closes))]
-        if len(rets) < 5: return _CACHE['regime']
-        vol = float(np.std(rets[-min(30,len(rets)):]))
-        
-        # Classify
-        if abs(dist) < TREND_BUFFER:
-            raw = 'chop'
-        else:
-            trend = 'bull' if dist > 0 else 'bear'
-            vol_label = 'storm' if vol > VOL_MEDIAN else 'calm'
-            raw = f"{trend}-{vol_label}"
-        
-        # Hysteresis: don't flip unless persistent
-        history = _CACHE.get('history', [])
-        history.append(raw)
+        bars_1h = _fetch_btc_candles('1h', 60)
+        bars_30m = _fetch_btc_candles('30m', 60)
+        c_1h = [float(b['c']) for b in bars_1h]
+        c_30m = [float(b['c']) for b in bars_30m]
+
+        raw_1h, dist_1h, vol_1h = _classify(c_1h)
+        raw_30m, _, _ = _classify(c_30m)
+        if raw_1h is None:
+            return _CACHE['regime']
+
+        # 30m must confirm before a regime flip is considered
+        new_candidate = raw_1h
+        if raw_30m is not None and raw_30m != raw_1h:
+            if _CACHE['regime']:
+                new_candidate = _CACHE['regime']  # disagreement = hold prior
+
+        # 2-bar hysteresis on 1h
+        history = _CACHE.get('history_1h', [])
+        history.append(raw_1h)
         if len(history) > HYSTERESIS: history = history[-HYSTERESIS:]
-        
+
         prev = _CACHE['regime']
         if prev is None:
-            _CACHE['regime'] = raw
-        elif raw == prev:
-            pass  # confirm
-        elif len(history) >= HYSTERESIS and all(h == raw for h in history):
-            _CACHE['regime'] = raw  # flip
-        # else: keep previous regime (hysteresis active)
-        
+            _CACHE['regime'] = new_candidate
+        elif new_candidate == prev:
+            pass
+        elif len(history) >= HYSTERESIS and all(h == new_candidate for h in history):
+            _CACHE['regime'] = new_candidate
+
         _CACHE['ts'] = now
-        _CACHE['history'] = history
-        _CACHE['btc_dist'] = round(dist*100, 2)
-        _CACHE['btc_vol'] = round(vol*100, 3)
+        _CACHE['history_1h'] = history
+        _CACHE['btc_dist_1h'] = round(dist_1h * 100, 2) if dist_1h is not None else None
+        _CACHE['btc_vol_1h'] = round(vol_1h * 100, 3) if vol_1h is not None else None
+        _CACHE['raw_30m'] = raw_30m
+        _CACHE['raw_1h'] = raw_1h
         return _CACHE['regime']
-    
-    except Exception as e:
-        return _CACHE.get('regime')  # silent fallback to last known
+    except Exception:
+        return _CACHE.get('regime')
+
 
 def status():
-    """Return full regime status for /regime endpoint."""
     return {
         'current_regime': _CACHE.get('regime'),
+        'raw_1h': _CACHE.get('raw_1h'),
+        'raw_30m': _CACHE.get('raw_30m'),
+        'btc_dist_from_ema20_1h_pct': _CACHE.get('btc_dist_1h'),
+        'btc_vol_1h_pct': _CACHE.get('btc_vol_1h'),
         'last_check_age_sec': int(time.time() - _CACHE.get('ts', 0)) if _CACHE.get('ts') else None,
-        'btc_dist_from_ema9_pct': _CACHE.get('btc_dist'),
-        'btc_vol_pct': _CACHE.get('btc_vol'),
-        'recent_history': _CACHE.get('history', []),
-        'vol_median_split': VOL_MEDIAN,
-        'trend_buffer_pct': TREND_BUFFER * 100,
-        'hysteresis_bars': HYSTERESIS,
+        'recent_history_1h': _CACHE.get('history_1h', []),
+        'vol_median_split': VOL_SPLIT,
+        'trend_buffer_pct': TREND_BUF * 100,
+        'ema_period': EMA_PERIOD,
+        'hysteresis_bars_1h': HYSTERESIS,
     }

@@ -2486,18 +2486,11 @@ INITIAL_RISK_PCT = float(os.environ.get('RISK_PCT', '0.01'))  # 1% per user dire
 SCALED_RISK_PCT  = 0.005
 SCALE_DOWN_AT    = 50000
 LEV = 10
-LOOP_SEC = 15  # 2026-04-22: raised 2s → 15s.
-               # Signals are 5m-candle based — the candle closes every 300s.
-               # Checking every 2s generated ~30 ticks per candle-bar, producing
-               # 2000 fills/hour (~33/min) on the order tape and $57/hour in
-               # fees — FEES WERE LARGER THAN LOSSES.
-               # Root cause: signal-generator fixes + signal whitelist produced
-               # 120 eligible coins, an 8-worker pool processed 60 coin-evals
-               # per second, and every signal that passed gates triggered an
-               # order + SL + TP (3 exchange.order calls) causing HL to
-               # IP-throttle the whole endpoint.
-               # 15s loop = 20 ticks per 5m candle. Still 20x faster than
-               # candle cadence. Catches all signals, drops order rate ~8x.
+LOOP_SEC = 60  # 2026-04-23: raised 15s → 60s for 15m signal generation.
+               # Signals are 15m-candle based — candle closes every 900s.
+               # 60s loop = 15 ticks per 15m candle. Catches all signals at
+               # candle close without over-polling HL (rate limits) or racing
+               # the grid (signal evaluation takes ~30-50s across 120 coins).
 USE_ISOLATED_MARGIN = True
 
 TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global multiplier needed).
@@ -2758,10 +2751,10 @@ def fetch(coin, n_bars=100, retries=3):
     # Serialized inter-call delay. Multiple coins fetching in quick
     # succession cause bursts. 50ms between fetches spreads the load.
     time.sleep(0.05)
-    end=int(time.time()*1000); start=end-n_bars*5*60*1000
+    end=int(time.time()*1000); start=end-n_bars*15*60*1000
     for attempt in range(retries):
         try:
-            d=info.candles_snapshot(coin,'5m',start,end)
+            d=info.candles_snapshot(coin,'15m',start,end)
             result = [(int(c['t']),float(c['o']),float(c['h']),float(c['l']),float(c['c']),float(c['v'])) for c in d]
             _CANDLE_CACHE[coin] = {'data': result, 'ts': time.time()}
             return result
@@ -2802,27 +2795,30 @@ HL_PB_RSI_HI = 55
 HL_PB_RSI_LO = 45
 HL_PB_PROXIMITY = 0.003  # within 0.3% of 1H EMA20 derived from 5m resampled
 
-def pullback_signal(coin, candles5, last_pb_buy_ts, last_pb_sell_ts):
-    """Returns (side, bar_ts) or (None, None). Entry: 5m near 1H EMA20 + cooled RSI + 4H trend aligned."""
-    if len(candles5) < 150: return None, None
-    # Resample last 150 5m bars to 1h (groups of 12)
-    n1h = len(candles5) // 12
+def pullback_signal(coin, candles15, last_pb_buy_ts, last_pb_sell_ts):
+    """Returns (side, bar_ts) or (None, None). Entry: 15m near 1H EMA20 + cooled RSI + 4H trend aligned.
+
+    15m candles resample to 1h in groups of 4 (4 × 15m = 1h).
+    """
+    if len(candles15) < 80: return None, None
+    # Resample 15m → 1h (groups of 4)
+    n1h = len(candles15) // 4
     if n1h < HL_PB_EMA + 3: return None, None
     c1h = []
     for i in range(n1h):
-        g = candles5[i*12:(i+1)*12]
+        g = candles15[i*4:(i+1)*4]
         c1h.append(g[-1][4])
     # 1H EMA20
     k = 2/(HL_PB_EMA+1)
     ema1h = sum(c1h[:HL_PB_EMA])/HL_PB_EMA
     for cv in c1h[HL_PB_EMA:]:
         ema1h = cv*k + ema1h*(1-k)
-    last_c = candles5[-1][4]
+    last_c = candles15[-1][4]
     if ema1h<=0: return None, None
     dist = abs(last_c - ema1h) / ema1h
     if dist > HL_PB_PROXIMITY: return None, None
-    # RSI(14) on 5m
-    closes = [b[4] for b in candles5]
+    # RSI(14) on 15m
+    closes = [b[4] for b in candles15]
     gains=[]; losses=[]
     for i in range(1,len(closes)):
         d=closes[i]-closes[i-1]
@@ -2833,7 +2829,7 @@ def pullback_signal(coin, candles5, last_pb_buy_ts, last_pb_sell_ts):
         ag=(ag*(p-1)+gains[i])/p; al=(al*(p-1)+losses[i])/p
     rs = ag/al if al>0 else 999
     r_last = 100-100/(1+rs)
-    bar_ts = candles5[-1][0]
+    bar_ts = candles15[-1][0]
     # 4H trend — delegate to trend_gate (V3 already implements)
     trend_up = trend_gate(coin, 'SELL') == False  # if V3 blocks SELL, trend is up
     trend_dn = trend_gate(coin, 'BUY')  == False  # if V3 blocks BUY, trend is down
