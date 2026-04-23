@@ -138,41 +138,6 @@ Typical tuning signals:
 {_SHARED_SCHEMA}'''
 
 
-_EXIT_SYSTEM = f'''You are the Exit Specialist for a crypto perps trading system.
-You own two wired components and one deterministic metric:
-
-  sl:  pct (stop-loss %, e.g. 0.02 = 2%)
-  tp:  pct (take-profit %, e.g. 0.06 = 6%)
-  target_realization: ratio of achieved PnL to TP target (pre-computed)
-
-Your job:
-1. Was SL the right distance for this trade's volatility?
-2. Was TP realistic for the regime and holding period?
-3. Did the trade exit via SL/TP hit, trail, dust_sweep, or reversal?
-
-Key heuristic — target realization:
-  If exit_reason = SL hit: evaluate whether SL was too tight for regime volatility
-  If exit_reason = TP hit: passed (no tuning needed)
-  If exit_reason = trail_exit AND peak PnL > TP: trail worked — no tuning
-  If exit_reason = signal_reversal AND peak PnL < 50% of TP:
-    → TP may have been too ambitious. Propose tp.pct → max(1.5 × peak / 100, 0.004)
-
-CRITICAL — dust_sweep handling:
-  exit_reason = dust_sweep means the position had |PnL| <= $0.10 for >30min
-  and was closed OPERATIONALLY to free margin. This is a SIZING outcome,
-  NOT a signal/exit-level outcome. The trade never ran to completion.
-  → Do NOT propose tp.pct deltas on dust-swept trades.
-  → Do NOT propose sl.pct deltas on dust-swept trades.
-  → The correct component to flag is position_sizing (not tunable here —
-    classify as 'DEFER' and note 'operational exit, sizing investigation').
-
-DO NOT propose tp.pct changes for SL-hit trades (SL owns that).
-DO NOT propose sl.pct changes for TP-hit trades (unless volatility evidence).
-DO NOT propose tp.pct or sl.pct changes for dust_sweep or unknown exits.
-
-{_SHARED_SCHEMA}'''
-
-
 _REGIME_CONTEXT_SYSTEM = f'''You are the Regime/Context Specialist for a crypto perps trading system.
 You analyze whether the trade's direction was aligned with the market regime.
 You DO NOT tune parameters. You propose VETOS when regime mismatch caused the loss.
@@ -244,56 +209,6 @@ Additional: "proposed_veto" field may be:
 
 
 # ─────────────────────────────────────────────────────
-# Deterministic helper — used inside agent_exit
-# ─────────────────────────────────────────────────────
-def _target_realization_delta(trade):
-    """Return a proposed tp.pct delta based on realization ratio, or None.
-
-    Pure deterministic — no LLM call. This is injected into agent_exit's output
-    so one Haiku call does qualitative + the deterministic math in a single pass.
-
-    CRITICAL: dust_sweep and unknown exits are OPERATIONAL (position too small,
-    pipeline bug) — never tune TP based on these because the trade didn't run
-    to completion. Only tune TP on signal_reversal with low realization, where
-    we have genuine evidence the target was too ambitious.
-    """
-    try:
-        pnl = abs(float(trade.get('pnl_pct') or 0))
-        tp_pct = trade.get('tp_pct')
-        exit_reason = str(trade.get('exit_reason') or '').lower()
-        if tp_pct is None or tp_pct <= 0:
-            return None
-        if exit_reason in ('sl_hit', 'sl', 'native_sl'):
-            return None
-        # Micro-notional positions dust-sweep regardless of signal quality —
-        # their realization ratio is meaningless for TP calibration.
-        entry_px = float(trade.get('entry_px') or 0)
-        size = float(trade.get('size') or 0)
-        notional = abs(entry_px * size) if entry_px and size else 0.0
-        if 0 < notional < 30.0:
-            return None
-        signed_pnl = float(trade.get('pnl_pct') or 0)
-        tp_as_pct = float(tp_pct) * 100.0
-        realization = (signed_pnl / tp_as_pct) if (signed_pnl > 0 and tp_as_pct > 0) else 0.0
-        TP_EXITS = ('tp_hit', 'tp', 'native_tp', 'tp_lock_exit', 'trail_exit')
-        if realization >= 0.8 or exit_reason in TP_EXITS:
-            return None
-        # Only signal_reversal is a legitimate "target too far" signal.
-        # dust_sweep / unknown / '' indicate operational exits — skip.
-        if realization < 0.5 and exit_reason == 'signal_reversal':
-            proposed_tp = max(pnl * 1.5 / 100.0, 0.004)
-            proposed_tp = round(proposed_tp, 4)
-            return {
-                'component': 'tp', 'param': 'pct', 'new_value': proposed_tp,
-                'rationale': f'realization={realization*100:.0f}%, achieved peak {pnl:.2f}%, '
-                             f'proposed tp→{proposed_tp*100:.2f}% (1.5x achieved, post signal_reversal)'
-            }
-        return None
-    except Exception:
-        return None
-
-
-# ─────────────────────────────────────────────────────
 # 5 SPECIALIST AGENTS
 # ─────────────────────────────────────────────────────
 # Each takes (trade, context), makes ONE Haiku call, returns a verdict dict
@@ -338,30 +253,6 @@ Analyze this trade from your specialist perspective. Output the JSON verdict.'''
 def agent_entry_signal(trade, context):
     """Covers: rsi (buy/sell thresh), pivot.lookback, bollinger (all 3 params)."""
     return _run_specialist(_ENTRY_SIGNAL_SYSTEM, ['rsi', 'pivot', 'bollinger'], trade, context)
-
-
-def agent_exit(trade, context):
-    """Covers: sl.pct, tp.pct. Augments LLM output with deterministic target_realization delta."""
-    verdict = _run_specialist(_EXIT_SYSTEM, ['sl', 'tp'], trade, context)
-    # Always run the deterministic target_realization math and merge if applicable
-    tr_delta = _target_realization_delta(trade)
-    if tr_delta:
-        existing = verdict.get('proposed_delta', []) or []
-        # Check if LLM already proposed a tp.pct delta; if so, keep the LLM's value
-        # but annotate with the deterministic target realization rationale. If not,
-        # append the deterministic proposal.
-        has_tp = any(d.get('component') == 'tp' and d.get('param') == 'pct' for d in existing)
-        if not has_tp:
-            existing.append({k: v for k, v in tr_delta.items() if k != 'rationale'})
-            verdict['proposed_delta'] = existing
-            rz = verdict.get('reasoning', '') or ''
-            verdict['reasoning'] = (rz + f' [+target_realization: {tr_delta["rationale"]}]')[:500]
-            # Only bump verdict to 'failed' if LLM said passed/irrelevant
-            if verdict.get('verdict') in ('passed', 'irrelevant'):
-                verdict['verdict'] = 'failed'
-                if verdict.get('confidence', 0) < 0.7:
-                    verdict['confidence'] = 0.7
-    return verdict
 
 
 def agent_regime_context(trade, context):
@@ -435,10 +326,9 @@ Output the JSON verdict.'''
         }
 
 
-# Registry — 5 specialists.
+# Registry — 4 specialists. SL/TP tuning removed — exits are human policy.
 AGENTS = {
     'entry_signal':   agent_entry_signal,
-    'exit':           agent_exit,
     'regime_context': agent_regime_context,
     'execution':      agent_execution,
     'historical':     agent_historical,
