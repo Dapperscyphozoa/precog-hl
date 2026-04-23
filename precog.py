@@ -144,6 +144,33 @@ except Exception as _e:
     _RG_OK = False
     print(f'[reality_gap] import failed (non-fatal): {_e}', flush=True)
 
+# Shadow thresholds — silent variant evaluation, no LLM routing.
+try:
+    import shadow_thresholds as _shadow
+    _SH_OK = True
+except Exception as _e:
+    _shadow = None
+    _SH_OK = False
+    print(f'[shadow] import failed (non-fatal): {_e}', flush=True)
+
+# Top-K ensemble voter — uses stored top-K configs from regime_configs.py.
+try:
+    import ensemble_voter as _ensemble
+    _EV_OK = True
+except Exception as _e:
+    _ensemble = None
+    _EV_OK = False
+    print(f'[ensemble] import failed (non-fatal): {_e}', flush=True)
+
+# Funding rate signal — orthogonal standalone entry.
+try:
+    import funding_signal as _funding_sig
+    _FS_OK = True
+except Exception as _e:
+    _funding_sig = None
+    _FS_OK = False
+    print(f'[funding_sig] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -470,6 +497,18 @@ def record_close(pos, coin, pnl_pct, state):
                 actual_lev=pos.get('actual_lev'),
                 enterprise_oos_wr=pos.get('oos_wr') or pos.get('wr'),
                 bar_ts=pos.get('bar_ts') or pos.get('ts'),
+            )
+        except Exception:
+            pass
+
+    # Shadow thresholds — join outcome with earlier eval for WR by variant.
+    if _SH_OK and _shadow is not None:
+        try:
+            _shadow.log_outcome(
+                coin=coin,
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
             )
         except Exception:
             pass
@@ -1736,6 +1775,27 @@ def reality_gap_status():
         if not _RG_OK or _reality_gap is None:
             return jsonify({'error': 'reality_gap not loaded'}), 503
         return jsonify(_reality_gap.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/shadow', methods=['GET'])
+def shadow_status():
+    """Shadow thresholds — silent variant evaluation (no LLM routing).
+    Logs would-fire state for relaxed RSI/pivot variants per bar."""
+    try:
+        if not _SH_OK or _shadow is None:
+            return jsonify({'error': 'shadow not loaded'}), 503
+        return jsonify(_shadow.get_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/funding_sig', methods=['GET'])
+def funding_sig_status():
+    """Funding rate standalone signal — extreme funding mean-reversion trigger."""
+    try:
+        if not _FS_OK or _funding_sig is None:
+            return jsonify({'error': 'funding_sig not loaded'}), 503
+        return jsonify(_funding_sig.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4575,12 +4635,68 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             except Exception:
                 pass  # fail-open
 
+        # ENSEMBLE VOTE: top-K=3 agreement boosts or reduces size.
+        # unanimous → 1.3x | majority → 1.0x | minority → 0.5x
+        if _EV_OK and _ensemble is not None:
+            try:
+                import regime_configs as _rc
+                _cur_regime = None
+                try:
+                    import regime_detector as _rd4
+                    _cur_regime = _rd4.get_regime()
+                except Exception: pass
+                if _cur_regime:
+                    _ens_list = _rc.get_ensemble(coin, _cur_regime)
+                    if _ens_list and len(_ens_list) >= 2:
+                        _vote = _ensemble.vote(coin, candles, sig, _ens_list)
+                        _em = _vote.get('size_multiplier', 1.0)
+                        if _em != 1.0:
+                            risk_mult = risk_mult * _em
+                            log(f"{coin} ensemble: {_vote.get('decision')} "
+                                f"({_vote.get('confirming_votes')}/{_vote.get('total_votes')}) "
+                                f"size_mult={_em}")
+            except Exception:
+                pass
+
         log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} regime={cur_regime} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
         conf_score = 0
 
     log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} engine={signal_engine} risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score}")
+
+    # FUNDING SIGNAL (SILENT): evaluate, log would-fire state. Activation pending
+    # once ensemble + shadow data confirms funding signal has orthogonal edge.
+    if _FS_OK and _funding_sig is not None:
+        try:
+            _fund_side, _fund_reason = _funding_sig.check_signal(coin, candles)
+            if _fund_side:
+                log(f"{coin} [funding_sig WOULD_FIRE]: {_fund_side} ({_fund_reason})")
+        except Exception:
+            pass
+
+    # SHADOW THRESHOLDS: evaluate relaxed variants silently. No live impact.
+    if _SH_OK and _shadow is not None:
+        try:
+            _cfg = None
+            try:
+                import percoin_configs as _pcc2
+                _cfg = _pcc2.get_config(coin)
+            except Exception: pass
+            _rh = (_cfg or {}).get('RH') or 70
+            _rl = (_cfg or {}).get('RL') or 30
+            _shadow.evaluate_shadow(
+                coin=coin,
+                bars=candles,
+                production_rsi_hi=_rh,
+                production_rsi_lo=_rl,
+                production_pivot_lb=5,
+                engine=signal_engine,
+                actual_fired=True,
+                actual_side=sig,
+            )
+        except Exception:
+            pass
 
     # RED TEAM: regime staleness gate. If BTC 1h data is stale, the regime
     # classifier is running on cached/wrong data. Abort rather than trade on lies.
