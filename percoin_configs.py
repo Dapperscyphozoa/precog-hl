@@ -150,10 +150,20 @@ SEVENTY_79 = {
 #   3/2/2/2:       +185% gain, 9.6% MaxDD   ← borderline (high signal count, fee drag risk)
 # Rationale: smaller positions = more concurrent slots = capture more signals
 TIER_SIZING = {
-    'PURE':      {'leverage': 15, 'risk_pct': 0.05},
-    'NINETY_99': {'leverage': 12, 'risk_pct': 0.03},
-    'EIGHTY_89': {'leverage': 10, 'risk_pct': 0.03},
-    'SEVENTY_79': {'leverage': 10, 'risk_pct': 0.03},
+    # 2026-04-22: risk_pct reduced ~60% to prove % edge without dollar risk.
+    # Leverage unchanged — 15x/12x/10x retain the % return profile, only the
+    # capital allocated per trade drops. At $615 equity this means:
+    #   PURE      2.0% × 15x = $185 notional (was $460)
+    #   NINETY_99 1.2% × 12x = $88 notional  (was $220)
+    #   EIGHTY_89 1.2% × 10x = $74 notional  (was $185)
+    # Signals still fire on all coins, regime filter still sorts direction.
+    # Same % returns measured, but dollar loss on -2% SL drops from ~$5 to $2.
+    # Prove the bleed is stopped and regime filter correctly flips sides
+    # BEFORE restoring risk_pct to the OOS-validated 5/3/3/3.
+    'PURE':      {'leverage': 15, 'risk_pct': 0.02},
+    'NINETY_99': {'leverage': 12, 'risk_pct': 0.012},
+    'EIGHTY_89': {'leverage': 10, 'risk_pct': 0.012},
+    'SEVENTY_79': {'leverage': 10, 'risk_pct': 0.012},
 }
 # Leverage rationale (OOS validated 14d):
 #   5x  PURE: +164% gain, 11% MaxDD (safe but underleveraged)

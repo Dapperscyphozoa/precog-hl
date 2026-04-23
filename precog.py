@@ -3244,7 +3244,7 @@ def try_tier_bump(incoming_coin, state, live_positions):
         risk_pct = current_risk_pct(account_value)
         cfg = percoin_configs.get_config(incoming_coin) or {}
         # Use tier target risk matching new TIER_SIZING (5/3/3/3 — see percoin_configs.py)
-        target_risk = {'PURE': 0.05, 'NINETY_99': 0.03, 'EIGHTY_89': 0.03, 'SEVENTY_79': 0.03}.get(incoming_tier, 0.03)
+        target_risk = {'PURE': 0.02, 'NINETY_99': 0.012, 'EIGHTY_89': 0.012, 'SEVENTY_79': 0.012}.get(incoming_tier, 0.012)
         needed_margin = account_value * target_risk
     except Exception:
         needed_margin = account_value * 0.15
