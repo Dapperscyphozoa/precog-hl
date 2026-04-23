@@ -1,13 +1,14 @@
-"""PreCog per-coin configs — 15m ENTERPRISE OOS tuned 2026-04-23.
+"""PreCog per-coin configs — ENTERPRISE 15m OOS tuned 2026-04-23.
 
-57 coins passed enterprise gate (Wilson lb ≥ 0.50, fees+slip modeled).
-Regime-specific configs in regime_configs.py override these per regime.
-Base configs here provide fallback TP/SL and tier sizing.
+57 coins validated (Wilson lb>=0.50 after fees+slippage).
+Top-K=3 ensemble stored in regime_configs.py
 
-Tier names preserved for compatibility with leverage_resolver, tier_killswitch.
+PURE_14  (score>=5.0): 7 coins - 15x lev, 0.5% risk
+NINETY_99 (3.0-5.0):  20 coins - 12x lev, 0.5% risk
+EIGHTY_89 (<3.0):     30 coins - 10x lev, 0.5% risk
 """
 
-# ─── PURE_14: 9 coins ───
+# ─── PURE_14: 7 coins ───
 PURE_14 = {
     'DYM'         : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.08, 'SL':0.035},
     'POL'         : {'sigs':['BB'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.06, 'SL':0.03},
@@ -16,12 +17,12 @@ PURE_14 = {
     'LAYER'       : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.07, 'SL':0.025},
     'ETHFI'       : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
     'CC'          : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
-    'INJ'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},
-    'HBAR'        : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
 }
 
-# ─── NINETY_99: 13 coins ───
+# ─── NINETY_99: 20 coins ───
 NINETY_99 = {
+    'INJ'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},
+    'HBAR'        : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
     'MOVE'        : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.1, 'SL':0.04},
     'JTO'         : {'sigs':['TR'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.06, 'SL':0.03},
     'STX'         : {'sigs':['PV'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
@@ -35,15 +36,15 @@ NINETY_99 = {
     'SKR'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},
     'WLFI'        : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
     'AAVE'        : {'sigs':['BB'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.1, 'SL':0.04},
-}
-
-# ─── EIGHTY_89: 35 coins ───
-EIGHTY_89 = {
     'PUMP'        : {'sigs':['PV'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.05, 'SL':0.025},
     'HMSTR'       : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
     'TRB'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
     'BIGTIME'     : {'sigs':['BB'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.1, 'SL':0.04},
     'SUPER'       : {'sigs':['TR'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},
+}
+
+# ─── EIGHTY_89: 30 coins ───
+EIGHTY_89 = {
     'SOL'         : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.07, 'SL':0.025},
     'WCT'         : {'sigs':['VS'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.1, 'SL':0.04},
     'JUP'         : {'sigs':['BB'], 'flt':'none', 'RH':72, 'RL':28, 'TP':0.1, 'SL':0.04},
@@ -76,10 +77,9 @@ EIGHTY_89 = {
     'ANIME'       : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.08, 'SL':0.035},
 }
 
-# SEVENTY_79 deprecated
 SEVENTY_79 = {}
 
-# Edge-proof sizing: 0.5% uniform risk to survive any drawdown, capture every signal
+# Enterprise sizing — 0.5% risk uniform (edge-proof phase)
 TIER_SIZING = {
     'PURE':       {'leverage': 15, 'risk_pct': 0.005},
     'NINETY_99':  {'leverage': 12, 'risk_pct': 0.005},
@@ -110,13 +110,18 @@ def get_sizing(coin):
 
 
 def get_config(coin):
-    """Regime-aware per-coin config. Returns None for non-elite coins."""
+    """Per-coin config, regime-aware.
+
+    Base tier config provides default sigs/RH/RL/TP/SL.
+    regime_configs.py overrides with enterprise top-1 ensemble pick when regime known.
+    """
     base_cfg = None
     if coin in PURE_14: base_cfg = dict(PURE_14[coin])
     elif coin in NINETY_99: base_cfg = dict(NINETY_99[coin])
     elif coin in EIGHTY_89: base_cfg = dict(EIGHTY_89[coin])
     elif coin in SEVENTY_79: base_cfg = dict(SEVENTY_79[coin])
-    if base_cfg is None: return None
+    if base_cfg is None:
+        return None
 
     try:
         import regime_detector
