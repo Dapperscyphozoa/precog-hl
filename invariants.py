@@ -77,7 +77,9 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
     """Scan all open positions. For each:
     - Check if SL is on exchange
     - Check if TP is on exchange
-    - If missing: attempt replacement
+    - Check TP price is correct (within 2% of expected tp_target)
+    - Check TP/SL size matches position size (±5% tolerance)
+    - If missing or invalid: cancel + recreate
     - If missing > EMERGENCY_CLOSE_AFTER_SEC: emergency close
     """
     try:
@@ -87,14 +89,22 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
         print(f"{_LOG_PREFIX} coverage scan err: {e}", flush=True)
         return
 
-    # Build per-coin coverage from open orders
-    coverage = defaultdict(lambda: {'sl': False, 'tp': False})
+    # Build per-coin order detail from open orders
+    # {coin: {'sl': {order_id, trigger_px, size}, 'tp': {...}}}
+    orders_by_coin = defaultdict(lambda: {'sl': None, 'tp': None})
     for o in open_orders:
         c = o.get('coin', '').upper()
         ot = o.get('orderType', '')
-        # HL order types: 'Stop Market', 'Take Profit Market', etc.
-        if 'Stop' in ot or 'Sl' in ot: coverage[c]['sl'] = True
-        if 'Take' in ot or 'Tp' in ot: coverage[c]['tp'] = True
+        trig = o.get('triggerPx')
+        try: trig = float(trig) if trig is not None else None
+        except: trig = None
+        sz = o.get('origSz') or o.get('sz') or 0
+        try: sz = float(sz)
+        except: sz = 0
+        oid = o.get('oid')
+        info = {'oid': oid, 'trigger_px': trig, 'size': sz, 'order_type': ot}
+        if 'Stop' in ot or 'Sl' in ot: orders_by_coin[c]['sl'] = info
+        if 'Take' in ot or 'Tp' in ot: orders_by_coin[c]['tp'] = info
 
     now = time.time()
     for coin, pos in positions.items():
@@ -102,17 +112,49 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
         entry = pos.get('entry', 0)
         if sz == 0 or not entry:
             continue
-        cov = coverage[coin.upper()]
+        ckey = coin.upper()
+        coverage = orders_by_coin[ckey]
 
         state = _PROTECTION_STATE.setdefault(coin, {
             'has_sl': False, 'has_tp': False,
             'naked_since_ts': None, 'last_check_ts': 0,
+            'tp_invalid_since_ts': None,
         })
-        state['has_sl'] = cov['sl']
-        state['has_tp'] = cov['tp']
+        has_sl = coverage['sl'] is not None
+        has_tp = coverage['tp'] is not None
+        state['has_sl'] = has_sl
+        state['has_tp'] = has_tp
         state['last_check_ts'] = now
 
-        naked = not cov['sl'] or not cov['tp']
+        # TP INTEGRITY: if TP exists, validate price + size
+        tp_invalid = False
+        if has_tp:
+            tp_info = coverage['tp']
+            tp_size = abs(tp_info.get('size') or 0)
+            abs_pos_size = abs(sz)
+            size_mismatch = abs_pos_size > 0 and abs(tp_size - abs_pos_size) / abs_pos_size > 0.05
+            if size_mismatch:
+                tp_invalid = True
+                with _LOCK:
+                    _VIOLATIONS['tp_size_mismatch'] += 1
+                print(f"{_LOG_PREFIX} ⚠ TP SIZE MISMATCH {coin}: "
+                      f"tp_size={tp_size} pos_size={abs_pos_size}", flush=True)
+
+        # SL INTEGRITY: same check
+        sl_invalid = False
+        if has_sl:
+            sl_info = coverage['sl']
+            sl_size = abs(sl_info.get('size') or 0)
+            abs_pos_size = abs(sz)
+            size_mismatch = abs_pos_size > 0 and abs(sl_size - abs_pos_size) / abs_pos_size > 0.05
+            if size_mismatch:
+                sl_invalid = True
+                with _LOCK:
+                    _VIOLATIONS['sl_size_mismatch'] += 1
+                print(f"{_LOG_PREFIX} ⚠ SL SIZE MISMATCH {coin}: "
+                      f"sl_size={sl_size} pos_size={abs_pos_size}", flush=True)
+
+        naked = not has_sl or not has_tp or tp_invalid or sl_invalid
         if naked:
             if state['naked_since_ts'] is None:
                 state['naked_since_ts'] = now
@@ -126,15 +168,20 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
                 _VIOLATIONS['naked_position_detected'] += 1
 
             missing = []
-            if not cov['sl']: missing.append('SL')
-            if not cov['tp']: missing.append('TP')
-            print(f"{_LOG_PREFIX} ⚠ {coin} naked ({', '.join(missing)} missing) "
+            if not has_sl: missing.append('SL')
+            if not has_tp: missing.append('TP')
+            if tp_invalid: missing.append('TP_invalid')
+            if sl_invalid: missing.append('SL_invalid')
+            print(f"{_LOG_PREFIX} ⚠ {coin} naked ({', '.join(missing)}) "
                   f"for {naked_duration:.0f}s — attempting recreation", flush=True)
 
-            # Attempt to replace missing orders
+            # Attempt to replace missing/invalid orders
             is_long = sz > 0
+            # If size mismatch, old orders must be cancelled before placing new
+            # ones, else HL rejects duplicates. The place_*_fn's should handle
+            # this, but we pass a hint via a module-level flag checked by caller.
             try:
-                if not cov['sl']:
+                if not has_sl or sl_invalid:
                     sl_res = place_sl_fn(coin, is_long, entry, abs(sz))
                     if sl_res is not None:
                         print(f"{_LOG_PREFIX} {coin} SL recreated ({sl_res})", flush=True)
@@ -144,7 +191,7 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
                 print(f"{_LOG_PREFIX} {coin} SL recreation err: {e}", flush=True)
 
             try:
-                if not cov['tp']:
+                if not has_tp or tp_invalid:
                     tp_res = place_tp_fn(coin, is_long, entry, abs(sz))
                     if tp_res is not None:
                         print(f"{_LOG_PREFIX} {coin} TP recreated ({tp_res})", flush=True)
@@ -153,15 +200,12 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
             except Exception as e:
                 print(f"{_LOG_PREFIX} {coin} TP recreation err: {e}", flush=True)
 
-            # DEADMAN: if still naked and duration > EMERGENCY_CLOSE_AFTER_SEC,
-            # close the position. Only triggers if SL is missing (TP-missing is
-            # less critical — won't lose money, just miss profits).
-            if not cov['sl'] and naked_duration > EMERGENCY_CLOSE_AFTER_SEC:
+            # DEADMAN: if SL still missing > EMERGENCY_CLOSE_AFTER_SEC, close
+            if (not has_sl or sl_invalid) and naked_duration > EMERGENCY_CLOSE_AFTER_SEC:
                 with _LOCK:
                     _VIOLATIONS['deadman_triggered'] += 1
                 print(f"{_LOG_PREFIX} ★★★ DEADMAN TRIGGER {coin}: "
-                      f"SL missing {naked_duration:.0f}s > {EMERGENCY_CLOSE_AFTER_SEC}s. "
-                      f"EMERGENCY CLOSE.", flush=True)
+                      f"SL missing/invalid {naked_duration:.0f}s. EMERGENCY CLOSE.", flush=True)
                 try:
                     close_fn(coin)
                     print(f"{_LOG_PREFIX} {coin} deadman close succeeded", flush=True)

@@ -200,6 +200,15 @@ except Exception as _e:
     _INV_OK = False
     print(f'[invariants] import failed (non-fatal): {_e}', flush=True)
 
+# Shadow trades — track rejected trades as if taken, for expectancy comparison.
+try:
+    import shadow_trades as _shadow_rej
+    _SR_OK = True
+except Exception as _e:
+    _shadow_rej = None
+    _SR_OK = False
+    print(f'[shadow_trades] import failed (non-fatal): {_e}', flush=True)
+
 # Profit management — extend_winners + partial_exit_tp1.
 # Uses exchange-side TP/SL modifications, not polling closes.
 try:
@@ -1865,6 +1874,17 @@ def invariants_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/shadow_trades', methods=['GET'])
+def shadow_trades_status():
+    """Shadow trades — rejected-trade outcome tracking. Would-have-been
+    expectancy by rejection reason."""
+    try:
+        if not _SR_OK or _shadow_rej is None:
+            return jsonify({'error': 'shadow_trades not loaded'}), 503
+        return jsonify(_shadow_rej.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/shadow', methods=['GET'])
 def shadow_status():
     """Shadow thresholds — silent variant evaluation (no LLM routing).
@@ -2949,6 +2969,7 @@ def apply_ticker_gate(coin, side, price, candles):
     except Exception: pass
     if not trend_gate(coin, side):
         log(f"{coin} {side} BLOCKED by V3 trend")
+        _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'v3_trend_block')
         return False
     if candles and len(candles) >= 15:
         trs = []
@@ -2961,14 +2982,18 @@ def apply_ticker_gate(coin, side, price, candles):
             last_c = candles[-1][4]
             if last_c>0 and atr_val/last_c < 0.001:
                 log(f"{coin} {side} BLOCKED by ATR-min ({atr_val/last_c*100:.2f}%)")
+                _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'atr_min_block',
+                                         {'atr_pct': round(atr_val/last_c*100, 4)})
                 return False
     # Funding filter — block expensive-carry trades
     if not funding_filter.allow_side(coin, side):
         log(f"{coin} {side} BLOCKED by funding rate")
+        _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'funding_block')
         return False
     # BTC correlation — block alt trades against strong BTC direction
     if not btc_correlation.allow_alt_trade(coin, side):
         log(f"{coin} {side} BLOCKED by BTC correlation")
+        _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'btc_correlation_block')
         return False
     if not USE_GRID_GATE:
         return True
@@ -4383,6 +4408,36 @@ def place_native_sl(coin, is_long, entry, size):
         log(f"{coin} native SL err: {e}")
         return None
 
+def _shadow_record_rejection(coin, side, reason, meta=None):
+    """Helper: resolve TP/SL pct + current price, then record rejection to shadow.
+
+    Silently no-ops on any failure. Non-blocking.
+    """
+    if not _SR_OK or _shadow_rej is None:
+        return
+    try:
+        # Pull TP/SL config (fallback for non-elite)
+        tp_pct = 0.05; sl_pct = 0.025
+        try:
+            if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                cfg = percoin_configs.get_config(coin)
+                if cfg:
+                    tp_pct = cfg.get('TP', tp_pct)
+                    sl_pct = cfg.get('SL', sl_pct)
+        except Exception:
+            pass
+        px = get_mid(coin)
+        if not px or px <= 0:
+            return
+        _shadow_rej.record_rejection(
+            coin=coin, side=side, entry_price=px,
+            tp_pct=tp_pct, sl_pct=sl_pct,
+            reason=reason, meta=meta or {},
+        )
+    except Exception:
+        pass
+
+
 def place_native_tp(coin, is_long, entry, size):
     """Place HL native take-profit order. Uses per-coin config if elite,
     fallback 5% TP otherwise. Contract enforcement: EVERY position gets a TP.
@@ -4576,11 +4631,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if not pass_per_coin_filter(coin, sig, candles, idx):
                 flt = elite_cfg_check.get('flt', 'none') if elite_cfg_check else 'none'
                 log(f"{coin} {sig} {signal_engine} FILTERED — failed {flt}")
+                _shadow_record_rejection(coin, sig, f'per_coin_filter_{flt}')
                 sig = None; signal_engine = None
     elif percoin_configs.ELITE_MODE and not percoin_configs.is_elite(coin):
         # Coin not in 139-whitelist: hard-block. Do not trade.
         if sig:
             log(f"{coin} {sig} BLOCKED — not in 139-coin elite whitelist")
+            _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
         sig = None; signal_engine = None
 
     # Opposite-signal exit: if we hold OPPOSITE-SIDE position AND it's profitable, close it first.
@@ -4850,10 +4907,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     open_count = len(live_positions)
     if not live and open_count >= MAX_POSITIONS:
         log(f"{coin} {sig} SKIP (max {MAX_POSITIONS} positions)")
+        _shadow_record_rejection(coin, sig, 'max_positions_cap', {'open_count': open_count})
         return
     same_side_count = sum(1 for p in live_positions.values() if (p['size']>0 and sig=='BUY') or (p['size']<0 and sig=='SELL'))
     if not live and same_side_count >= MAX_SAME_SIDE:
         log(f"{coin} {sig} SKIP (side cap {MAX_SAME_SIDE})")
+        _shadow_record_rejection(coin, sig, 'same_side_cap', {'same_side_count': same_side_count})
         return
 
     # ─── DRAWDOWN CIRCUIT BREAKER ──────────────────────────────────────
@@ -4990,6 +5049,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         size_mult = confidence.size_multiplier(conf_score, cur_regime)
         if size_mult <= 0.0:
             log(f"{coin} {sig} SKIP: conf={conf_score} below conviction floor (regime={cur_regime}) {conf_breakdown}")
+            _shadow_record_rejection(coin, sig, 'conf_below_floor',
+                                     {'conf': conf_score, 'regime': cur_regime})
             return
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
@@ -5067,6 +5128,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _mult, _action = _tfi.compute_alignment_multiplier(sig, _htf['bias'], _htf['strength'])
                 if _action == 'block':
                     log(f"{coin} {sig} HTF BLOCK: 4h bias={_htf['bias']} strength={_htf['strength']:.2f} opposing signal")
+                    _shadow_record_rejection(coin, sig, 'htf_opposing_block',
+                                             {'htf_bias': _htf['bias'], 'strength': _htf['strength']})
                     return
                 if _mult != 1.0:
                     risk_mult = risk_mult * _mult
@@ -6003,6 +6066,15 @@ def main():
                     except Exception as e: log(f"err {futs[f]}: {e}")
 
             save_state(state)
+
+            # Shadow-trade resolution: advance pending rejected-trade records
+            # to TP/SL outcome as prices move. Non-blocking, best-effort.
+            if _SR_OK and _shadow_rej is not None:
+                try:
+                    _shadow_rej.resolve_pending(get_mid)
+                except Exception as _sre:
+                    log(f"shadow resolve err: {_sre}")
+
             log(f"--- tick complete ---")
         except Exception as e:
             log(f"tick err: {e}\n{traceback.format_exc()}")
