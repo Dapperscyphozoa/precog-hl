@@ -70,6 +70,17 @@ except Exception as _e:
     _SL_OK = False
     print(f'[signal_log] import failed (non-fatal): {_e}', flush=True)
 
+# Convexity scorer — silent telemetry.
+# Defers convex-sizing activation until 100+ closes analyzed.
+try:
+    import convex_scorer as _convex
+    _convex.start_trim_daemon()
+    _CX_OK = True
+except Exception as _e:
+    _convex = None
+    _CX_OK = False
+    print(f'[convex] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
 # ═══════════════════════════════════════════════════════
@@ -263,6 +274,24 @@ def record_close(pos, coin, pnl_pct, state):
                 coin=coin,
                 pnl_pct=pnl_pct,
                 win=pnl_pct > 0,
+            )
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────
+    # CONVEXITY OUTCOME LOG — updates tail-win stats per (coin, engine)
+    # and pairs outcome with signal-time convexity score for later analysis.
+    # ─────────────────────────────────────────────────────
+    if _CX_OK and _convex is not None:
+        try:
+            _convex.log_outcome(
+                coin=coin,
+                engine=pos.get('engine'),
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
+                max_favorable_excursion_pct=pos.get('mfe_pct'),
+                tp_hit_pct=pos.get('tp_pct'),
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
             )
         except Exception:
             pass
@@ -1423,6 +1452,17 @@ def signal_log_status():
         if not _SL_OK or _signal_logger is None:
             return jsonify({'error': 'signal_logger not loaded'}), 503
         return jsonify(_signal_logger.get_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/convex', methods=['GET'])
+def convex_status():
+    """Convexity scorer — payoff asymmetry telemetry.
+    At 100+ outcomes, flags trigger for sizing activation decision."""
+    try:
+        if not _CX_OK or _convex is None:
+            return jsonify({'error': 'convex_scorer not loaded'}), 503
+        return jsonify(_convex.get_stats())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4247,6 +4287,31 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 bar_ts=int(time.time()),
                 side_if_fired=sig,
                 conf_score=conf_score,
+            )
+        except Exception:
+            pass  # never block signal path
+
+    # Convexity telemetry — silent. Records payoff asymmetry score at signal fire.
+    # NO live sizing impact until explicitly activated post-100-close analysis.
+    if _CX_OK and _convex is not None:
+        try:
+            _cfg = None
+            try:
+                import percoin_configs as _pcc
+                _cfg = _pcc.get_config(coin)
+            except Exception: pass
+            _tp = (_cfg or {}).get('TP') or 0.05
+            _sl = (_cfg or {}).get('SL') or 0.025
+            _wlb = (_cfg or {}).get('wilson_lb')
+            _convex.log_signal_score(
+                coin=coin,
+                side=sig,
+                engine=signal_engine,
+                tp_pct=_tp,
+                sl_pct=_sl,
+                wilson_lb=_wlb,
+                bar_ts=int(time.time()),
+                actual_size=risk_pct,
             )
         except Exception:
             pass  # never block signal path
