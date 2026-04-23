@@ -134,6 +134,16 @@ except Exception as _e:
     _PD_OK = False
     print(f'[path_dep] import failed (non-fatal): {_e}', flush=True)
 
+# Reality gap — audit of backtest-to-live drift.
+# Exposes correction factors for other modules to consult.
+try:
+    import reality_gap as _reality_gap
+    _RG_OK = True
+except Exception as _e:
+    _reality_gap = None
+    _RG_OK = False
+    print(f'[reality_gap] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -434,6 +444,31 @@ def record_close(pos, coin, pnl_pct, state):
                 pnl_pct=pnl_pct,
                 win=pnl_pct > 0,
                 regime=_cur_reg,
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
+            )
+        except Exception:
+            pass
+
+    # Reality gap — backtest vs live audit.
+    if _RG_OK and _reality_gap is not None:
+        try:
+            _cur_reg = None
+            try:
+                import regime_detector as _rd3
+                _cur_reg = _rd3.get_regime()
+            except Exception: pass
+            _reality_gap.record_close(
+                coin=coin,
+                engine=pos.get('engine'),
+                regime_at_entry=pos.get('regime'),
+                regime_at_exit=_cur_reg,
+                signal_close_price=pos.get('signal_close_price'),
+                actual_fill_price=pos.get('entry'),
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
+                configured_lev=pos.get('configured_lev') or pos.get('lev'),
+                actual_lev=pos.get('actual_lev'),
+                enterprise_oos_wr=pos.get('oos_wr') or pos.get('wr'),
                 bar_ts=pos.get('bar_ts') or pos.get('ts'),
             )
         except Exception:
@@ -1690,6 +1725,17 @@ def calibration_status():
         if not _SL_OK or _signal_logger is None:
             return jsonify({'error': 'signal_logger not loaded'}), 503
         return jsonify(_signal_logger.calibration_report())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/reality_gap', methods=['GET'])
+def reality_gap_status():
+    """Reality gap — backtest-to-live drift audit.
+    Correction factors for slippage, regime transitions, overfit tax, leverage."""
+    try:
+        if not _RG_OK or _reality_gap is None:
+            return jsonify({'error': 'reality_gap not loaded'}), 503
+        return jsonify(_reality_gap.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
