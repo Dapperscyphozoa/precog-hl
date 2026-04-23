@@ -103,6 +103,17 @@ except Exception as _e:
     _RT_OK = False
     print(f'[red_team] import failed (non-fatal): {_e}', flush=True)
 
+# Reflexivity detector — silent telemetry.
+# Crowding + move position + reaction-to-reaction scoring at signal fire.
+try:
+    import reflexivity as _reflex
+    _reflex.start_trim_daemon()
+    _RX_OK = True
+except Exception as _e:
+    _reflex = None
+    _RX_OK = False
+    print(f'[reflex] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
 # ═══════════════════════════════════════════════════════
@@ -336,6 +347,20 @@ def record_close(pos, coin, pnl_pct, state):
                 actual_size_pct=pos.get('risk_pct', 0.005),
                 engine=pos.get('engine'),
                 regime=pos.get('regime'),
+            )
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────
+    # REFLEXIVITY OUTCOME LOG — pairs with log_signal_score on close.
+    # ─────────────────────────────────────────────────────
+    if _RX_OK and _reflex is not None:
+        try:
+            _reflex.log_outcome(
+                coin=coin,
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
             )
         except Exception:
             pass
@@ -1530,6 +1555,18 @@ def red_team_status():
         if not _RT_OK or _red_team is None:
             return jsonify({'error': 'red_team not loaded'}), 503
         return jsonify(_red_team.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/reflexivity', methods=['GET'])
+def reflexivity_status():
+    """Reflexivity detector — crowding + move position + echo scoring.
+    LEAD/FOLLOW/SKEPTICAL/AVOID recommendation logged silently.
+    At 75+ outcomes, flags trigger for LEAD vs AVOID bucket analysis."""
+    try:
+        if not _RX_OK or _reflex is None:
+            return jsonify({'error': 'reflexivity not loaded'}), 503
+        return jsonify(_reflex.get_stats())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4408,6 +4445,23 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             )
         except Exception:
             pass  # never block signal path
+
+    # Reflexivity telemetry — crowding + move position + echo-of-echo scoring.
+    # No filtering applied until 75-close activation decision.
+    if _RX_OK and _reflex is not None:
+        try:
+            _px = None
+            try: _px = float(price) if 'price' in dir() else None
+            except Exception: pass
+            _reflex.log_signal_score(
+                coin=coin,
+                side=sig,
+                current_price=_px,
+                engine=signal_engine,
+                bar_ts=int(time.time()),
+            )
+        except Exception:
+            pass
 
     # REGIME-SIDE BLOCKER (global, pre-gate): fails CLOSED for data-confirmed
     # regime-mismatched trades. Cannot be overridden by KB/LLM gate.
