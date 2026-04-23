@@ -103,6 +103,17 @@ except Exception as _e:
     _RT_OK = False
     print(f'[red_team] import failed (non-fatal): {_e}', flush=True)
 
+# Optimal inaction — silent abstain scorer.
+# Trigger at 100 outcomes; no live gating until activated.
+try:
+    import optimal_inaction as _inaction
+    _inaction.start_trim_daemon()
+    _IA_OK = True
+except Exception as _e:
+    _inaction = None
+    _IA_OK = False
+    print(f'[abstain] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -347,6 +358,20 @@ def record_close(pos, coin, pnl_pct, state):
                 actual_size_pct=pos.get('risk_pct', 0.005),
                 engine=pos.get('engine'),
                 regime=pos.get('regime'),
+            )
+        except Exception:
+            pass
+
+    # Optimal inaction outcome log — pairs with signal abstain score.
+    if _IA_OK and _inaction is not None:
+        try:
+            _inaction.log_outcome(
+                coin=coin,
+                engine=pos.get('engine'),
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
+                exit_reason=pos.get('exit_reason'),
             )
         except Exception:
             pass
@@ -1555,6 +1580,18 @@ def red_team_status():
         if not _RT_OK or _red_team is None:
             return jsonify({'error': 'red_team not loaded'}), 503
         return jsonify(_red_team.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/abstain', methods=['GET'])
+def abstain_status():
+    """Optimal inaction — silent abstain scorer.
+    Records no-trade-zone risk at signal fire. At 100 closes, evaluates
+    whether abstain-bucket WR justifies live activation."""
+    try:
+        if not _IA_OK or _inaction is None:
+            return jsonify({'error': 'optimal_inaction not loaded'}), 503
+        return jsonify(_inaction.get_stats())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4445,6 +4482,25 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             )
         except Exception:
             pass  # never block signal path
+
+    # Optimal inaction telemetry — silent. Logs abstain score per signal.
+    # NO gating; evaluates post-hoc at 100 closes.
+    if _IA_OK and _inaction is not None:
+        try:
+            _cur_regime = None
+            try:
+                import regime_detector as _rd
+                _cur_regime = _rd.get_regime()
+            except Exception: pass
+            _inaction.log_signal_abstain(
+                coin=coin,
+                side=sig,
+                engine=signal_engine,
+                regime=_cur_regime,
+                bar_ts=int(time.time()),
+            )
+        except Exception:
+            pass
 
     # Reflexivity telemetry — crowding + move position + echo-of-echo scoring.
     # No filtering applied until 75-close activation decision.
