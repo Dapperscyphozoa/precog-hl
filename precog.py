@@ -124,6 +124,16 @@ except Exception as _e:
     _ED_OK = False
     print(f'[edge_decay] import failed (non-fatal): {_e}', flush=True)
 
+# Path dependency — LIVE streak detection with adaptive sizing.
+# Modifies live size_mult based on consecutive losses/wins.
+try:
+    import path_dependency as _path_dep
+    _PD_OK = True
+except Exception as _e:
+    _path_dep = None
+    _PD_OK = False
+    print(f'[path_dep] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -408,6 +418,23 @@ def record_close(pos, coin, pnl_pct, state):
                 exit_reason=pos.get('exit_reason'),
                 regime_at_entry=pos.get('regime'),
                 config_source=pos.get('_regime_source') or pos.get('config_source'),
+            )
+        except Exception:
+            pass
+
+    # Path dependency — live streak tracker. Modifies size_mult at next signal.
+    if _PD_OK and _path_dep is not None:
+        try:
+            _cur_reg = None
+            try:
+                import regime_detector as _rd2
+                _cur_reg = _rd2.get_regime()
+            except Exception: pass
+            _path_dep.record_close(
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
+                regime=_cur_reg,
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
             )
         except Exception:
             pass
@@ -1640,6 +1667,18 @@ def edge_decay_status():
         if not _ED_OK or _edge_decay is None:
             return jsonify({'error': 'edge_decay not loaded'}), 503
         return jsonify(_edge_decay.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/path_dep', methods=['GET'])
+def path_dep_status():
+    """Path dependency — live streak tracking + adaptive sizing.
+    Emits size multiplier on consecutive losses. Entry pause at 7+ losses.
+    This module DOES modify live trading behavior."""
+    try:
+        if not _PD_OK or _path_dep is None:
+            return jsonify({'error': 'path_dep not loaded'}), 503
+        return jsonify(_path_dep.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4462,6 +4501,23 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
         risk_mult = risk_mult * size_mult * adapt
+
+        # PATH DEPENDENCY: live streak-based sizing.
+        # Consec-losses → reduce size. 7+ losses → pause entries.
+        if _PD_OK and _path_dep is not None:
+            try:
+                _pd_mult, _pd_flags = _path_dep.get_size_multiplier()
+                if _pd_flags.get('paused'):
+                    log(f"{coin} {sig} SKIP: path_dep entry pause "
+                        f"({_pd_flags.get('pause_remaining_sec')}s remaining)")
+                    return
+                if _pd_mult != 1.0:
+                    risk_mult = risk_mult * _pd_mult
+                    log(f"{coin} path_dep: size_mult={_pd_mult} "
+                        f"consec_losses={_pd_flags.get('consec_losses')}")
+            except Exception:
+                pass  # fail-open
+
         log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} regime={cur_regime} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
