@@ -1,19 +1,39 @@
-# Add this as a NEW background worker service in your existing Render dashboard
-# Repo: cyber-psycho, Branch: precog-hl
-services:
-  - type: worker
-    name: precog-engine
-    runtime: python
-    plan: standard
-    branch: precog-hl
-    buildCommand: pip install -r requirements.txt
-    startCommand: python3 precog.py
-    disk:
-      name: precog-state
-      mountPath: /var/data
-      sizeGB: 1
-    envVars:
-      - key: HYPERLIQUID_ACCOUNT
-        sync: false
-      - key: HL_PRIVATE_KEY
-        sync: false
+name: cyber-psycho
+type: web
+runtime: node
+
+buildCommand: npm install
+startCommand: node index.js & node profit-engine.js & wait
+
+envVars:
+  - key: ANTHROPIC_API_KEY
+    sync: false
+  - key: PUSHOVER_TOKEN
+    sync: false
+  - key: PUSHOVER_USER
+    sync: false
+  - key: WEBHOOK_SECRET
+    sync: false
+  - key: HL_WALLET
+    sync: false
+  - key: HL_PRIVATE_KEY
+    sync: false
+  - key: LIVE_TRADING
+    value: 'true'
+  - key: NODE_ENV
+    value: production
+  - key: PRECOG_HL_WALLET
+    value: 0x280156e6926DA57068aE65D89A921fdB011D4086
+  - key: PRECOG_HL_KEY
+    sync: false
+  - key: PRECOG_SECRET
+    value: precog_sol_2026
+  - key: PRECOG_LEVERAGE
+    value: "3"
+  - key: PRECOG_PORT
+    value: "3001"
+
+plan: standard
+region: oregon
+
+healthCheckPath: /health
