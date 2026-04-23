@@ -81,6 +81,17 @@ except Exception as _e:
     _CX_OK = False
     print(f'[convex] import failed (non-fatal): {_e}', flush=True)
 
+# Counterfactual engine — replay alternatives per trade.
+# Telemetry only; no auto-activation. Trigger at 50+ outcomes.
+try:
+    import counterfactual as _counterfactual
+    _counterfactual.start_trim_daemon()
+    _CF_OK = True
+except Exception as _e:
+    _counterfactual = None
+    _CF_OK = False
+    print(f'[counterfactual] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
 # ═══════════════════════════════════════════════════════
@@ -292,6 +303,28 @@ def record_close(pos, coin, pnl_pct, state):
                 max_favorable_excursion_pct=pos.get('mfe_pct'),
                 tp_hit_pct=pos.get('tp_pct'),
                 bar_ts=pos.get('bar_ts') or pos.get('ts'),
+            )
+        except Exception:
+            pass
+
+    # ─────────────────────────────────────────────────────
+    # COUNTERFACTUAL ANALYSIS — replay alternatives on closed trade bars.
+    # Delayed/skipped/resized/signal-removed simulations.
+    # Non-blocking; writes regret metrics to /app/counterfactual.jsonl.
+    # ─────────────────────────────────────────────────────
+    if _CF_OK and _counterfactual is not None:
+        try:
+            _counterfactual.analyze_close(
+                coin=coin,
+                side=pos.get('side', '?'),
+                entry_price=float(pos.get('entry', 0) or 0),
+                tp_pct=float(pos.get('tp_pct') or pos.get('tp', 0.05)),
+                sl_pct=float(pos.get('sl_pct') or pos.get('sl', 0.025)),
+                entry_ts=pos.get('ts', time.time()),
+                pnl_pct=pnl_pct,
+                actual_size_pct=pos.get('risk_pct', 0.005),
+                engine=pos.get('engine'),
+                regime=pos.get('regime'),
             )
         except Exception:
             pass
@@ -1463,6 +1496,18 @@ def convex_status():
         if not _CX_OK or _convex is None:
             return jsonify({'error': 'convex_scorer not loaded'}), 503
         return jsonify(_convex.get_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/counterfactual', methods=['GET'])
+def counterfactual_status():
+    """Counterfactual engine — per-trade alternative replay.
+    Computes regret for delayed/skipped/resized/signal-removed paths.
+    At 50+ analyses, flags trigger for decision evaluation."""
+    try:
+        if not _CF_OK or _counterfactual is None:
+            return jsonify({'error': 'counterfactual not loaded'}), 503
+        return jsonify(_counterfactual.get_stats())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
