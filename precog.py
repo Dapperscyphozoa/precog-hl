@@ -182,6 +182,15 @@ except Exception as _e:
     _EC_OK = False
     print(f'[contract] CRITICAL: contract import failed: {_e}', flush=True)
 
+# TF isolation — each TF trades independently; HTF bias gates/sizes LTF.
+try:
+    import tf_isolation as _tf_iso
+    _TFI_OK = True
+except Exception as _e:
+    _tf_iso = None
+    _TFI_OK = False
+    print(f'[tf_isolation] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -1797,6 +1806,16 @@ def contract_status():
         if not _EC_OK or _contract is None:
             return jsonify({'error': 'exec_contract not loaded'}), 503
         return jsonify(_contract.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/tf_isolation', methods=['GET'])
+def tf_isolation_status():
+    """Timeframe isolation contract — per-TF independence + HTF gating rules."""
+    try:
+        if not _TFI_OK or _tf_iso is None:
+            return jsonify({'error': 'tf_isolation not loaded'}), 503
+        return jsonify(_tf_iso.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4180,24 +4199,34 @@ def place_native_tp(coin, is_long, entry, size):
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
 
-    # CONTRACT: queue drain — if a reversal was queued earlier (while a
-    # position was open) and the position has since closed via TP/SL,
-    # fire the reversal as a fresh entry now.
+    # TF ISOLATION: 15m engine owns only 15m-tagged positions. If a position
+    # exists and it's NOT 15m, do NOT interfere. 1h/4h engines manage those.
+    # HTF positions' TP/SL already on exchange — they'll resolve on their own.
+    _pos_state = state.get('positions', {}).get(coin, {})
+    if _pos_state:
+        _existing_tf = _pos_state.get('tf')
+        if _existing_tf and _existing_tf != '15m':
+            # HTF position exists. 15m engine stays out of this coin entirely.
+            return
+
+    # CONTRACT: queue drain (15m engine). Only reads queue entries for 15m
+    # positions. 1h/4h positions have their own independent engines/queues.
     if _EC_OK and _contract is not None:
-        q = _contract.get_queued_reversal(coin)
+        q = _contract.get_queued_reversal(coin, position_tf='15m')
         if q:
-            # Position still open? Queue stays pending.
             if coin in live_positions:
-                pass  # wait for TP/SL to resolve
+                # Position still open. Confirm it's a 15m position — otherwise
+                # queue stays; this 15m pass should not close an HTF trade.
+                _existing_tf = state.get('positions', {}).get(coin, {}).get('tf')
+                if _existing_tf and _existing_tf != '15m':
+                    # Not our concern — don't drain. HTF engine handles its own.
+                    pass
+                # else: wait for our 15m TP/SL to resolve it
             else:
-                # Position resolved. Drain the queue by forcing this side
-                # into the signal stream.
                 queued_side = q.get('desired_side')
-                _contract.clear_reversal_queue(coin)
-                log(f"{coin} QUEUE DRAIN: firing queued {queued_side} "
+                _contract.clear_reversal_queue(coin, position_tf='15m')
+                log(f"{coin} 15m QUEUE DRAIN: firing queued {queued_side} "
                     f"(advisory {q.get('advisory_reason')})")
-                # Continue signal evaluation below; override sig if none found
-                # We'll recompute from candles and only adopt queued if no fresh signal.
 
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell', 0)
@@ -4207,15 +4236,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 
     # CONTRACT: if no fresh signal but queue had a desire, adopt it
     if not sig and _EC_OK and _contract is not None:
-        _q_just_drained = None  # set above if drained this tick
-        # Re-check queue (a previous drain cleared it; read one more time)
-        q2 = _contract.get_queued_reversal(coin)
+        q2 = _contract.get_queued_reversal(coin, position_tf='15m')
         if q2 and coin not in live_positions:
             sig = q2.get('desired_side')
-            signal_engine = 'QUEUED_REVERSAL'
+            signal_engine = 'QUEUED_REVERSAL_15m'
             bar_ts = int(time.time() * 1000)
-            _contract.clear_reversal_queue(coin)
-            log(f"{coin} adopting queued signal: {sig}")
+            _contract.clear_reversal_queue(coin, position_tf='15m')
+            log(f"{coin} adopting queued 15m signal: {sig}")
 
     # RED TEAM: extend cooldown in chop regime (2x) to prevent Zone C signal
     # clustering. Applies after all engine-level CD checks.
@@ -4723,6 +4750,46 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             except Exception:
                 pass
 
+        # TF ISOLATION: HTF alignment sizing. 4h bias modifies 15m entry size.
+        # Aligned → boost 1.5x. Neutral → 1.0x. Opposing → 0.5x or block.
+        # Does NOT force exits; advisory for entry sizing only.
+        try:
+            import tf_isolation as _tfi
+            import urllib.request as _ureq
+            # Pull 4h candles from HL on demand (cached in module below)
+            _c_4h = None
+            try:
+                _cache_key = f'htf_4h_{coin}'
+                _cached = _CANDLE_CACHE.get(_cache_key)
+                if _cached and time.time() - _cached['ts'] < 600:  # 10min cache
+                    _c_4h = _cached['data']
+                else:
+                    _body = json.dumps({'type':'candleSnapshot',
+                        'req':{'coin':coin,'interval':'4h',
+                               'startTime': int(time.time()*1000) - 30*4*3600*1000,
+                               'endTime': int(time.time()*1000)}}).encode()
+                    _req = _ureq.Request('https://api.hyperliquid.xyz/info',
+                        method='POST', data=_body,
+                        headers={'Content-Type':'application/json'})
+                    with _ureq.urlopen(_req, timeout=4) as _resp:
+                        _c_4h = json.loads(_resp.read())
+                    _CANDLE_CACHE[_cache_key] = {'data': _c_4h, 'ts': time.time()}
+            except Exception:
+                pass
+            if _c_4h and len(_c_4h) >= 30:
+                # Convert HL candle dict to list format expected by derive_htf_bias
+                _bars_list = [[b['t'], b['o'], b['h'], b['l'], b['c'], b['v']] for b in _c_4h]
+                _htf = _tfi.derive_htf_bias(_bars_list)
+                _mult, _action = _tfi.compute_alignment_multiplier(sig, _htf['bias'], _htf['strength'])
+                if _action == 'block':
+                    log(f"{coin} {sig} HTF BLOCK: 4h bias={_htf['bias']} strength={_htf['strength']:.2f} opposing signal")
+                    return
+                if _mult != 1.0:
+                    risk_mult = risk_mult * _mult
+                    log(f"{coin} HTF {_action}: 4h bias={_htf['bias']} strength={_htf['strength']:.2f} mult={_mult:.2f}")
+        except Exception as _tfe:
+            pass  # non-fatal: fall back to neutral sizing
+
         log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} regime={cur_regime} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
@@ -5029,8 +5096,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             # close the existing position. TP/SL on exchange will resolve it.
             # After TP/SL fills, next cycle picks up the queue and opens new side.
             if _EC_OK and _contract is not None:
-                _contract.queue_reversal(coin, 'SELL', 'signal_reversal')
-                log(f"{coin} SELL reversal QUEUED (contract): {reason}")
+                _pos_tf = prev_pos.get('tf', '15m')
+                _ok = _contract.queue_reversal(coin, 'SELL', 'signal_reversal',
+                                               position_tf=_pos_tf, incoming_tf='15m')
+                if _ok:
+                    log(f"{coin} SELL reversal QUEUED (contract, pos_tf={_pos_tf}): {reason}")
+                else:
+                    log(f"{coin} SELL reversal BLOCKED by TF isolation (pos_tf={_pos_tf}): {reason}")
                 return
             # If contract module unavailable, fall back to old behavior
             prev_pos['exit_reason'] = 'signal_reversal'
@@ -5081,7 +5153,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'sl_pct': _sl_pct_used,
                                                 'tp_pct': _tp_pct_used,
                                                 'sigs': _sigs_for_pm,
-                                                'size': sz}
+                                                'size': sz,
+                                                'tf': '15m'}
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
@@ -5093,8 +5166,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 return
             # CONTRACT: queue reversal; do NOT close existing position
             if _EC_OK and _contract is not None:
-                _contract.queue_reversal(coin, 'BUY', 'signal_reversal')
-                log(f"{coin} BUY reversal QUEUED (contract): {reason}")
+                _pos_tf = prev_pos.get('tf', '15m')
+                _ok = _contract.queue_reversal(coin, 'BUY', 'signal_reversal',
+                                               position_tf=_pos_tf, incoming_tf='15m')
+                if _ok:
+                    log(f"{coin} BUY reversal QUEUED (contract, pos_tf={_pos_tf}): {reason}")
+                else:
+                    log(f"{coin} BUY reversal BLOCKED by TF isolation (pos_tf={_pos_tf}): {reason}")
                 return
             prev_pos['exit_reason'] = 'signal_reversal'
             log(f"{coin} BUY reversal ALLOWED (no contract): {reason}")
@@ -5138,7 +5216,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'sl_pct': _sl_pct_used,
                                                 'tp_pct': _tp_pct_used,
                                                 'sigs': _sigs_for_pm,
-                                                'size': sz}
+                                                'size': sz,
+                                                'tf': '15m'}
 
 # ═══════════════════════════════════════════════════════
 

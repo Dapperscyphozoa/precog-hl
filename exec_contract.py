@@ -104,11 +104,23 @@ def contract_close(close_fn, coin, reason, **context):
                   avoid circular imports)
         coin: coin to close
         reason: one of AUTHORIZED_REASONS
-        **context: logging context (position info, engine, etc.)
+        **context: logging context. Must include position_tf and incoming_tf
+                   if caller wants cross-TF enforcement.
 
     Returns:
         pnl_pct on success, None on authorization failure
     """
+    # Cross-TF gate
+    position_tf = context.get('position_tf')
+    incoming_tf = context.get('incoming_tf')
+    if position_tf and incoming_tf and position_tf != incoming_tf:
+        try:
+            import tf_isolation
+            if not tf_isolation.can_close_cross_tf(position_tf, incoming_tf, reason):
+                return None
+        except Exception:
+            pass
+
     if not can_close(reason):
         with _REJECTED_LOCK:
             _REJECTED_CLOSES.append({
@@ -136,43 +148,74 @@ def contract_close(close_fn, coin, reason, **context):
         raise
 
 
-def queue_reversal(coin, desired_side, advisory_reason):
+def queue_reversal(coin, desired_side, advisory_reason, position_tf=None, incoming_tf=None):
     """Record intent to reverse without actually closing.
 
-    The reversal will execute AFTER the current position resolves via TP/SL
-    (PRIORITY 1) or kill switch (PRIORITY 2). Checked at next signal cycle.
+    With TF isolation: a reversal queued from incoming_tf can only flip a
+    position opened at the same TF. Cross-TF reversals are REJECTED.
 
     Args:
         coin: coin with open position
         desired_side: 'BUY' or 'SELL' (the new direction)
         advisory_reason: one of ADVISORY_REASONS (for logging)
+        position_tf: '15m' | '1h' | '4h' — TF of position being reversed
+        incoming_tf: '15m' | '1h' | '4h' — TF of signal requesting reversal
     """
     if advisory_reason not in ADVISORY_REASONS:
         print(f"[contract] queue_reversal unknown reason: {advisory_reason}",
               flush=True)
         advisory_reason = 'unknown_advisory'
 
+    # Cross-TF gate
+    if position_tf and incoming_tf and position_tf != incoming_tf:
+        try:
+            import tf_isolation
+            if not tf_isolation.can_queue_reversal_cross_tf(position_tf, incoming_tf):
+                return False
+        except Exception:
+            pass
+
     with _QUEUE_LOCK:
-        _REVERSAL_QUEUE[coin] = {
+        # Keyed by (coin, position_tf) when TF known, else coin
+        key = (coin, position_tf) if position_tf else coin
+        _REVERSAL_QUEUE[key] = {
             'desired_side': desired_side,
             'queued_at': int(time.time()),
             'advisory_reason': advisory_reason,
+            'position_tf': position_tf,
+            'incoming_tf': incoming_tf,
         }
     print(f"[contract] QUEUED reversal {coin} → {desired_side} "
-          f"(advisory: {advisory_reason}). Will fire after TP/SL resolves.",
+          f"(advisory: {advisory_reason}, tf: {position_tf or 'unknown'}). "
+          f"Will fire after TP/SL resolves.",
           flush=True)
+    return True
 
 
-def get_queued_reversal(coin):
-    """Retrieve queued reversal intent for coin, if any."""
+def get_queued_reversal(coin, position_tf=None):
+    """Retrieve queued reversal intent for coin (and optional TF), if any."""
     with _QUEUE_LOCK:
-        return _REVERSAL_QUEUE.get(coin)
+        if position_tf:
+            return _REVERSAL_QUEUE.get((coin, position_tf)) or _REVERSAL_QUEUE.get(coin)
+        # Fall back: return any queue matching this coin
+        for k, v in _REVERSAL_QUEUE.items():
+            if (isinstance(k, tuple) and k[0] == coin) or k == coin:
+                return v
+        return None
 
 
-def clear_reversal_queue(coin):
+def clear_reversal_queue(coin, position_tf=None):
     """Called after a position closes via TP/SL. Permits reversal to fire."""
     with _QUEUE_LOCK:
-        return _REVERSAL_QUEUE.pop(coin, None)
+        if position_tf:
+            return _REVERSAL_QUEUE.pop((coin, position_tf), None)
+        # Remove any matching coin entry
+        to_remove = [k for k in _REVERSAL_QUEUE
+                     if (isinstance(k, tuple) and k[0] == coin) or k == coin]
+        removed = None
+        for k in to_remove:
+            removed = _REVERSAL_QUEUE.pop(k, None)
+        return removed
 
 
 def ensure_tp_sl_placed(coin, tp_pct_used, sl_pct_used, close_fn):
