@@ -59,6 +59,17 @@ except Exception as _e:
     _MS_OK = False
     print(f'[microstructure] import failed (non-fatal): {_e}', flush=True)
 
+# Signal state logger — parallel telemetry for future mutual information analysis.
+# Defers signal redundancy optimization until 1000+ states + 500+ closes.
+try:
+    import signal_logger as _signal_logger
+    _signal_logger.start_trim_daemon()
+    _SL_OK = True
+except Exception as _e:
+    _signal_logger = None
+    _SL_OK = False
+    print(f'[signal_log] import failed (non-fatal): {_e}', flush=True)
+
 # ═══════════════════════════════════════════════════════
 # REGIME-SIDE BLOCKER — global filter against regime-mismatched trades
 # ═══════════════════════════════════════════════════════
@@ -240,6 +251,21 @@ def record_close(pos, coin, pnl_pct, state):
             )
         except Exception:
             pass  # never block close path
+
+    # ─────────────────────────────────────────────────────
+    # SIGNAL STATE OUTCOME LOG — pairs with signal_logger.log_state
+    # to enable mutual information analysis post-hoc.
+    # ─────────────────────────────────────────────────────
+    if _SL_OK and _signal_logger is not None:
+        try:
+            _signal_logger.log_outcome(
+                bar_ts=pos.get('bar_ts') or pos.get('ts'),
+                coin=coin,
+                pnl_pct=pnl_pct,
+                win=pnl_pct > 0,
+            )
+        except Exception:
+            pass
 
 def wr_to_mult(wr, n, min_n=5):
     """Adaptive size multiplier based on rolling WR. Never returns 0 (never blocks).
@@ -1386,6 +1412,17 @@ def microstructure_status():
         if not _MS_OK or _microstructure is None:
             return jsonify({'error': 'microstructure module not loaded'}), 503
         return jsonify(_microstructure.get_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/signal_log', methods=['GET'])
+def signal_log_status():
+    """Signal state logger — parallel telemetry for mutual information analysis.
+    At 1000+ states + 500+ outcomes, flags MI discussion trigger."""
+    try:
+        if not _SL_OK or _signal_logger is None:
+            return jsonify({'error': 'signal_logger not loaded'}), 503
+        return jsonify(_signal_logger.get_stats())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4186,6 +4223,33 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         conf_score = 0
 
     log_signal(coin, "SIGNAL", sig); log(f"{coin} SIGNAL: {sig} engine={signal_engine} risk={int(risk_pct*100)}% mult={risk_mult:.2f} conf={conf_score}")
+
+    # Parallel telemetry for future mutual information analysis.
+    # Records which engine fired + confluence state; non-blocking.
+    if _SL_OK and _signal_logger is not None:
+        try:
+            _cur_regime = None
+            try:
+                import regime_detector as _rd
+                _cur_regime = _rd.get_regime()
+            except Exception: pass
+            _signal_logger.log_state(
+                coin=coin,
+                regime=_cur_regime,
+                engines_fired={signal_engine: True},  # only the firing engine known here
+                confluence_state={
+                    'conf_score': conf_score,
+                    'risk_pct': risk_pct,
+                    'risk_mult': risk_mult,
+                },
+                actual_fired=True,
+                price=float(price) if 'price' in dir() else None,
+                bar_ts=int(time.time()),
+                side_if_fired=sig,
+                conf_score=conf_score,
+            )
+        except Exception:
+            pass  # never block signal path
 
     # REGIME-SIDE BLOCKER (global, pre-gate): fails CLOSED for data-confirmed
     # regime-mismatched trades. Cannot be overridden by KB/LLM gate.
