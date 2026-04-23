@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PRECOG v2 — HL Execution Engine</title>
+<meta name="theme-color" content="#00e676">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>
+  :root {
+    --bg: #0a0a0f; --card: #12121a; --border: #1f1f2a;
+    --fg: #e4e4e7; --dim: #8b8b96; --green: #00e676;
+    --red: #ff3d5a; --yellow: #ffb74d; --blue: #4fc3f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, 'SF Mono', Menlo, monospace;
+    padding: 16px; min-height: 100vh;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 16px;
+  }
+  h1 { color: var(--green); font-size: 16px; letter-spacing: 2px; }
+  .status-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dim); margin-right: 6px; vertical-align: middle;
+  }
+  .status-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.off  { background: var(--red); }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px; margin-bottom: 16px;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px;
+  }
+  .card .label {
+    font-size: 10px; color: var(--dim); text-transform: uppercase;
+    letter-spacing: 1.5px; margin-bottom: 6px;
+  }
+  .card .value { font-size: 20px; font-weight: 600; }
+  .green { color: var(--green); }
+  .red   { color: var(--red); }
+  .yellow{ color: var(--yellow); }
+  .blue  { color: var(--blue); }
+  .dim   { color: var(--dim); }
+  section { margin-bottom: 20px; }
+  section h2 {
+    font-size: 11px; color: var(--dim); text-transform: uppercase;
+    letter-spacing: 2px; margin-bottom: 10px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 6px 8px; color: var(--dim);
+       font-weight: 500; text-transform: uppercase; font-size: 10px;
+       letter-spacing: 1px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+  .endpoint {
+    font-family: inherit; background: #1a1a22; padding: 2px 6px;
+    border-radius: 3px; font-size: 11px; color: var(--blue);
+  }
+  .log {
+    background: #080810; border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; max-height: 260px; overflow-y: auto;
+    font-size: 11px; line-height: 1.4; white-space: pre-wrap;
+  }
+  .log .line { padding: 1px 0; }
+  .log .line.err { color: var(--red); }
+  .log .line.win { color: var(--green); }
+  footer { text-align: center; color: var(--dim); font-size: 10px; margin-top: 20px; }
+  .btn {
+    display: inline-block; padding: 6px 12px; background: #1a1a22;
+    border: 1px solid var(--border); border-radius: 4px; color: var(--fg);
+    text-decoration: none; font-size: 11px; cursor: pointer;
+    font-family: inherit;
+  }
+  .btn:hover { border-color: var(--green); color: var(--green); }
+  .btn-danger:hover { border-color: var(--red); color: var(--red); }
+  @media (max-width: 480px) {
+    body { padding: 12px; }
+    .card .value { font-size: 17px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="dot" class="status-dot"></span>PRECOG v2</h1>
+  <div class="dim" id="uptime">loading…</div>
+</header>
+
+<section>
+  <div class="grid">
+    <div class="card">
+      <div class="label">Balance</div>
+      <div class="value green" id="balance">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Peak</div>
+      <div class="value blue" id="peak">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Drawdown</div>
+      <div class="value" id="dd">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Open Clusters</div>
+      <div class="value yellow" id="clusterCount">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Signals Received</div>
+      <div class="value" id="sigCount">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Last Signal</div>
+      <div class="value dim" id="lastSig" style="font-size:13px">—</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Active Clusters</h2>
+  <table id="clusterTable">
+    <thead><tr><th>Coin</th><th>Dir</th><th>Legs</th><th>Avg Entry</th><th>Size</th><th>Peak PnL %</th></tr></thead>
+    <tbody><tr><td colspan="6" class="dim">no open positions</td></tr></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Config</h2>
+  <div class="card">
+    <table style="font-size:11px">
+      <tr><td class="dim">Leverage</td><td id="cfgLev">—</td>
+          <td class="dim">Risk / trade</td><td id="cfgRisk">—</td></tr>
+      <tr><td class="dim">Max legs</td><td id="cfgLegs">—</td>
+          <td class="dim">Funding TP</td><td id="cfgTP">—</td></tr>
+      <tr><td class="dim">Wallet</td><td colspan="3" id="cfgWallet" style="font-size:10px">—</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Webhook Endpoints</h2>
+  <div class="card" style="font-size:11px; line-height:1.8">
+    <div><span class="endpoint">POST /precog/flip-long</span>  — close short (if any) + open long</div>
+    <div><span class="endpoint">POST /precog/flip-short</span> — close long (if any) + open short</div>
+    <div><span class="endpoint">POST /precog/add-long</span>   — add weighted long leg (≤5)</div>
+    <div><span class="endpoint">POST /precog/add-short</span>  — add weighted short leg (≤5)</div>
+    <div style="margin-top:10px" class="dim">Body: <code>{"ticker":"BTC","secret":"..."}</code></div>
+  </div>
+</section>
+
+<section>
+  <h2>Live Log</h2>
+  <div class="log" id="log"></div>
+</section>
+
+<section style="text-align:center">
+  <button class="btn" onclick="refresh()">↻ Refresh</button>
+  <button class="btn btn-danger" onclick="flattenAll()">⊘ Flatten All</button>
+</section>
+
+<footer>PRECOG v2 · Pine indicator → webhook → HL execution</footer>
+
+<script>
+const WS = (path) => fetch(path).then(r => r.json()).catch(() => null);
+
+function fmtMoney(n) { return n == null ? '—' : '$' + Number(n).toFixed(2); }
+function fmtPct(n)   { return n == null ? '—' : (Number(n) * 100).toFixed(1) + '%'; }
+function fmtAgo(ms) {
+  if (!ms) return 'never';
+  const s = Math.floor(ms/1000);
+  if (s < 60) return s + 's ago';
+  const m = Math.floor(s/60);
+  if (m < 60) return m + 'm ago';
+  return Math.floor(m/60) + 'h ago';
+}
+
+async function refresh() {
+  const h = await WS('/health');
+  if (!h) return;
+  const dot = document.getElementById('dot');
+  dot.className = 'status-dot ' + (h.live ? 'live' : 'off');
+  document.getElementById('uptime').textContent = 'up ' + fmtAgo(h.uptime_sec * 1000);
+  document.getElementById('balance').textContent = fmtMoney(h.balance);
+  document.getElementById('peak').textContent = fmtMoney(h.peak);
+  const ddEl = document.getElementById('dd');
+  ddEl.textContent = fmtPct(h.dd);
+  ddEl.className = 'value ' + (h.dd > 0.1 ? 'red' : h.dd > 0.05 ? 'yellow' : 'green');
+  document.getElementById('clusterCount').textContent = Object.keys(h.clusters || {}).length;
+  document.getElementById('sigCount').textContent = h.signal_count;
+  document.getElementById('lastSig').textContent = fmtAgo(h.last_signal_ms_ago);
+
+  document.getElementById('cfgLev').textContent = h.config.LEV + 'x';
+  document.getElementById('cfgRisk').textContent = (h.config.RISK_PCT * 100).toFixed(2) + '%';
+  document.getElementById('cfgLegs').textContent = h.config.MAX_LEGS;
+  document.getElementById('cfgTP').textContent = (h.config.FUNDING_TP_PCT * 100).toFixed(0) + '%';
+  document.getElementById('cfgWallet').textContent = h.wallet;
+
+  // Clusters table
+  const tbody = document.querySelector('#clusterTable tbody');
+  const clusters = h.clusters || {};
+  const entries = Object.entries(clusters);
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="dim">no open positions</td></tr>';
+  } else {
+    tbody.innerHTML = entries.map(([coin, c]) => `
+      <tr>
+        <td><strong>${coin}</strong></td>
+        <td class="${c.dir === 'long' ? 'green' : 'red'}">${c.dir.toUpperCase()}</td>
+        <td>${c.legs}</td>
+        <td>${Number(c.avgEntry).toFixed(4)}</td>
+        <td>${Number(c.totalSize).toFixed(4)}</td>
+        <td class="${c.peakPnlPct > 0 ? 'green' : 'red'}">${(c.peakPnlPct * 100).toFixed(1)}%</td>
+      </tr>`).join('');
+  }
+
+  // Logs
+  const logs = await WS('/logs');
+  if (logs && logs.log) {
+    const el = document.getElementById('log');
+    el.innerHTML = logs.log.slice(-80).map(l => {
+      const cls = /err|fail|fatal|circuit/i.test(l) ? 'err'
+                : /tp hit|flat|leg/i.test(l) ? 'win' : '';
+      return `<div class="line ${cls}">${l.replace(/</g,'&lt;')}</div>`;
+    }).join('');
+    el.scrollTop = el.scrollHeight;
+  }
+}
+
+async function flattenAll() {
+  if (!confirm('Flatten all open positions?')) return;
+  const secret = prompt('Webhook secret:');
+  if (!secret) return;
+  const r = await fetch('/flatten-all', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ secret })
+  }).then(r => r.json());
+  alert(JSON.stringify(r, null, 2));
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
