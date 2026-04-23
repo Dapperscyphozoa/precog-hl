@@ -62,7 +62,14 @@ except Exception as _e:
 # the trade direction AND funding confirms the regime, the trade is blocked.
 #
 # Set env REGIME_SIDE_BLOCK=0 to disable (not recommended).
-_REGIME_BLOCK_ENABLED = os.environ.get('REGIME_SIDE_BLOCK', '1') != '0'
+_REGIME_BLOCK_ENABLED = os.environ.get('REGIME_SIDE_BLOCK', '0') != '0'
+# 2026-04-22: default flipped '1' → '0'. The regime detector uses BTC 4h EMA
+# with 3-bar hysteresis (~12h to flip regime). In intraday pullbacks from a
+# prior bull regime, this still reports 'bull' and blocks SELL signals —
+# forcing the bot to open only longs exactly when shorts would be correct.
+# Observed effect: 14 longs stacked into a pullback, uPnL -$30.
+# Disabled until Haiku regime arbiter is built (planned post-profit).
+# MTF gate (mtf_context.aligned) still catches both-HTF opposition cases.
 # Funding cutoff — only block when funding meaningfully confirms regime.
 # HL perps baseline sits at +0.125 bps on most coins (exchange default).
 # Cutoff at 0.0 blocked every short regardless of true positioning.
@@ -2469,7 +2476,10 @@ SP = derive(GRID); BP = derive(GRID)
 SP['pivot_lb'] = 15  # OOS: plb=15 lifts PnL +5%, matches trail 0.8% winner
 BP['pivot_lb'] = 15
 SP['rsi_hi'] = 70  # tight: quality over quantity in chop
-BP['rsi_lo'] = 35
+BP['rsi_lo'] = 30  # 2026-04-22: 35→30. Previous 35 was asymmetric (15 below 50) vs
+                   # sell threshold at 70 (20 above 50). Made BUY signals easier to
+                   # trigger than SELL → structural long bias. Now both thresholds
+                   # are 20 points from 50 — neutral signal generation.
 
 
 INITIAL_RISK_PCT = 0.03  # DIAL MODE: 1.5x base. Conf multiplier 0.2x-5.0x. Max conf = 15% equity at SL (hard cap).
@@ -2872,7 +2882,10 @@ def bb_signal(candles, coin=None, last_buy_ts=0, last_sell_ts=0):
     # Defaults
     BB_P_default = 20
     std_mult_default = 2.0
-    rsi_buffer_default = 5.0
+    rsi_buffer_default = 0.0  # 2026-04-22: was 5.0. Buffer widened RSI thresholds
+                                # asymmetrically (BUY at RSI<40, SELL at RSI>65 with
+                                # 35/70 defaults). Zero buffer = BB signal uses the
+                                # raw RSI threshold, no directional widening.
     r14 = rsi_calc(cl, 14)
     # Per-coin RL/RH if available, else globals
     RL_def = BP['rsi_lo']; RH_def = SP['rsi_hi']
@@ -3898,9 +3911,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         if paying_funding:
             hourly_cost = abs(funding_rate) * notional
             profit = live['pnl']
-            # if hourly funding cost > 20% of current profit, cut
-            if hourly_cost > profit * FUNDING_CUT_RATIO and profit > 0:
-                log(f"{coin} FUNDING CUT: cost ${hourly_cost:.3f}/h vs profit ${profit:.3f} (ratio {hourly_cost/profit*100:.0f}%)")
+            # 2026-04-22: Tightened funding cut. Was: hourly_cost > profit × 0.50
+            # which closed positions as soon as 1hr forward funding exceeded
+            # half of current profit — firing on tiny profits in high-funding
+            # windows. New: require position age > 1hr (enough funding has
+            # already been paid to justify concern) AND hourly_cost > profit × 2
+            # (not just offsetting profit, actively eating it at 2x the rate).
+            # Native TP catches real winners long before funding becomes an issue.
+            pos_state = state.get('positions', {}).get(coin, {})
+            age = time.time() - (pos_state.get('opened_at') or time.time())
+            FUNDING_CUT_MIN_AGE_SEC = 3600
+            FUNDING_CUT_MIN_COST_RATIO = 2.0
+            if (age > FUNDING_CUT_MIN_AGE_SEC and
+                hourly_cost > profit * FUNDING_CUT_MIN_COST_RATIO and
+                profit > 0):
+                log(f"{coin} FUNDING CUT: cost ${hourly_cost:.3f}/h vs profit ${profit:.3f} age={age/3600:.1f}h")
                 pnl_pct = close(coin)
                 if pnl_pct is not None:
                     state['last_pnl_close'] = pnl_pct
@@ -4209,12 +4234,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 fav_frac = pnl / notional  # fraction of notional gained
                 if fav_frac >= tp_pct * MIN_FAV_FRAC_FOR_REVERSE:
                     return True, f"fav={fav_frac*100:.2f}%>=50%TP({tp_pct*100:.1f}%)"
-        # (c) age > min_hold
-        opened_at = pos_state.get('opened_at', now)
-        age = now - opened_at
-        if age > MIN_HOLD_BEFORE_REVERSE_SEC:
-            return True, f"age={age/60:.0f}min"
-        return False, f"pnl=${pnl:.2f} age={age/60:.0f}min — hold"
+        # (c) REMOVED 2026-04-22. Age > 15min used to allow reversal by itself.
+        # But a 16-minute-old position with +$0.30 profit would still get flipped
+        # on a weak counter-signal, reproducing the exact leak the guard was
+        # supposed to fix. Reversal now strictly requires loss OR 50%+ of TP.
+        # Old native TP / SL handle the time-based exit via normal TP-LOCK.
+        return False, f"pnl=${pnl:.2f} profit floor not met"
 
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar_ts

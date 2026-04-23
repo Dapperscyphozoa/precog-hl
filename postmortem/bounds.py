@@ -96,12 +96,16 @@ BOUNDS = {
         'vol_low_threshold_atr': (0.5, 0.1, 2.0, 0.1, 5),
         'vol_high_threshold_atr': (2.0, 1.0, 5.0, 0.2, 5),
     },
-    'sl': {
-        'pct':            (0.02, 0.003, 0.05, 0.003, 5),   # 2% default, bounded 0.3%-5%
-    },
-    'tp': {
-        'pct':            (0.06, 0.004, 0.20, 0.003, 5),   # 6% default, bounded 0.4%-20%
-    },
+    # 2026-04-22: sl and tp bounds REMOVED. Postmortem tuner had authority to
+    # override SL and TP values within bounds (SL 0.3%-5%, TP 0.4%-20%) based on
+    # operational closures. Audit showed 13 of 13 positions had TP written down
+    # to 2.6% because recent closures came in at 2.6% — but those closures were
+    # caused by the OPP-EXIT bug clipping winners before TP, not because TP was
+    # too wide. Tuner reinforced the leak. SL and TP are POLICY (derived from
+    # config + swing structure), not LEARNABLE from trade-close telemetry.
+    # Removing the bounds entries means tuner never generates these params,
+    # the reader in precog.py (already stripped) has no values to find,
+    # and no future commit can accidentally re-enable this path.
 }
 
 
