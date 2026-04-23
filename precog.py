@@ -2514,15 +2514,12 @@ MAX_POSITIONS = 25  # 2026-04-22: raised 8 → 25 for data-gathering phase.
                     # cost ~$0.03/trade with >500x headroom). MAX_TOTAL_RISK
                     # at 92% remains the real safety ceiling — position count
                     # is now advisory, not the primary risk gate.
-MAX_SAME_SIDE = 8   # 2026-04-22: reverted 20 → 8. 20 cap let 21 longs
-                    # stack up in a bull-calm regime. Then intraday pullback
-                    # turned all 21 red simultaneously — uPnL -$16 in
-                    # 30 minutes. Same-side concentration IS a risk, not
-                    # just a throttle. 8 is still 60% larger than the
-                    # original 5 (which was too tight for signal flow),
-                    # but forces the bot to be selective about which
-                    # regime-aligned trades it accepts instead of trying
-                    # to take them all.
+MAX_SAME_SIDE = 12  # 2026-04-22: raised 8→12. At 8 the cap was blocking 10+
+                    # signals/tick during active regimes, so the bot couldn't
+                    # even respond to market changes. 12 still gives correlation
+                    # protection (14 longs was the danger zone) while allowing
+                    # normal signal flow. If drawdown circuit breaker trips,
+                    # it shuts off same-side adds regardless — so 12 is safe.
 MAX_TOTAL_RISK = 0.92    # 8% reserve — unchanged, this is the real safety net
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
@@ -2731,7 +2728,11 @@ def rsi_calc(c,n=14):
     return r
 
 _CANDLE_CACHE = {}  # {coin: {'data': [...], 'ts': float}}
-CANDLE_CACHE_SEC = 120  # 2 min cache — covers both BOS and MR scans in same cycle
+_CANDLE_COLD = {}   # {coin: ts_unfrozen} — skip HL calls for coins recently 429'd
+CANDLE_CACHE_SEC = 300  # 2026-04-22: 120→300s. Longer cache = fewer HL REST
+                        # hits per cycle. On a 15m trigger, 5-min cache still
+                        # catches every fresh bar close. Reduces HL burst load.
+CANDLE_COLD_SEC = 60    # after a 429, skip this coin's HL fetches for 60s
 
 def fetch(coin, n_bars=100, retries=3):
     """Bybit WS candles FIRST (no rate limit), HL REST only as fallback."""
@@ -2748,6 +2749,15 @@ def fetch(coin, n_bars=100, retries=3):
     cached = _CANDLE_CACHE.get(coin)
     if cached and now - cached['ts'] < CANDLE_CACHE_SEC:
         return cached['data']
+    # 2026-04-22: Cold-skip. If this coin got 429'd in the last 60s, don't
+    # hit HL again — use stale cache if present, otherwise skip the coin
+    # this tick. Prevents cascading 429s from one coin blocking others.
+    cold_until = _CANDLE_COLD.get(coin, 0)
+    if now < cold_until:
+        return cached['data'] if cached else []
+    # Serialized inter-call delay. Multiple coins fetching in quick
+    # succession cause bursts. 50ms between fetches spreads the load.
+    time.sleep(0.05)
     end=int(time.time()*1000); start=end-n_bars*5*60*1000
     for attempt in range(retries):
         try:
@@ -2757,10 +2767,12 @@ def fetch(coin, n_bars=100, retries=3):
             return result
         except Exception as e:
             es = str(e)
-            if '429' in es and attempt < retries-1:
-                time.sleep(1.5 + random.random()*1.5)
-                continue
-            log(f"candle err {coin}: {e}"); return []
+            if '429' in es:
+                _CANDLE_COLD[coin] = time.time() + CANDLE_COLD_SEC
+                if attempt < retries-1:
+                    time.sleep(1.5 + random.random()*1.5)
+                    continue
+            log(f"candle err {coin}: {e}"); return cached['data'] if cached else []
     return []
 
 SCAN_BARS = 12  # scan last 12 bars to catch signals after warmup
