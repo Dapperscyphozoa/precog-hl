@@ -4014,12 +4014,17 @@ def cancel_trigger_orders(coin):
     """Cancel any native SL/TP trigger orders for a coin — prevents orphaned stops."""
     try:
         open_orders = info.open_orders(WALLET)
+        cancelled_count = 0
         for o in open_orders:
             if o.get('coin') == coin:
                 oid = o.get('oid')
                 if oid:
                     exchange.cancel(coin, oid)
                     log(f"{coin} cancelled orphaned order {oid}")
+                    cancelled_count += 1
+        if cancelled_count and _INV_OK and _invariants is not None:
+            try: _invariants.record_action(coin, 'cancel_trigger', origin='cancel_trigger_orders', detail={'count': cancelled_count})
+            except Exception: pass
     except Exception as e:
         log(f"{coin} cancel triggers err: {e}")
 
@@ -4062,6 +4067,11 @@ def partial_close(coin, fraction, reason='partial_exit_tp1'):
         remaining = total_size - close_size
         log(f"{coin} PARTIAL_CLOSE {close_size}/{total_size} ({fraction*100:.0f}%) "
             f"@ {slip} | entry={entry} | {pct:+.2f}% | reason={reason} | remaining={remaining}")
+        if _INV_OK and _invariants is not None:
+            try: _invariants.record_action(coin, 'partial_close', size_before=total_size,
+                                            size_after=remaining, origin=reason,
+                                            detail={'close_size': close_size, 'fraction': fraction})
+            except Exception: pass
         return {'status':'closed','closed_size': close_size,
                 'remaining_size': remaining, 'pnl_pct': pct}
     except Exception as e:
@@ -5473,8 +5483,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                 fill_px = place(coin, False, sz)
                 if fill_px:
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_sell')
+                        except Exception: pass
                     _sl_pct_used = place_native_sl(coin, False, fill_px, sz)
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(coin, 'sl_place', size_after=sz, origin='precog_15m_sell', detail={'sl_pct': _sl_pct_used})
+                        except Exception: pass
                     _tp_pct_used = place_native_tp(coin, False, fill_px, sz)
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(coin, 'tp_place', size_after=sz, origin='precog_15m_sell', detail={'tp_pct': _tp_pct_used})
+                        except Exception: pass
                     # CONTRACT: both TP and SL must be on exchange. If either
                     # is None, emergency close immediately (naked position).
                     if _EC_OK and _contract is not None:
@@ -5538,8 +5557,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
                 fill_px = place(coin, True, sz)
                 if fill_px:
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_buy')
+                        except Exception: pass
                     _sl_pct_used = place_native_sl(coin, True, fill_px, sz)
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(coin, 'sl_place', size_after=sz, origin='precog_15m_buy', detail={'sl_pct': _sl_pct_used})
+                        except Exception: pass
                     _tp_pct_used = place_native_tp(coin, True, fill_px, sz)
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(coin, 'tp_place', size_after=sz, origin='precog_15m_buy', detail={'tp_pct': _tp_pct_used})
+                        except Exception: pass
                     # CONTRACT: enforce TP/SL presence post-entry
                     if _EC_OK and _contract is not None:
                         try:
@@ -5695,6 +5723,9 @@ def main():
                                              'stage':'initial', 'peak':entry_px,
                                              'engine':'RECONCILED', 'source':'reconcile'}
                     log(f"RECONCILE: adopting existing {k} {side} (fresh 30min grace window)")
+                    if _INV_OK and _invariants is not None:
+                        try: _invariants.record_action(k, 'reconcile_adopt', size_after=abs(live_positions[k]['size']), origin='reconcile_loop')
+                        except Exception: pass
 
             # PROFIT MANAGEMENT: check every open 15m position for TP1 partial
             # exit or TP extension. Runs each tick. Uses exchange-side order

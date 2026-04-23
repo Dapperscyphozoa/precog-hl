@@ -24,6 +24,140 @@ EMERGENCY_CLOSE_AFTER_SEC = 60 # if naked > 60s, emergency close
 # Violation counters
 _VIOLATIONS = defaultdict(int)
 
+# Violation trace — root cause context per event
+# {violation_id: {ts, coin, type, classification, last_action, divergence_ts, detail}}
+_VIOLATION_TRACE = []
+_VIOLATION_TRACE_MAX = 500
+
+# Last-action tracker (set externally by precog.py on entry / resize / cancel events)
+# {coin: {'action', 'ts', 'size_before', 'size_after', 'origin'}}
+_LAST_ACTION = {}
+
+
+def record_action(coin, action, size_before=None, size_after=None, origin=None, detail=None):
+    """Called by precog.py whenever a position state-changing event occurs.
+
+    Actions: 'entry', 'partial_close', 'tp_place', 'sl_place', 'cancel_trigger',
+             'reduce_only_ioc', 'reconcile_adopt', 'reconcile_phantom'.
+
+    This feeds the violation classifier — when a mismatch is detected later,
+    we look at the most recent action on the coin to attribute root cause.
+    """
+    with _LOCK:
+        _LAST_ACTION[coin] = {
+            'ts': time.time(),
+            'action': action,
+            'size_before': size_before,
+            'size_after': size_after,
+            'origin': origin,
+            'detail': detail,
+        }
+
+
+def _classify_violation(coin, violation_type, **context):
+    """Infer root-cause classification from last-action + type.
+
+    Returns dict with classification + diagnostic detail.
+    """
+    last = _LAST_ACTION.get(coin, {})
+    last_action = last.get('action', 'unknown')
+    last_ts = last.get('ts', 0)
+    seconds_since_last_action = time.time() - last_ts if last_ts else None
+
+    cls = 'unknown'
+    rationale = ''
+
+    if violation_type in ('tp_size_mismatch', 'sl_size_mismatch'):
+        pos_size = context.get('pos_size', 0)
+        order_size = context.get('order_size', 0)
+        # Ratio test
+        if pos_size > 0:
+            delta_pct = abs(order_size - pos_size) / pos_size
+        else:
+            delta_pct = 0
+
+        if last_action == 'partial_close':
+            cls = 'partial_fill_handling_bug'
+            rationale = f'order sized for pre-close quantity; partial_close did not resize trigger'
+        elif last_action in ('reduce_only_ioc', 'signal_reversal_close'):
+            cls = 'partial_fill_handling_bug'
+            rationale = f'market reduce-only did not match position — leftover order for old size'
+        elif last_action == 'reconcile_adopt':
+            cls = 'state_desync'
+            rationale = f'adopted existing HL position; state size from adoption did not match trigger size'
+        elif last_action == 'tp_place' or last_action == 'sl_place':
+            # Order was just placed. Size mismatch = placement bug.
+            # But if pct mismatch is tiny (< 1%), likely rounding.
+            if delta_pct < 0.01:
+                cls = 'rounding_precision_issue'
+                rationale = f'order size off by {delta_pct*100:.2f}% — likely HL decimals rounding'
+            else:
+                cls = 'order_placement_bug'
+                rationale = f'order placed with wrong size ({delta_pct*100:.1f}% off position)'
+        elif delta_pct < 0.01:
+            cls = 'rounding_precision_issue'
+            rationale = f'size off by {delta_pct*100:.2f}% — likely decimal rounding'
+        else:
+            cls = 'state_desync'
+            rationale = f'position size diverged from trigger order; no recent recorded action'
+
+    elif violation_type == 'naked_position_detected':
+        if last_action == 'entry':
+            if seconds_since_last_action and seconds_since_last_action < 30:
+                cls = 'order_placement_bug'
+                rationale = 'entry occurred recently; TP or SL placement returned failure'
+            else:
+                cls = 'order_placement_bug'
+                rationale = 'position established but protection never placed'
+        elif last_action == 'cancel_trigger':
+            cls = 'no_override_bug'
+            rationale = 'cancel_trigger_orders called but no replacement placed'
+        elif last_action == 'reconcile_adopt':
+            cls = 'state_desync'
+            rationale = 'adopted HL position without TP/SL — manual or pre-deploy position'
+        else:
+            cls = 'state_desync'
+            rationale = f'naked without recent recorded action (last: {last_action})'
+
+    elif violation_type == 'entry_naked':
+        cls = 'order_placement_bug'
+        rationale = 'place_native_tp or place_native_sl returned None at entry'
+
+    elif violation_type == 'deadman_triggered':
+        cls = 'critical_no_override'
+        rationale = 'SL missing > emergency threshold; recreation failed repeatedly'
+
+    elif violation_type == 'audit_mismatch':
+        cls = 'contract_bypass'
+        rationale = 'exit_reason does not match actual price vs target'
+
+    elif violation_type == 'cancel_without_replace':
+        cls = 'no_override_bug'
+        rationale = 'cancel fired without same-tick replacement'
+
+    trace = {
+        'ts': int(time.time()),
+        'coin': coin,
+        'type': violation_type,
+        'classification': cls,
+        'rationale': rationale,
+        'last_action': last_action,
+        'seconds_since_last_action': round(seconds_since_last_action, 1) if seconds_since_last_action else None,
+        'last_action_origin': last.get('origin'),
+        'last_action_size_before': last.get('size_before'),
+        'last_action_size_after': last.get('size_after'),
+        'context': context,
+    }
+    with _LOCK:
+        _VIOLATION_TRACE.append(trace)
+        if len(_VIOLATION_TRACE) > _VIOLATION_TRACE_MAX:
+            _VIOLATION_TRACE[:] = _VIOLATION_TRACE[-_VIOLATION_TRACE_MAX:]
+        _VIOLATIONS[f'cls_{cls}'] += 1
+    print(f"{_LOG_PREFIX} ROOT_CAUSE {coin} {violation_type} → {cls}: {rationale} "
+          f"(last_action={last_action}, age={trace['seconds_since_last_action']}s)",
+          flush=True)
+    return trace
+
 # Last-known protection state per coin: {coin: {'has_sl': bool, 'has_tp': bool, 'last_check_ts': float, 'naked_since_ts': float or None}}
 _PROTECTION_STATE = {}
 
@@ -53,6 +187,9 @@ def assert_entry_protection(coin, tp_pct_used, sl_pct_used, close_fn, pos_info=N
 
     with _LOCK:
         _VIOLATIONS['entry_naked'] += 1
+    _classify_violation(coin, 'entry_naked',
+                        tp_failed=tp_pct_used is None, sl_failed=sl_pct_used is None,
+                        pos_info=pos_info or {})
     print(f"{_LOG_PREFIX} ★ ENTRY INVARIANT VIOLATED {coin}: missing {missing}. "
           f"Emergency close.", flush=True)
 
@@ -137,6 +274,10 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
                 tp_invalid = True
                 with _LOCK:
                     _VIOLATIONS['tp_size_mismatch'] += 1
+                _classify_violation(coin, 'tp_size_mismatch',
+                                    pos_size=abs_pos_size, order_size=tp_size,
+                                    order_oid=tp_info.get('oid'),
+                                    trigger_px=tp_info.get('trigger_px'))
                 print(f"{_LOG_PREFIX} ⚠ TP SIZE MISMATCH {coin}: "
                       f"tp_size={tp_size} pos_size={abs_pos_size}", flush=True)
 
@@ -151,6 +292,10 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
                 sl_invalid = True
                 with _LOCK:
                     _VIOLATIONS['sl_size_mismatch'] += 1
+                _classify_violation(coin, 'sl_size_mismatch',
+                                    pos_size=abs_pos_size, order_size=sl_size,
+                                    order_oid=sl_info.get('oid'),
+                                    trigger_px=sl_info.get('trigger_px'))
                 print(f"{_LOG_PREFIX} ⚠ SL SIZE MISMATCH {coin}: "
                       f"sl_size={sl_size} pos_size={abs_pos_size}", flush=True)
 
@@ -166,6 +311,11 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
 
             with _LOCK:
                 _VIOLATIONS['naked_position_detected'] += 1
+            _classify_violation(coin, 'naked_position_detected',
+                                has_sl=has_sl, has_tp=has_tp,
+                                tp_invalid=tp_invalid, sl_invalid=sl_invalid,
+                                naked_duration=round(naked_duration, 1),
+                                pos_size=abs(sz), entry=entry)
 
             missing = []
             if not has_sl: missing.append('SL')
@@ -204,6 +354,9 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
             if (not has_sl or sl_invalid) and naked_duration > EMERGENCY_CLOSE_AFTER_SEC:
                 with _LOCK:
                     _VIOLATIONS['deadman_triggered'] += 1
+                _classify_violation(coin, 'deadman_triggered',
+                                    naked_duration=round(naked_duration, 1),
+                                    pos_size=abs(sz))
                 print(f"{_LOG_PREFIX} ★★★ DEADMAN TRIGGER {coin}: "
                       f"SL missing/invalid {naked_duration:.0f}s. EMERGENCY CLOSE.", flush=True)
                 try:
@@ -237,6 +390,8 @@ def log_cancel(coin, reason, replaced=False):
             _CANCEL_LOG[:] = _CANCEL_LOG[-200:]
         if not replaced and reason not in ('close', 'liquidation', 'tp_fill', 'sl_fill'):
             _VIOLATIONS['cancel_without_replace'] += 1
+            _classify_violation(coin, 'cancel_without_replace',
+                                cancel_reason=reason, replaced=replaced)
             print(f"{_LOG_PREFIX} ⚠ CANCEL WITHOUT REPLACE {coin} ({reason})", flush=True)
 
 
@@ -291,6 +446,9 @@ def audit_close(coin, entry_price, tp_pct, sl_pct, exit_price, exit_reason,
     if rec.get('violation'):
         with _LOCK:
             _VIOLATIONS['audit_mismatch'] += 1
+        _classify_violation(coin, 'audit_mismatch',
+                            exit_reason=exit_reason, exit_price=exit_price,
+                            violation=rec['violation'])
         print(f"{_LOG_PREFIX} ⚠ AUDIT MISMATCH {coin}: {rec['violation']}", flush=True)
 
     with _LOCK:
@@ -334,6 +492,10 @@ def status():
         naked_count = sum(1 for s in _PROTECTION_STATE.values() if not (s.get('has_sl') and s.get('has_tp')))
         recent_audit = list(_AUDIT_LOG[-10:])
         recent_cancels = list(_CANCEL_LOG[-10:])
+        recent_traces = list(_VIOLATION_TRACE[-30:])
+        cls_breakdown = defaultdict(int)
+        for t in _VIOLATION_TRACE:
+            cls_breakdown[t.get('classification', 'unknown')] += 1
     return {
         'daemon_running': _DAEMON_RUNNING,
         'check_interval_sec': DEADMAN_INTERVAL_SEC,
@@ -345,4 +507,7 @@ def status():
         'protection_state': _PROTECTION_STATE,
         'recent_audit_log': recent_audit,
         'recent_cancels': recent_cancels,
+        'violation_classifications': dict(cls_breakdown),
+        'recent_violation_traces': recent_traces,
+        'last_actions_tracked': len(_LAST_ACTION),
     }
