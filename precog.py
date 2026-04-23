@@ -191,6 +191,25 @@ except Exception as _e:
     _TFI_OK = False
     print(f'[tf_isolation] import failed (non-fatal): {_e}', flush=True)
 
+# Contract invariants — deadman check, entry/exit invariants, order persistence.
+try:
+    import invariants as _invariants
+    _INV_OK = True
+except Exception as _e:
+    _invariants = None
+    _INV_OK = False
+    print(f'[invariants] import failed (non-fatal): {_e}', flush=True)
+
+# Profit management — extend_winners + partial_exit_tp1.
+# Uses exchange-side TP/SL modifications, not polling closes.
+try:
+    import profit_mgmt as _pm
+    _PM_OK = True
+except Exception as _e:
+    _pm = None
+    _PM_OK = False
+    print(f'[profit_mgmt] import failed (non-fatal): {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -321,6 +340,23 @@ def update_coin_wr(coin, win, state):
 def record_close(pos, coin, pnl_pct, state):
     """Record a closed trade. pnl_pct is already percent (e.g. -2.0 = -2%)."""
     if pnl_pct is None: return
+
+    # INVARIANT #5: trade audit — record expected vs actual levels
+    if _INV_OK and _invariants is not None:
+        try:
+            _invariants.audit_close(
+                coin=coin,
+                entry_price=pos.get('entry'),
+                tp_pct=pos.get('tp_pct'),
+                sl_pct=pos.get('sl_pct'),
+                exit_price=pos.get('exit_price') or pos.get('exit_px'),
+                exit_reason=pos.get('exit_reason', 'unknown'),
+                pnl_pct=pnl_pct,
+                side=pos.get('side', '?'),
+            )
+        except Exception:
+            pass
+
     # Clamp to sanity range — SL caps at -2%, but leveraged wild fills can blow through
     pnl_pct = max(-10.0, min(50.0, float(pnl_pct)))
     win = pnl_pct > 0
@@ -1816,6 +1852,16 @@ def tf_isolation_status():
         if not _TFI_OK or _tf_iso is None:
             return jsonify({'error': 'tf_isolation not loaded'}), 503
         return jsonify(_tf_iso.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/invariants', methods=['GET'])
+def invariants_status():
+    """Contract invariants — deadman check, entry/exit invariants, audit log."""
+    try:
+        if not _INV_OK or _invariants is None:
+            return jsonify({'error': 'invariants not loaded'}), 503
+        return jsonify(_invariants.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -3952,6 +3998,244 @@ def cancel_trigger_orders(coin):
     except Exception as e:
         log(f"{coin} cancel triggers err: {e}")
 
+
+def partial_close(coin, fraction, reason='partial_exit_tp1'):
+    """Close a fraction of the current position via reduce-only IOC market.
+    Existing TP/SL trigger orders auto-adjust to the reduced remaining size
+    (HL honors the szi at trigger time).
+
+    Args:
+        coin: coin symbol
+        fraction: 0-1 portion of position to close (0.5 = close half)
+        reason: contract reason (must be in AUTHORIZED_REASONS)
+
+    Returns:
+        dict with {status, closed_size, remaining_size, pnl_pct} or None on failure
+    """
+    try:
+        live = get_all_positions_live(force=True).get(coin)
+        if not live: return None
+        is_long = live['size'] > 0
+        total_size = abs(live['size'])
+        close_size = total_size * fraction
+        close_size = float(round_size(coin, close_size))
+        if close_size <= 0 or close_size >= total_size:
+            log(f"{coin} partial_close skipped: invalid fraction (size={total_size}, close={close_size})")
+            return None
+        px = get_mid(coin)
+        if not px: return None
+        slip = float(round_price(coin, px * (0.995 if is_long else 1.005)))
+        # Reduce-only IOC market close (is_buy=False for long, True for short)
+        r = exchange.order(coin, not is_long, close_size, slip,
+                           {'limit': {'tif': 'Ioc'}}, reduce_only=True)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"{coin} PARTIAL_CLOSE FAILED: {status['error']}")
+            return None
+        entry = live['entry']
+        pct = ((px-entry)/entry*100) if is_long else ((entry-px)/entry*100)
+        remaining = total_size - close_size
+        log(f"{coin} PARTIAL_CLOSE {close_size}/{total_size} ({fraction*100:.0f}%) "
+            f"@ {slip} | entry={entry} | {pct:+.2f}% | reason={reason} | remaining={remaining}")
+        return {'status':'closed','closed_size': close_size,
+                'remaining_size': remaining, 'pnl_pct': pct}
+    except Exception as e:
+        log(f"{coin} partial_close err: {e}")
+        return None
+
+
+def modify_sl_to_breakeven(coin, entry, size, is_long, buffer_pct=0.002):
+    """Cancel existing SL and place new SL at breakeven + buffer (covers fees).
+
+    Args:
+        coin: coin symbol
+        entry: original entry price
+        size: remaining position size after partial close
+        is_long: direction
+        buffer_pct: how far above entry (for long) / below (for short) to set SL
+
+    Returns:
+        new_sl_price or None
+    """
+    try:
+        # Cancel only SL trigger orders (leave TP intact)
+        open_orders = info.open_orders(WALLET)
+        for o in open_orders:
+            if o.get('coin') != coin: continue
+            ot = o.get('orderType', '')
+            # Match SL trigger orders (Stop variants)
+            if 'Stop' in ot or 'Sl' in ot:
+                oid = o.get('oid')
+                if oid:
+                    try: exchange.cancel(coin, oid)
+                    except Exception: pass
+        # Place new SL at breakeven + buffer
+        if is_long:
+            trigger_px = entry * (1 + buffer_pct)
+        else:
+            trigger_px = entry * (1 - buffer_pct)
+        trigger_px = float(round_price(coin, trigger_px))
+        limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
+        sl_size = float(round_size(coin, size))
+        sl_side = not is_long
+        r = exchange.order(coin, sl_side, sl_size, limit_px,
+                           {'trigger': {'triggerPx': trigger_px, 'isMarket': True, 'tpsl': 'sl'}},
+                           reduce_only=True)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"{coin} BE-SL REJECTED: {status['error']}")
+            return None
+        log(f"{coin} SL → BREAKEVEN @ {trigger_px} (entry={entry}, buffer={buffer_pct*100:.2f}%)")
+        return trigger_px
+    except Exception as e:
+        log(f"{coin} be-sl err: {e}")
+        return None
+
+
+def modify_tp_extended(coin, entry, size, is_long, new_tp_pct):
+    """Cancel existing TP and place new TP at extended target.
+
+    Args:
+        coin: coin symbol
+        entry: original entry
+        size: current remaining size
+        is_long: direction
+        new_tp_pct: new TP as decimal (0.10 = 10%)
+    """
+    try:
+        open_orders = info.open_orders(WALLET)
+        for o in open_orders:
+            if o.get('coin') != coin: continue
+            ot = o.get('orderType', '')
+            if 'Take' in ot or 'Tp' in ot:
+                oid = o.get('oid')
+                if oid:
+                    try: exchange.cancel(coin, oid)
+                    except Exception: pass
+        if is_long:
+            trigger_px = entry * (1 + new_tp_pct)
+        else:
+            trigger_px = entry * (1 - new_tp_pct)
+        trigger_px = float(round_price(coin, trigger_px))
+        limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+        tp_size = float(round_size(coin, size))
+        tp_side = not is_long
+        r = exchange.order(coin, tp_side, tp_size, limit_px,
+                           {'trigger': {'triggerPx': trigger_px, 'isMarket': True, 'tpsl': 'tp'}},
+                           reduce_only=True)
+        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+        if 'error' in status:
+            log(f"{coin} EXTENDED-TP REJECTED: {status['error']}")
+            return None
+        log(f"{coin} TP EXTENDED @ {trigger_px} (new_tp_pct={new_tp_pct*100:.2f}%, entry={entry})")
+        return trigger_px
+    except Exception as e:
+        log(f"{coin} extend-tp err: {e}")
+        return None
+
+
+def run_profit_management(state, live_positions):
+    """Per-tick hook: check each open 15m position for TP1 partial exit or
+    TP extension. Called from main loop.
+
+    ONLY acts on positions tagged tf='15m'. HTF positions managed by their
+    own engines.
+    """
+    if not _PM_OK or _pm is None: return
+    for coin, lp in live_positions.items():
+        try:
+            pos_state = state.get('positions', {}).get(coin, {})
+            if not pos_state: continue
+            if pos_state.get('tf') and pos_state.get('tf') != '15m': continue
+            entry = float(pos_state.get('entry', 0))
+            tp_pct = pos_state.get('tp_pct')
+            if not entry or not tp_pct: continue
+            mark = get_mid(coin)
+            if not mark: continue
+            is_long = lp['size'] > 0
+
+            # POLICY 1: partial exit at TP1
+            partial = _pm.check_partial_exit_tp1(coin, pos_state, mark)
+            if partial.get('execute'):
+                log(f"{coin} TP1 partial trigger: {partial['reason']}")
+                result = partial_close(coin, partial['close_fraction'], reason='partial_exit_tp1')
+                if result:
+                    # Move remainder's SL to breakeven
+                    remaining = result['remaining_size']
+                    be_price = modify_sl_to_breakeven(coin, entry, remaining, is_long,
+                                                       buffer_pct=partial['new_sl_pct'])
+                    _pm.mark_partial_done(coin)
+                    pos_state['partial_done'] = True
+                    pos_state['sl_pct'] = partial['new_sl_pct']  # update state
+                    log(f"{coin} TP1 policy complete: 50% booked, remainder at BE+{partial['new_sl_pct']*100:.2f}%")
+                continue  # only one policy per tick per coin
+
+            # POLICY 2: extend winners (only if partial already done OR position
+            # is cleanly in profit and trend-aligned)
+            # Requires 1h + 4h bias. Cache via HL REST.
+            import urllib.request as _ureq
+            try:
+                # 1h bias
+                _c1h = _CANDLE_CACHE.get(f'htf_1h_{coin}')
+                if not _c1h or time.time() - _c1h['ts'] > 600:
+                    _body = json.dumps({'type':'candleSnapshot',
+                        'req':{'coin':coin,'interval':'1h',
+                               'startTime': int(time.time()*1000) - 30*3600*1000,
+                               'endTime': int(time.time()*1000)}}).encode()
+                    _req = _ureq.Request('https://api.hyperliquid.xyz/info',
+                        method='POST', data=_body,
+                        headers={'Content-Type':'application/json'})
+                    with _ureq.urlopen(_req, timeout=3) as _resp:
+                        _data_1h = json.loads(_resp.read())
+                    _CANDLE_CACHE[f'htf_1h_{coin}'] = {'data': _data_1h, 'ts': time.time()}
+                    _c1h = _CANDLE_CACHE[f'htf_1h_{coin}']
+                # 4h bias
+                _c4h = _CANDLE_CACHE.get(f'htf_4h_{coin}')
+                if not _c4h or time.time() - _c4h['ts'] > 600:
+                    _body = json.dumps({'type':'candleSnapshot',
+                        'req':{'coin':coin,'interval':'4h',
+                               'startTime': int(time.time()*1000) - 30*4*3600*1000,
+                               'endTime': int(time.time()*1000)}}).encode()
+                    _req = _ureq.Request('https://api.hyperliquid.xyz/info',
+                        method='POST', data=_body,
+                        headers={'Content-Type':'application/json'})
+                    with _ureq.urlopen(_req, timeout=3) as _resp:
+                        _data_4h = json.loads(_resp.read())
+                    _CANDLE_CACHE[f'htf_4h_{coin}'] = {'data': _data_4h, 'ts': time.time()}
+                    _c4h = _CANDLE_CACHE[f'htf_4h_{coin}']
+            except Exception:
+                continue
+
+            def _to_list(bars):
+                return [[b['t'],b['o'],b['h'],b['l'],b['c'],b['v']] for b in bars]
+
+            htf_1h_data = _c1h['data']
+            htf_4h_data = _c4h['data']
+            if not htf_1h_data or not htf_4h_data: continue
+
+            bias_1h = _tf_iso.derive_htf_bias(_to_list(htf_1h_data)) if _TFI_OK else None
+            bias_4h = _tf_iso.derive_htf_bias(_to_list(htf_4h_data)) if _TFI_OK else None
+            if not bias_1h or not bias_4h: continue
+
+            extend = _pm.check_extend_winner(
+                coin, pos_state, mark,
+                htf_1h_bias=bias_1h['bias'],
+                htf_4h_bias=bias_4h['bias'],
+                htf_4h_strength=bias_4h['strength'])
+            if extend.get('extend'):
+                log(f"{coin} EXTEND-WINNER trigger: {extend['reason']}")
+                size_abs = abs(lp['size'])
+                new_tp_price = modify_tp_extended(coin, entry, size_abs, is_long,
+                                                    extend['new_tp_pct'])
+                if new_tp_price:
+                    pos_state['tp_pct'] = extend['new_tp_pct']
+                    pos_state['tp_extended'] = True
+                    log(f"{coin} TP extended: {extend['original_tp_pct']*100:.1f}% → "
+                        f"{extend['new_tp_pct']*100:.1f}%")
+        except Exception as e:
+            log(f"profit_mgmt err {coin}: {e}")
+
+
 def close(coin, state_ref=None):
     """Returns realized pnl_pct for logging (FIX #11)."""
     live = get_all_positions_live(force=True).get(coin)
@@ -5228,6 +5512,27 @@ state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
 def main():
     global state
     log(f"PreCog v8.28 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
+
+    # INVARIANT DEADMAN: scans every 30s for naked positions, recreates missing
+    # TP/SL, emergency-closes if SL missing > 60s.
+    if _INV_OK and _invariants is not None:
+        try:
+            def _open_orders_live():
+                """Pull current open trigger orders on HL."""
+                try:
+                    return _cached_frontend_orders() or []
+                except Exception:
+                    return []
+            _invariants.start_deadman_daemon(
+                live_positions_fn=get_all_positions_live,
+                get_open_orders_fn=_open_orders_live,
+                place_tp_fn=place_native_tp,
+                place_sl_fn=place_native_sl,
+                close_fn=close,
+            )
+        except Exception as e:
+            log(f"deadman daemon start err: {e}")
+
     try: bybit_ws.start()
     except Exception as e: log(f"bybit_ws err: {e}")
     try: orderbook_ws.start()
@@ -5327,6 +5632,14 @@ def main():
                                              'stage':'initial', 'peak':entry_px,
                                              'engine':'RECONCILED', 'source':'reconcile'}
                     log(f"RECONCILE: adopting existing {k} {side} (fresh 30min grace window)")
+
+            # PROFIT MANAGEMENT: check every open 15m position for TP1 partial
+            # exit or TP extension. Runs each tick. Uses exchange-side order
+            # modifications (not polling-close). TF-scoped to 15m positions only.
+            try:
+                run_profit_management(state, live_positions)
+            except Exception as _pme:
+                log(f"profit_mgmt loop err: {_pme}")
 
             # DUST-SWEEP — DISABLED 2026-04-22.
             # POSTMORTEM AUDIT of 51 trades: 45 dust_sweep exits, ZERO TP hits, 1 SL hit.
