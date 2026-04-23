@@ -3539,9 +3539,34 @@ def place_native_sl(coin, is_long, entry, size):
         limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
         sl_size = float(round_size(coin, actual_size))
         sl_side = not is_long
-        r = exchange.order(coin, sl_side, sl_size, limit_px,
-                       {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
-                       reduce_only=True)
+        # 2026-04-22: retry on 429/transient errors. Previously a single HL 429
+        # at SL placement left positions naked indefinitely. Protect_all would
+        # try again later but the window between fill and SL attachment is
+        # where flash crashes wipe accounts. Inline retry keeps positions safe.
+        r = None
+        last_err = None
+        for attempt in range(4):
+            try:
+                r = exchange.order(coin, sl_side, sl_size, limit_px,
+                               {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
+                               reduce_only=True)
+                # success — break out
+                break
+            except Exception as _e:
+                last_err = _e
+                err_str = str(_e).lower()
+                if '429' in err_str or 'rate' in err_str or 'timeout' in err_str or 'connection' in err_str:
+                    # Exponential backoff: 0.5s, 1.5s, 3.5s
+                    backoff = 0.5 * (3 ** attempt)
+                    log(f"{coin} SL attempt {attempt+1} hit transient err ({_e}) — retry in {backoff:.1f}s")
+                    time.sleep(backoff)
+                else:
+                    # Non-transient — don't retry
+                    log(f"{coin} SL attempt {attempt+1} non-transient err: {_e}")
+                    break
+        if r is None:
+            log(f"{coin} NATIVE SL FAILED after 4 attempts, last err: {last_err}")
+            return None
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
         if 'error' in status:
             log(f"{coin} NATIVE SL REJECTED: {status['error']} (size={sl_size}, trigger={trigger_px})")
@@ -3611,9 +3636,28 @@ def place_native_tp(coin, is_long, entry, size):
         limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
         tp_size = float(round_size(coin, actual_size))
         tp_side = not is_long
-        r = exchange.order(coin, tp_side, tp_size, limit_px,
-                       {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
-                       reduce_only=True)
+        # 2026-04-22: retry on transient errors, same as SL path
+        r = None
+        last_err = None
+        for attempt in range(4):
+            try:
+                r = exchange.order(coin, tp_side, tp_size, limit_px,
+                               {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
+                               reduce_only=True)
+                break
+            except Exception as _e:
+                last_err = _e
+                err_str = str(_e).lower()
+                if '429' in err_str or 'rate' in err_str or 'timeout' in err_str or 'connection' in err_str:
+                    backoff = 0.5 * (3 ** attempt)
+                    log(f"{coin} TP attempt {attempt+1} hit transient err ({_e}) — retry in {backoff:.1f}s")
+                    time.sleep(backoff)
+                else:
+                    log(f"{coin} TP attempt {attempt+1} non-transient err: {_e}")
+                    break
+        if r is None:
+            log(f"{coin} NATIVE TP FAILED after 4 attempts, last err: {last_err}")
+            return None
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
         if 'error' in status:
             log(f"{coin} NATIVE TP REJECTED: {status['error']} (size={tp_size}, trigger={trigger_px})")
