@@ -4123,24 +4123,23 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
     # if not signal_persistence.check(coin, sig, bar_ts): return
 
-    # Confidence scoring: 0-100 → sizing multiplier (0.5x / 1.0x / 1.5x / 2.0x)
+    # Confidence scoring: 0-100 → sizing multiplier (regime-conditional floor)
     # OOS: every score tier profitable, use as SIZING not filter. Every signal trades.
     try:
         btc_state = btc_correlation.get_state()
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
-        size_mult = confidence.size_multiplier(conf_score)
-        # CONVICTION FLOOR: size_multiplier returns 0.0 for conf<40. Skip trade
-        # entirely rather than attempting a 0-size order. This pivots from "every
-        # signal trades with size scaled by conf" to "only meaningful-conviction
-        # signals trade, each at meaningful size".
+        # Pass current regime so floor adapts: 30 in trending, 15 in chop
+        import regime_detector as _regdet
+        cur_regime = _regdet.get_regime()
+        size_mult = confidence.size_multiplier(conf_score, cur_regime)
         if size_mult <= 0.0:
-            log(f"{coin} {sig} SKIP: conf={conf_score} below conviction floor {conf_breakdown}")
+            log(f"{coin} {sig} SKIP: conf={conf_score} below conviction floor (regime={cur_regime}) {conf_breakdown}")
             return
         # Adaptive risk: per-coin × per-hour × per-side rolling WR multipliers
         adapt = adaptive_mult(coin, sig, state)
         risk_mult = risk_mult * size_mult * adapt
-        log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} {conf_breakdown}")
+        log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} regime={cur_regime} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
         conf_score = 0
@@ -4731,9 +4730,11 @@ def main():
                                     # needs a sig string). It maps to direction-aware scoring.
                                     wh_conf, wh_conf_brk = confidence.score(
                                         candles_for_gate, [], coin, side_str, _btc_d)
-                                    wh_size_mult = confidence.size_multiplier(wh_conf)
+                                    import regime_detector as _regdet2
+                                    _cur_reg = _regdet2.get_regime()
+                                    wh_size_mult = confidence.size_multiplier(wh_conf, _cur_reg)
                                     if wh_size_mult <= 0.0:
-                                        log(f"WEBHOOK {coin} {side_str} SKIP: conf={wh_conf} below conviction floor {wh_conf_brk}")
+                                        log(f"WEBHOOK {coin} {side_str} SKIP: conf={wh_conf} below conviction floor (regime={_cur_reg}) {wh_conf_brk}")
                                         wh_count += 1; continue
                                 except Exception as _ce:
                                     log(f"WEBHOOK {coin} conf err: {_ce} — allowing at 1.0x")
