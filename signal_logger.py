@@ -167,3 +167,123 @@ def start_trim_daemon():
             trim_log()
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
+
+
+# ═══════════════════════════════════════════════════════
+# CALIBRATION ANALYZER — extends existing signal_logger.
+# Reads the jsonl at LOG_PATH and produces reliability curve
+# + Brier score + per-bucket expectancy. Zero new infrastructure.
+# ═══════════════════════════════════════════════════════
+
+def calibration_report():
+    """Bucket trades by conf_score and compute calibration metrics."""
+    if not os.path.exists(LOG_PATH):
+        return {'n': 0, 'error': 'no log data'}
+
+    # Build signal->outcome join by (coin, bar_ts)
+    signals = {}
+    outcomes = {}
+    try:
+        with open(LOG_PATH) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get('type') == 'outcome':
+                    key = (r.get('coin'), r.get('bar_ts'))
+                    outcomes[key] = r
+                else:
+                    key = (r.get('coin'), r.get('bar_ts'))
+                    signals[key] = r
+    except Exception as e:
+        return {'error': str(e)}
+
+    # Buckets
+    buckets = {
+        '0-29':   {'n': 0, 'wins': 0, 'pnl_sum': 0, 'conf_sum': 0},
+        '30-49':  {'n': 0, 'wins': 0, 'pnl_sum': 0, 'conf_sum': 0},
+        '50-64':  {'n': 0, 'wins': 0, 'pnl_sum': 0, 'conf_sum': 0},
+        '65-79':  {'n': 0, 'wins': 0, 'pnl_sum': 0, 'conf_sum': 0},
+        '80+':    {'n': 0, 'wins': 0, 'pnl_sum': 0, 'conf_sum': 0},
+    }
+
+    brier_sum = 0
+    brier_n = 0
+    joined = 0
+
+    for key, sig in signals.items():
+        out = outcomes.get(key)
+        if not out: continue
+        joined += 1
+        conf = sig.get('conf_score') or sig.get('conf') or 0
+        if conf is None: conf = 0
+        try: conf = float(conf)
+        except Exception: continue
+        win = bool(out.get('win'))
+        pnl = out.get('pnl_pct', 0)
+
+        # Brier: predicted prob = conf/100
+        predicted = conf / 100.0
+        actual = 1.0 if win else 0.0
+        brier_sum += (predicted - actual) ** 2
+        brier_n += 1
+
+        if conf < 30: bkey = '0-29'
+        elif conf < 50: bkey = '30-49'
+        elif conf < 65: bkey = '50-64'
+        elif conf < 80: bkey = '65-79'
+        else: bkey = '80+'
+        b = buckets[bkey]
+        b['n'] += 1
+        if win: b['wins'] += 1
+        b['pnl_sum'] += pnl
+        b['conf_sum'] += conf
+
+    # Compute calibration
+    report = {}
+    for bkey, b in buckets.items():
+        if b['n'] == 0:
+            report[bkey] = {'n': 0}
+            continue
+        observed_wr = b['wins'] / b['n']
+        avg_conf = b['conf_sum'] / b['n']
+        predicted_wr = avg_conf / 100.0
+        delta = observed_wr - predicted_wr
+        status = 'calibrated'
+        if delta > 0.10: status = 'underconfident'
+        elif delta < -0.10: status = 'overconfident'
+        avg_pnl = b['pnl_sum'] / b['n']
+        # Expectancy in % equity terms (already in pnl_pct)
+        report[bkey] = {
+            'n': b['n'],
+            'observed_wr': round(observed_wr, 3),
+            'predicted_wr': round(predicted_wr, 3),
+            'delta': round(delta, 3),
+            'status': status,
+            'avg_pnl_pct': round(avg_pnl, 3),
+            'avg_conf': round(avg_conf, 1),
+        }
+
+    brier = brier_sum / brier_n if brier_n else None
+
+    # Mispriced zones
+    mispriced = []
+    for bkey, r in report.items():
+        if r.get('n', 0) < 10: continue
+        if r.get('status') == 'overconfident':
+            mispriced.append({'bucket': bkey, 'issue': 'raise floor — overconfident',
+                              'delta': r['delta']})
+        elif r.get('status') == 'underconfident':
+            mispriced.append({'bucket': bkey, 'issue': 'boost size — underconfident',
+                              'delta': r['delta']})
+
+    return {
+        'joined_trades': joined,
+        'brier_score': round(brier, 4) if brier is not None else None,
+        'interpretation': (
+            'brier 0.0=perfect, 0.15-0.20=well-calibrated, 0.25=random, >0.22=meaningless'
+        ),
+        'by_bucket': report,
+        'mispriced_zones': mispriced,
+    }

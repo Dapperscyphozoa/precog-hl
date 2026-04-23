@@ -1682,6 +1682,17 @@ def path_dep_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/calibration', methods=['GET'])
+def calibration_status():
+    """Conviction calibration — reliability curve + Brier score + per-bucket expectancy.
+    Reads existing signal_logger jsonl. No new data source."""
+    try:
+        if not _SL_OK or _signal_logger is None:
+            return jsonify({'error': 'signal_logger not loaded'}), 503
+        return jsonify(_signal_logger.calibration_report())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/reflexivity', methods=['GET'])
 def reflexivity_status():
     """Reflexivity detector — crowding + move position + echo scoring.
