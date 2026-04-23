@@ -77,10 +77,10 @@ SEVENTY_79 = {}
 
 # Per-tier sizing (OOS-validated 15m, 2026-04-23)
 TIER_SIZING = {
-    'PURE':       {'leverage': 15, 'risk_pct': 0.02},
-    'NINETY_99':  {'leverage': 12, 'risk_pct': 0.015},
-    'EIGHTY_89':  {'leverage': 10, 'risk_pct': 0.01},
-    'SEVENTY_79': {'leverage': 10, 'risk_pct': 0.01},
+    'PURE':       {'leverage': 15, 'risk_pct': 0.005},
+    'NINETY_99':  {'leverage': 12, 'risk_pct': 0.005},
+    'EIGHTY_89':  {'leverage': 10, 'risk_pct': 0.005},
+    'SEVENTY_79': {'leverage': 10, 'risk_pct': 0.005},
 }
 
 ELITE_MODE = True
