@@ -1,22 +1,25 @@
 """Multi-timeframe context cache.
 
-Provides per-coin bias on 1h and 4h timeframes for use as a confluence gate
-on top of 15m signal engines. 15m is the entry trigger, 1h defines the
-trade thesis, 4h confirms the regime.
+Provides per-coin bias on 30m and 1h timeframes for use as a confluence gate
+on top of 15m signal engines. 15m is the entry trigger, 30m + 1h define
+the trend context for that trigger TF.
 
-Why this matters: the 51-trade audit (2026-04-22) showed 100% of dust-swept
-outcomes within ±1% of entry. The bot was trading 15m micro-reversals with
-no higher-timeframe context. Counter-trend shorts on 15m into a 4h bull
-structure were guaranteed losers. MTF confluence is the strategic fix.
+Why 30m/1h (not 1h/4h): 2026-04-22. A 15m trigger with 4h filter is a
+16x TF mismatch — 4h holds a bullish bias for hours after intraday
+reversals, causing the bot to stack longs into 15m pullbacks of a
+4h-still-up regime. Correct hierarchy for a 15m trigger: trend filter
+at 2x-4x the trigger TF (= 30m and 1h). This keeps the filter
+responsive to the same drift the bot is trading.
 
 API:
   get_bias(coin, interval) -> ('up', 'down', 'neutral', dict_details)
-  aligned(coin, side) -> (bool, str)  # both 1h AND 4h agree with side
+  aligned(coin, side) -> (bool, str, float)  # 30m AND 1h confluence
+  conviction_mult(coin, side) -> (float, dict)  # sizing boost if aligned
 
 Implementation:
-- HL candleSnapshot API for 1h/4h (same as regime_detector.py)
+- HL candleSnapshot API for 30m/1h
 - 5-minute cache per (coin, interval)
-- EMA20 bias classifier with 0.3% buffer for neutral zone
+- EMA20 bias classifier with 1% buffer for neutral zone
 - Fails open on API/data error (returns neutral so trade isn't blocked by infra)
 """
 import time
@@ -46,6 +49,7 @@ _CONV_MAX_DIST = float(os.environ.get('MTF_CONVICTION_MAX_DIST', '0.025'))
 # Interval → (bars to fetch, bar duration in ms)
 _INTERVAL_MS = {
     '15m': 15 * 60 * 1000,
+    '30m': 30 * 60 * 1000,
     '1h': 60 * 60 * 1000,
     '4h': 4 * 60 * 60 * 1000,
 }
@@ -114,34 +118,34 @@ def get_bias(coin, interval='1h'):
         return 'neutral', {'err': str(e)}
 
 def aligned(coin, side):
-    """Check 15m signal `side` ('BUY'/'SELL') against 1h + 4h bias.
+    """Check 15m signal `side` ('BUY'/'SELL') against 30m + 1h bias.
+
+    2026-04-22: Changed from 1h+4h to 30m+1h. A 15m trigger with a 4h
+    filter was structurally mismatched — 4h held a bullish bias for
+    hours after intraday reversals, causing the bot to keep taking
+    longs into 15m pullbacks of a 4h-still-up regime. Correct hierarchy
+    for 15m trades: trend filter at 2x-4x trigger TF = 30m + 1h.
 
     Returns (ok: bool, detail: str, size_mult: float).
       ok=True, size_mult=1.0: at least one HTF favors or both neutral
       ok=True, size_mult=PARTIAL_MULT: exactly one HTF opposes, other neutral/favors
       ok=False: BOTH HTFs oppose (hard block)
 
-    Rationale: hard-blocking on any single HTF opposition was too restrictive
-    in strong regimes (BTC/ETH trending +2% → every 15m short blocked). But
-    allowing full-size trade into even partial HTF opposition gave back the
-    bleed we just fixed. Compromise: accept a partial-opposition trade at
-    reduced size so we measure edge without full exposure.
-
     Env override: MTF_PARTIAL_SIZE=0.3 (default 30% size on partial mismatch).
     """
+    bias_30m, d_30m = get_bias(coin, '30m')
     bias_1h, d_1h = get_bias(coin, '1h')
-    bias_4h, d_4h = get_bias(coin, '4h')
     needed = 'up' if side == 'BUY' else 'down'
     opposite = 'down' if needed == 'up' else 'up'
+    op_30m = bias_30m == opposite
     op_1h = bias_1h == opposite
-    op_4h = bias_4h == opposite
     partial_mult = float(os.environ.get('MTF_PARTIAL_SIZE', '0.3'))
-    if op_1h and op_4h:
-        return False, f"BOTH HTFs oppose {side}: 1h={bias_1h} 4h={bias_4h}", 0.0
-    if op_1h or op_4h:
-        which = '1h' if op_1h else '4h'
-        return True, f"partial: {which}={opposite} opposes {side}, other={bias_1h if which=='4h' else bias_4h} (size_mult={partial_mult})", partial_mult
-    return True, f"1h={bias_1h} 4h={bias_4h} aligned_with={side}", 1.0
+    if op_30m and op_1h:
+        return False, f"BOTH HTFs oppose {side}: 30m={bias_30m} 1h={bias_1h}", 0.0
+    if op_30m or op_1h:
+        which = '30m' if op_30m else '1h'
+        return True, f"partial: {which}={opposite} opposes {side}, other={bias_1h if which=='30m' else bias_30m} (size_mult={partial_mult})", partial_mult
+    return True, f"30m={bias_30m} 1h={bias_1h} aligned_with={side}", 1.0
 
 def status():
     """Snapshot of cache for /mtf endpoint."""
@@ -155,7 +159,9 @@ def status():
     return {'cached': len(items), 'ttl_sec': _CACHE_TTL_SEC, 'neutral_buffer_pct': _NEUTRAL_BUF*100, 'entries': items}
 
 def conviction_mult(coin, side, max_mult=2.5):
-    """Return a sizing multiplier (1.0 to max_mult) based on 1h + 4h alignment strength.
+    """Return a sizing multiplier (1.0 to max_mult) based on 30m + 1h alignment strength.
+
+    2026-04-22: Changed from 1h+4h to 30m+1h to match aligned() fix.
 
     Called AFTER aligned() has already passed — here we only reward FAVORABLE
     alignment strength. A trade where both TFs are strongly aligned (at or
@@ -166,19 +172,20 @@ def conviction_mult(coin, side, max_mult=2.5):
       fav_dist within neutral buffer  → 0 score
       fav_dist at CONV_MAX (2.5% default) → 1.0 score (max)
 
-    Combined: 0.4 × score_1h + 0.6 × score_4h (4h weighted higher).
+    Combined: 0.5 × score_30m + 0.5 × score_1h (equal weighting — both
+    timeframes are close to the trigger TF, neither dominates).
     Multiplier: 1.0 + (max_mult − 1.0) × combined.
 
     Fail-soft: on any error, returns 1.0 (no sizing change).
     """
     try:
+        _, d30 = get_bias(coin, '30m')
         _, d1 = get_bias(coin, '1h')
-        _, d4 = get_bias(coin, '4h')
+        raw_30m_pct = d30.get('dist_pct', 0)
         raw_1h_pct = d1.get('dist_pct', 0)
-        raw_4h_pct = d4.get('dist_pct', 0)
         needed_sign = 1 if side == 'BUY' else -1
-        fav_1h = raw_1h_pct * needed_sign  # positive = favorable
-        fav_4h = raw_4h_pct * needed_sign
+        fav_30m = raw_30m_pct * needed_sign  # positive = favorable
+        fav_1h = raw_1h_pct * needed_sign
         # Score ramps from NEUTRAL_BUF_% up to CONV_MAX_DIST_%
         neutral_pct = _NEUTRAL_BUF * 100
         max_pct = _CONV_MAX_DIST * 100
@@ -187,13 +194,13 @@ def conviction_mult(coin, side, max_mult=2.5):
             excess = fav - neutral_pct
             if excess <= 0: return 0.0
             return min(1.0, excess / span)
+        score_30m = _score(fav_30m)
         score_1h = _score(fav_1h)
-        score_4h = _score(fav_4h)
-        combined = 0.4 * score_1h + 0.6 * score_4h
+        combined = 0.5 * score_30m + 0.5 * score_1h
         mult = 1.0 + (max_mult - 1.0) * combined
         return round(mult, 2), {
-            'score_1h': round(score_1h, 2), 'score_4h': round(score_4h, 2),
-            'fav_1h_pct': round(fav_1h, 3), 'fav_4h_pct': round(fav_4h, 3),
+            'score_30m': round(score_30m, 2), 'score_1h': round(score_1h, 2),
+            'fav_30m_pct': round(fav_30m, 3), 'fav_1h_pct': round(fav_1h, 3),
             'combined': round(combined, 2),
             'neutral_buf_pct': round(neutral_pct, 3),
             'conv_max_pct': round(max_pct, 3),
