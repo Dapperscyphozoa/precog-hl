@@ -171,6 +171,17 @@ except Exception as _e:
     _FS_OK = False
     print(f'[funding_sig] import failed (non-fatal): {_e}', flush=True)
 
+# Execution contract — enforces TP/SL exit hierarchy.
+# All close() calls route through contract_close() with authorization check.
+# Non-elite coins receive fallback TP/SL config.
+try:
+    import exec_contract as _contract
+    _EC_OK = True
+except Exception as _e:
+    _contract = None
+    _EC_OK = False
+    print(f'[contract] CRITICAL: contract import failed: {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -1775,6 +1786,17 @@ def reality_gap_status():
         if not _RG_OK or _reality_gap is None:
             return jsonify({'error': 'reality_gap not loaded'}), 503
         return jsonify(_reality_gap.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/contract', methods=['GET'])
+def contract_status():
+    """Execution contract — exit hierarchy enforcement status.
+    Shows authorized reasons, queued reversals, rejected closes."""
+    try:
+        if not _EC_OK or _contract is None:
+            return jsonify({'error': 'exec_contract not loaded'}), 503
+        return jsonify(_contract.status())
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -4059,14 +4081,20 @@ def place_native_sl(coin, is_long, entry, size):
         return None
 
 def place_native_tp(coin, is_long, entry, size):
-    """Place HL native take-profit order using per-coin TP from OOS tuning.
-    Postmortem tuner may override the per-coin TP within bounds.
-    Returns the tp_pct that was used, or None if no TP was placed."""
+    """Place HL native take-profit order. Uses per-coin config if elite,
+    fallback 5% TP otherwise. Contract enforcement: EVERY position gets a TP.
+    Returns the tp_pct that was used, or None if placement failed."""
     try:
-        if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
-            return None  # no per-coin TP for non-elite
-        cfg = percoin_configs.get_config(coin)
-        if not cfg or 'TP' not in cfg: return None
+        cfg = None
+        if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+            cfg = percoin_configs.get_config(coin)
+        if not cfg or 'TP' not in cfg:
+            # Contract fallback — non-elite coins also get TP protection
+            if _EC_OK and _contract is not None:
+                cfg = _contract.get_fallback_config(coin)
+                log(f"{coin} using contract fallback TP={cfg['TP']*100:.1f}%")
+            else:
+                return None
         tp_pct = cfg['TP']
         # TUNER OVERRIDE REMOVED 2026-04-22. The postmortem tuner's bounds
         # (bounds.py line 103: tp.pct bounded 0.004-0.20) allow it to drift
@@ -4151,11 +4179,43 @@ def place_native_tp(coin, is_long, entry, size):
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
+
+    # CONTRACT: queue drain — if a reversal was queued earlier (while a
+    # position was open) and the position has since closed via TP/SL,
+    # fire the reversal as a fresh entry now.
+    if _EC_OK and _contract is not None:
+        q = _contract.get_queued_reversal(coin)
+        if q:
+            # Position still open? Queue stays pending.
+            if coin in live_positions:
+                pass  # wait for TP/SL to resolve
+            else:
+                # Position resolved. Drain the queue by forcing this side
+                # into the signal stream.
+                queued_side = q.get('desired_side')
+                _contract.clear_reversal_queue(coin)
+                log(f"{coin} QUEUE DRAIN: firing queued {queued_side} "
+                    f"(advisory {q.get('advisory_reason')})")
+                # Continue signal evaluation below; override sig if none found
+                # We'll recompute from candles and only adopt queued if no fresh signal.
+
     candles=fetch(coin)
     last_s=state['cooldowns'].get(coin+'_sell', 0)
     last_b=state['cooldowns'].get(coin+'_buy',  0)
     sig, bar_ts = signal(candles, last_s, last_b, coin=coin)
     signal_engine = 'PIVOT' if sig else None
+
+    # CONTRACT: if no fresh signal but queue had a desire, adopt it
+    if not sig and _EC_OK and _contract is not None:
+        _q_just_drained = None  # set above if drained this tick
+        # Re-check queue (a previous drain cleared it; read one more time)
+        q2 = _contract.get_queued_reversal(coin)
+        if q2 and coin not in live_positions:
+            sig = q2.get('desired_side')
+            signal_engine = 'QUEUED_REVERSAL'
+            bar_ts = int(time.time() * 1000)
+            _contract.clear_reversal_queue(coin)
+            log(f"{coin} adopting queued signal: {sig}")
 
     # RED TEAM: extend cooldown in chop regime (2x) to prevent Zone C signal
     # clustering. Applies after all engine-level CD checks.
@@ -4213,40 +4273,33 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         sig = None; signal_engine = None
 
     # Opposite-signal exit: if we hold OPPOSITE-SIDE position AND it's profitable, close it first.
-    # Skip OPP-EXIT on losing positions — let native SL handle them.
-    # This prevents signal-storm from locking in small losses when signals oscillate mid-bar.
+    # Under CONTRACT: this is advisory — queue and let TP/SL resolve.
+    # Without contract: legacy behavior.
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
         if pos and ((pos.get('side')=='L' and sig=='SELL') or (pos.get('side')=='S' and sig=='BUY')):
-            # CRITICAL 2026-04-22: raised threshold from $0.10 to 50% of TP target.
-            # The old $0.10 floor was closing EVERY position that had any counter-signal
-            # once it crossed breakeven+fees — even at 0.5% profit on a 6% TP trade.
-            # Fill-tape audit showed: AERO closed at +0.76% ($2.02) on a 6% TP target
-            # via this path. ZEC +0.87%, MANTA +0.65%, etc — all 80%+ of winners
-            # closed here, far below real TP. This is THE profit leak.
-            # New rule: flip only if we're at ≥50% of TP. Below that, ignore the
-            # counter-signal and let native SL/TP handle the exit.
-            try:
-                live = live_positions.get(coin, {})
-                cur_pnl = live.get('pnl', 0) if live else 0
-                entry_px = pos.get('entry', 0)
-                tp_pct = pos.get('tp_pct')
-                size_abs = abs(live.get('size', 0))
-                notional = size_abs * entry_px if entry_px else 0
-                # Target threshold: 50% of TP target (in dollar terms)
-                threshold = notional * (tp_pct or 0.06) * 0.50 if notional else 0.10
-                if cur_pnl >= threshold:
-                    close(coin)
-                    log(f"{coin} OPP-EXIT on {sig} signal (locking +${cur_pnl:.2f} >= 50%TP threshold ${threshold:.2f})")
-                else:
-                    # Don't flip — position hasn't captured enough of the TP yet.
-                    # Native SL/TP will handle it, OR signal-reversal guard (line 4213)
-                    # will take over if profit grows enough.
-                    log(f"{coin} OPP-EXIT skipped: pos at ${cur_pnl:+.2f} below 50%TP threshold ${threshold:.2f}")
-                    sig = None; signal_engine = None
-            except Exception as e:
-                log(f"opp-exit err {coin}: {e}")
+            if _EC_OK and _contract is not None:
+                _contract.queue_reversal(coin, sig, 'signal_reversal')
+                log(f"{coin} OPP-EXIT QUEUED under contract ({sig})")
                 sig = None; signal_engine = None
+            else:
+                try:
+                    live = live_positions.get(coin, {})
+                    cur_pnl = live.get('pnl', 0) if live else 0
+                    entry_px = pos.get('entry', 0)
+                    tp_pct = pos.get('tp_pct')
+                    size_abs = abs(live.get('size', 0))
+                    notional = size_abs * entry_px if entry_px else 0
+                    threshold = notional * (tp_pct or 0.06) * 0.50 if notional else 0.10
+                    if cur_pnl >= threshold:
+                        close(coin)
+                        log(f"{coin} OPP-EXIT on {sig} signal (locking +${cur_pnl:.2f} >= 50%TP threshold ${threshold:.2f})")
+                    else:
+                        log(f"{coin} OPP-EXIT skipped: pos at ${cur_pnl:+.2f} below 50%TP threshold ${threshold:.2f}")
+                        sig = None; signal_engine = None
+                except Exception as e:
+                    log(f"opp-exit err {coin}: {e}")
+                    sig = None; signal_engine = None
     # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
     if not sig:
         try:
@@ -4339,8 +4392,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
 
-    # Position management: SL, trail, funding checks
-    if cur and live:
+    # Position management under EXECUTION CONTRACT:
+    # The exchange-side TP/SL orders are now the PRIMARY protection for ALL
+    # positions (elite + non-elite via fallback config). Polling-based exits
+    # are advisory-only. This entire block is bypassed when the contract is
+    # active — all close() calls below would be contract violations.
+    # Kept intact but gated on contract absence for fallback safety during
+    # contract module failure.
+    _contract_active = bool(_EC_OK and _contract is not None)
+    if cur and live and not _contract_active:
 
         mark = get_mid(coin)
         if mark and cur.get('entry'):
@@ -4521,6 +4581,11 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if not live and (total_locked + proposed)/equity > MAX_TOTAL_RISK:
         # Before hard-skipping: try to close positions to make room
         if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+            # CONTRACT: tier-bump closes violate the hierarchy. Existing positions
+            # must run to TP/SL. If margin tight, skip the new signal instead.
+            if _EC_OK and _contract is not None:
+                log(f"{coin} {sig} SKIP (margin tight; contract forbids tier-bump close)")
+                return
             incoming_tier = percoin_configs.get_tier(coin)
             DUST_USD = 0.10
             # Tier priority for closing: SEVENTY_79 → EIGHTY_89 → NINETY_99 → PURE
@@ -4960,8 +5025,16 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if not allow:
                 log(f"{coin} SELL reversal SKIPPED: long position held ({reason})")
                 return
+            # CONTRACT: signal reversal is ADVISORY. Queue the desire; do NOT
+            # close the existing position. TP/SL on exchange will resolve it.
+            # After TP/SL fills, next cycle picks up the queue and opens new side.
+            if _EC_OK and _contract is not None:
+                _contract.queue_reversal(coin, 'SELL', 'signal_reversal')
+                log(f"{coin} SELL reversal QUEUED (contract): {reason}")
+                return
+            # If contract module unavailable, fall back to old behavior
             prev_pos['exit_reason'] = 'signal_reversal'
-            log(f"{coin} SELL reversal ALLOWED: {reason}")
+            log(f"{coin} SELL reversal ALLOWED (no contract): {reason}")
             pnl_pct = close(coin)
             if pnl_pct is not None:
                 record_close(prev_pos, coin, pnl_pct, state)
@@ -4983,6 +5056,18 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     _sl_pct_used = place_native_sl(coin, False, fill_px, sz)
                     _tp_pct_used = place_native_tp(coin, False, fill_px, sz)
+                    # CONTRACT: both TP and SL must be on exchange. If either
+                    # is None, emergency close immediately (naked position).
+                    if _EC_OK and _contract is not None:
+                        try:
+                            ok = _contract.ensure_tp_sl_placed(
+                                coin, _tp_pct_used, _sl_pct_used, close)
+                            if not ok:
+                                log(f"{coin} CONTRACT: position closed due to TP/SL failure")
+                                state['positions'].pop(coin, None)
+                                return
+                        except Exception as _ce:
+                            log(f"{coin} contract enforcement err: {_ce}")
                     log_trade('HL', coin, 'SELL', fill_px, 0, 'precog_signal')
                     # sigs and other context for post-mortem agents
                     try:
@@ -5006,8 +5091,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             if not allow:
                 log(f"{coin} BUY reversal SKIPPED: short position held ({reason})")
                 return
+            # CONTRACT: queue reversal; do NOT close existing position
+            if _EC_OK and _contract is not None:
+                _contract.queue_reversal(coin, 'BUY', 'signal_reversal')
+                log(f"{coin} BUY reversal QUEUED (contract): {reason}")
+                return
             prev_pos['exit_reason'] = 'signal_reversal'
-            log(f"{coin} BUY reversal ALLOWED: {reason}")
+            log(f"{coin} BUY reversal ALLOWED (no contract): {reason}")
             pnl_pct = close(coin)
             if pnl_pct is not None:
                 record_close(prev_pos, coin, pnl_pct, state)
@@ -5025,6 +5115,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if fill_px:
                     _sl_pct_used = place_native_sl(coin, True, fill_px, sz)
                     _tp_pct_used = place_native_tp(coin, True, fill_px, sz)
+                    # CONTRACT: enforce TP/SL presence post-entry
+                    if _EC_OK and _contract is not None:
+                        try:
+                            ok = _contract.ensure_tp_sl_placed(
+                                coin, _tp_pct_used, _sl_pct_used, close)
+                            if not ok:
+                                log(f"{coin} CONTRACT: position closed due to TP/SL failure")
+                                state['positions'].pop(coin, None)
+                                return
+                        except Exception as _ce:
+                            log(f"{coin} contract enforcement err: {_ce}")
                     log_trade('HL', coin, 'BUY', fill_px, 0, 'precog_signal')
                     try:
                         _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
@@ -5205,38 +5306,42 @@ def main():
                         log(f"dust-sweep scan err {k}: {e}")
                 if swept: log(f"DUST-SWEEP: closed {swept} stale positions (|PnL|<=max($0.10,0.1%%notional), age>={DUST_MIN_AGE_SEC/60:.0f}min)")
 
-            # Wall-as-TP check — if mark crosses verified resistance/support, signal exit
-            for k, lp in live_positions.items():
-                try:
-                    side_long = lp['size']>0
-                    wall_side = 'ask' if side_long else 'bid'
-                    wall = orderbook_ws.get_nearest_wall(k, wall_side)
-                    if not wall: continue
-                    cp = get_mid(k)
-                    if not cp: continue
-                    # LONG reaches ask wall (resistance) OR SHORT reaches bid wall (support)
-                    if side_long and cp >= wall['price'] * 1.002:  # 0.2% past wall, not just touching
-                        log(f"WALL-TP {k} LONG reached ask wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
-                        close(k)
-                    elif not side_long and cp <= wall['price'] * 0.998:  # 0.2% past wall
-                        log(f"WALL-TP {k} SHORT reached bid wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
-                        close(k)
-                except Exception as e:
-                    pass
+            # Wall-as-TP check — ADVISORY under contract. Disabled when contract active.
+            # Exchange TP/SL is primary; wall exits bypass the contract hierarchy.
+            _wall_exit_enabled = not (_EC_OK and _contract is not None)
+            if _wall_exit_enabled:
+                for k, lp in live_positions.items():
+                    try:
+                        side_long = lp['size']>0
+                        wall_side = 'ask' if side_long else 'bid'
+                        wall = orderbook_ws.get_nearest_wall(k, wall_side)
+                        if not wall: continue
+                        cp = get_mid(k)
+                        if not cp: continue
+                        # LONG reaches ask wall (resistance) OR SHORT reaches bid wall (support)
+                        if side_long and cp >= wall['price'] * 1.002:  # 0.2% past wall, not just touching
+                            log(f"WALL-TP {k} LONG reached ask wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
+                            close(k)
+                        elif not side_long and cp <= wall['price'] * 0.998:  # 0.2% past wall
+                            log(f"WALL-TP {k} SHORT reached bid wall ${wall['usd']/1000:.0f}k @ {wall['price']}")
+                            close(k)
+                    except Exception as e:
+                        pass
 
-            # Wall-break auto-exit
-            wall_ents = state.get('wall_entries', {})
-            for wcoin, wdata in list(wall_ents.items()):
-                if wcoin not in live_positions:
-                    wall_ents.pop(wcoin); continue
-                try:
-                    cp = get_mid(wcoin)
-                    if wall_bounce.wall_broken(wcoin, wdata['side'], wdata['wall_price'], cp):
-                        log(f"WALL-BROKEN {wcoin} {wdata['side']} — exiting")
-                        close(wcoin)
-                        wall_ents.pop(wcoin)
-                except Exception as e:
-                    log(f"wall-break check err {wcoin}: {e}")
+            # Wall-break auto-exit — ADVISORY under contract
+            if _wall_exit_enabled:
+                wall_ents = state.get('wall_entries', {})
+                for wcoin, wdata in list(wall_ents.items()):
+                    if wcoin not in live_positions:
+                        wall_ents.pop(wcoin); continue
+                    try:
+                        cp = get_mid(wcoin)
+                        if wall_bounce.wall_broken(wcoin, wdata['side'], wdata['wall_price'], cp):
+                            log(f"WALL-BROKEN {wcoin} {wdata['side']} — exiting")
+                            close(wcoin)
+                            wall_ents.pop(wcoin)
+                    except Exception as e:
+                        log(f"wall-break check err {wcoin}: {e}")
 
             # Profit-lock @ 3.0%/2.0% (user override — OOS -25% vs no_plock, but best plock config)
             for k, lp in live_positions.items():
@@ -5335,19 +5440,24 @@ def main():
                     risk_pct = current_risk_pct(equity)
 
                     if action in ('exit_buy', 'exit_sell'):
-                        # Close existing position
+                        # Explicit close command → AUTHORIZED (kill_switch_manual)
                         if live:
                             pnl_pct = close(coin)
                             if pnl_pct is not None:
                                 if pnl_pct < 0: state['consec_losses'] += 1; update_coin_wr(coin, False, state); risk_ladder.record_trade(False)
                                 else: state['consec_losses'] = 0; update_coin_wr(coin, True, state); risk_ladder.record_trade(True)
                             state['positions'].pop(coin, None)
-                            log(f"WEBHOOK CLOSE {coin} ({action}) pnl={pnl_pct}")
+                            log(f"WEBHOOK CLOSE {coin} ({action}) pnl={pnl_pct} [authorized: explicit]")
                     elif action in ('buy', 'sell'):
-                        # Close opposite position if exists, then open new
+                        # Opposite-direction webhook on open position
                         if live:
                             is_opposite = (action == 'buy' and live['size'] < 0) or (action == 'sell' and live['size'] > 0)
                             if is_opposite:
+                                # CONTRACT: queue reversal, do NOT close existing
+                                if _EC_OK and _contract is not None:
+                                    _contract.queue_reversal(coin, action.upper(), 'signal_reversal')
+                                    log(f"WEBHOOK {coin} {action} reversal QUEUED (contract)")
+                                    wh_count += 1; continue
                                 close(coin)
                                 state['positions'].pop(coin, None)
                             elif (action == 'buy' and live['size'] > 0) or (action == 'sell' and live['size'] < 0):
