@@ -671,12 +671,14 @@ def status():
     m['cycle_stale'] = (time.time() - last_ts > _RECONCILER_STALE_SEC) if last_ts else True
     m['stall_emergency'] = (time.time() - last_ts > _RECONCILER_EMERGENCY_STALL_SEC) if last_ts else False
     m['thresholds'] = {
-        'drift_warn': _DRIFT_WARN_THRESHOLD,
         'drift_degraded': _DRIFT_DEGRADED_THRESHOLD,
         'drift_unsafe': _DRIFT_UNSAFE_THRESHOLD,
         'drift_critical_cycles': _DRIFT_CRITICAL_CYCLES,
         'cb_error_rate_trip': _CB_ERROR_RATE_TRIP,
         'stall_sec': _RECONCILER_STALE_SEC,
         'emergency_stall_sec': _RECONCILER_EMERGENCY_STALL_SEC,
+        'intent_backlog_pause': _INTENT_BACKLOG_PAUSE_THRESHOLD,
+        'interval_sec_normal': _INTERVAL_SEC,
+        'interval_sec_degraded': _INTERVAL_SEC_DEGRADED,
     }
     return m
