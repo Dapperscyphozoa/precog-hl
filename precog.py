@@ -5663,37 +5663,79 @@ def close(coin, state_ref=None, reason=None):
 
 
 def _close_direct(coin, state_ref=None):
-    """Direct market-close bypass — the legacy close logic, without shim routing.
+    """Direct market-close with escalating slip + fill verification.
+
+    Escalation: 0.5% -> 1.5% -> 3.0% slip (IOC each). First attempt is tight
+    for clean fills; wider attempts handle fast moves where tight IOC gets
+    skipped by the matching engine.
+
+    Returns pct (positive on success) or None on complete failure.
 
     CRITICAL: only callers are (a) close() in observe mode, (b) reconciler's
-    execute_close_fn in authoritative mode. Never call this from strategy/process
-    logic — doing so bypasses the intent queue and the reconciler's authority.
+    execute_close_fn in authoritative mode. Strategy/process logic must NEVER
+    call this — use close() which routes through the intent queue.
     """
     live = get_all_positions_live(force=True).get(coin)
     if not live: return None
-    is_buy=live['size']<0; size=abs(live['size']); px=get_mid(coin)
-    if not px: return None
+    is_buy = live['size'] < 0   # close direction = opposite of position
+    size = abs(live['size'])
+    entry = live['entry']
     size = round_size(coin, size)
-    slip = round_price(coin, px * (1.005 if is_buy else 0.995))
-    try:
-        r=exchange.order(coin,is_buy,size,slip,{'limit':{'tif':'Ioc'}},reduce_only=True)
-        status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
-        if 'error' in status:
-            log(f"CLOSE {coin} FAILED: {status['error']}"); return None
-        entry = live['entry']
-        pct = ((px-entry)/entry*100) if live['size']>0 else ((entry-px)/entry*100)
-        pnl_usd = live['pnl']
-        log(f"CLOSE {coin} {size}@{slip} | entry={entry} exit={px} | {pct:+.2f}% | ${pnl_usd:+.3f}")
-        log_trade('HL', coin, 'CLOSE', px, pnl_usd, 'close')
-        cancel_trigger_orders(coin)
-        try:
-            import monitor
-            monitor.record_close(coin, pct/100, pnl_usd, 0, 'close')
-        except Exception: pass
-        return pct
-    except Exception as e:
-        log(f"close err {coin}: {e}")
+    if size <= 0:
+        log(f"CLOSE {coin} SKIP: size rounded to 0")
         return None
+
+    # Escalating slip tiers
+    SLIP_TIERS = [0.005, 0.015, 0.030]  # 0.5%, 1.5%, 3.0%
+    for attempt, slip_pct in enumerate(SLIP_TIERS, 1):
+        px = get_mid(coin)
+        if not px:
+            log(f"CLOSE {coin} no mid px on attempt {attempt}")
+            continue
+        slip = round_price(coin, px * (1 + slip_pct) if is_buy else px * (1 - slip_pct))
+        try:
+            r = exchange.order(coin, is_buy, size, slip,
+                               {'limit':{'tif':'Ioc'}}, reduce_only=True)
+            status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+
+            if 'error' in status:
+                log(f"CLOSE {coin} attempt {attempt}/{len(SLIP_TIERS)} @ slip={slip_pct*100:.1f}% "
+                    f"rejected: {status['error']}")
+                continue  # try next tier
+
+            # Verify fill actually happened (not just 'resting' or 'canceled')
+            if 'filled' not in status:
+                # IOC was accepted but didn't match. Try wider.
+                log(f"CLOSE {coin} attempt {attempt}/{len(SLIP_TIERS)} @ slip={slip_pct*100:.1f}% "
+                    f"no fill (status={status})")
+                continue
+
+            # Success
+            fill_info = status['filled']
+            try:
+                fill_px = float(fill_info.get('avgPx', px))
+            except Exception:
+                fill_px = px
+            pct = ((fill_px - entry) / entry * 100) if live['size'] > 0 \
+                  else ((entry - fill_px) / entry * 100)
+            pnl_usd = live['pnl']
+            log(f"CLOSE {coin} FILLED attempt {attempt}/{len(SLIP_TIERS)} @ slip={slip_pct*100:.1f}% "
+                f"size={size} px={fill_px} | entry={entry} | {pct:+.2f}% | ${pnl_usd:+.3f}")
+            log_trade('HL', coin, 'CLOSE', fill_px, pnl_usd, 'close')
+            cancel_trigger_orders(coin)
+            try:
+                import monitor
+                monitor.record_close(coin, pct/100, pnl_usd, 0, 'close')
+            except Exception: pass
+            return pct
+        except Exception as e:
+            log(f"CLOSE {coin} attempt {attempt}/{len(SLIP_TIERS)} err: {e}")
+            continue
+
+    # All tiers exhausted
+    log(f"CLOSE {coin} FAILED: all {len(SLIP_TIERS)} slip tiers exhausted "
+        f"(0.5%/1.5%/3%) — position remains open, reconciler will retry")
+    return None
 
 # ═══════════════════════════════════════════════════════
 # STEP 1 — close_trade() defined, NOT YET WIRED.
