@@ -8189,8 +8189,10 @@ def lifecycle_emergency():
 
 @app.route('/lifecycle/cleanup', methods=['POST', 'GET'])
 def lifecycle_cleanup():
-    """One-time ledger cleanup: dedupe duplicate open trade_ids per coin.
-    Keeps earliest (lowest event_seq), closes others with reason='reconcile_duplicate_entry'.
+    """One-time ledger cleanup. Two passes:
+      1. Dedupe duplicate open trade_ids per coin (keep earliest, close rest)
+      2. Close ledger-open trades whose coin is NOT on exchange (flushes Step 2 bug residue)
+
     Requires token.
     """
     from flask import request
@@ -8200,10 +8202,21 @@ def lifecycle_cleanup():
     if not (_LEDGER_OK and _ledger):
         return jsonify({'err': 'ledger_unavailable'}), 503
     try:
-        result = _ledger.dedupe_open_trades()
-        log(f"[lifecycle/cleanup] dedupe run: coins_affected={result['coins_affected']} "
-            f"dupes_closed={result['dupes_closed']}")
-        return jsonify(result)
+        dedup = _ledger.dedupe_open_trades()
+
+        # Get current exchange coins from snapshot
+        missing = {'closed_missing': 0, 'details': []}
+        if _SNAPSHOT_OK and _snapshot:
+            snap = _snapshot.get()
+            if not snap.get('stale'):
+                exch_coins = list(snap.get('positions', {}).keys())
+                missing = _ledger.close_missing_on_exchange(exch_coins)
+            else:
+                missing['err'] = 'snapshot_stale — skipped missing-close pass'
+
+        log(f"[lifecycle/cleanup] dedupe coins={dedup['coins_affected']} dupes={dedup['dupes_closed']} "
+            f"missing_closed={missing.get('closed_missing', 0)}")
+        return jsonify({'dedupe': dedup, 'missing_closes': missing})
     except Exception as e:
         return jsonify({'err': str(e)}), 500
 
