@@ -3104,13 +3104,11 @@ MAX_POSITIONS = int(os.environ.get('MAX_POSITIONS', '10'))  # 10 default (was 25
                     # cost ~$0.03/trade with >500x headroom). MAX_TOTAL_RISK
                     # at 92% remains the real safety ceiling — position count
                     # is now advisory, not the primary risk gate.
-MAX_SAME_SIDE = 12  # 2026-04-22: raised 8→12. At 8 the cap was blocking 10+
-                    # signals/tick during active regimes, so the bot couldn't
-                    # even respond to market changes. 12 still gives correlation
-                    # protection (14 longs was the danger zone) while allowing
-                    # normal signal flow. If drawdown circuit breaker trips,
-                    # it shuts off same-side adds regardless — so 12 is safe.
-MAX_TOTAL_RISK = 0.92    # 8% reserve — unchanged, this is the real safety net
+MAX_SAME_SIDE = int(os.environ.get('MAX_SAME_SIDE', '25'))  # 2026-04-24: raised 12→25
+                    # during data-gathering phase. HTF alignment multiplier +
+                    # contract + invariants make the old same-side protection
+                    # redundant — drawdown circuit breaker is the real safety.
+MAX_TOTAL_RISK = float(os.environ.get('MAX_TOTAL_RISK', '0.97'))  # 3% reserve for data mode
 STOP_LOSS_PCT = 0.02      # 2% — tuner winner config
 BTC_VOL_THRESHOLD = 0.03
 
