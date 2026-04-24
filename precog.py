@@ -263,6 +263,27 @@ except Exception as _e:
     _SNAPSHOT_OK = False
     print(f'[snapshot] exchange_snapshot import failed: {_e}', flush=True)
 
+# ─────────────────────────────────────────────────────────
+# STEP 3 — Intent queue + authoritative reconciler
+# Ships with RECONCILER_AUTHORITATIVE=0 default (observe mode).
+# Flip to 1 via env var to enable sole-writer mode.
+# ─────────────────────────────────────────────────────────
+try:
+    import intent_queue as _intents
+    _INTENTS_OK = True
+except Exception as _e:
+    _intents = None
+    _INTENTS_OK = False
+    print(f'[intents] intent_queue import failed: {_e}', flush=True)
+
+try:
+    import lifecycle_reconciler as _reconciler
+    _RECONCILER_OK = True
+except Exception as _e:
+    _reconciler = None
+    _RECONCILER_OK = False
+    print(f'[reconciler] lifecycle_reconciler import failed: {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -5618,8 +5639,28 @@ def run_profit_management(state, live_positions):
             log(f"profit_mgmt err {coin}: {e}")
 
 
-def close(coin, state_ref=None):
-    """Returns realized pnl_pct for logging (FIX #11)."""
+def close(coin, state_ref=None, reason=None):
+    """Close position. Behavior depends on RECONCILER_AUTHORITATIVE env.
+
+    OBSERVE mode (default, RECONCILER_AUTHORITATIVE=0):
+        Legacy behavior — directly market-closes on exchange, returns pnl_pct.
+        Reconciler observes but doesn't execute.
+
+    AUTHORITATIVE mode (RECONCILER_AUTHORITATIVE=1):
+        Becomes a shim. Emits FORCE_CLOSE intent for the reconciler to resolve.
+        Returns None. All callers must treat close() as fire-and-forget.
+        Reconciler is the sole writer.
+    """
+    # STEP 3: shim routing
+    if os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1':
+        if _INTENTS_OK and _intents is not None:
+            tid = (state.get('positions', {}).get(coin) or {}).get('trade_id')
+            _intents.emit('FORCE_CLOSE', coin, trade_id=tid,
+                          reason=reason or 'legacy_close_shim')
+        # DO NOT execute — reconciler handles it.
+        return None
+
+    # LEGACY direct-execution path (observe mode)
     live = get_all_positions_live(force=True).get(coin)
     if not live: return None
     is_buy=live['size']<0; size=abs(live['size']); px=get_mid(coin)
@@ -6130,6 +6171,16 @@ def place_native_tp(coin, is_long, entry, size):
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
+
+    # STEP 3: reconciler halt flag — block new entries if drift is unsafe
+    if _RECONCILER_OK and _reconciler is not None:
+        try:
+            if _reconciler.is_halted():
+                # Hash gate: only log occasionally to avoid spam
+                if hash(coin + str(int(time.time() / 300))) % 10 == 0:
+                    log(f"{coin} LIFECYCLE HALT — reconciler drift ≥ 5%, blocking new entries")
+                return
+        except Exception: pass
 
     # EXECUTION CONTRACT v2: block new activity on halted coins.
     # Halt is set after emergency close from enforce_protection failure.
@@ -7323,6 +7374,30 @@ def main():
                 refresh_interval_sec=5,
             )
         except Exception as e: log(f"snapshot start err: {e}")
+
+    # STEP 3: start lifecycle reconciler (observe mode until RECONCILER_AUTHORITATIVE=1)
+    if _RECONCILER_OK and _reconciler is not None and _LEDGER_OK and _INTENTS_OK:
+        try:
+            def _execute_close_on_exchange(coin):
+                """Market-close a position. Returns fill_px or None.
+                ONLY used by reconciler in authoritative mode."""
+                try:
+                    pnl = close(coin)  # existing close() does market-close
+                    # Return mid as best-effort fill_px; reconciler will also try to read fill
+                    return get_mid(coin)
+                except Exception as e:
+                    log(f"[reconciler] execute_close err {coin}: {e}")
+                    return None
+            _reconciler.start(deps={
+                'ledger': _ledger,
+                'snapshot': _snapshot,
+                'intent_queue': _intents,
+                'close_trade_fn': close_trade,
+                'execute_close_fn': _execute_close_on_exchange,
+                'log_fn': log,
+                'state': state,
+            }, interval_sec=15)
+        except Exception as e: log(f"reconciler start err: {e}")
     try: orderbook_ws.start()
     except Exception as e: log(f"orderbook_ws err: {e}")
     try: liquidation_ws.start()
@@ -7948,10 +8023,13 @@ def tuner_log():
 
 @app.route('/lifecycle', methods=['GET'])
 def lifecycle_status():
-    """Step 1 scaffold — ledger + snapshot status.
-    Reconciler wiring happens in Step 3. Drift metric live from Step 1 for observation."""
+    """Step 3 — full lifecycle observability.
+    Shows ledger, snapshot, intent queue, reconciler state, drift metric, halt flag.
+    """
     ledger_stats = _ledger.stats() if _LEDGER_OK and _ledger else {'err': 'ledger_unavailable'}
     snap_stats = _snapshot.status() if _SNAPSHOT_OK and _snapshot else {'err': 'snapshot_unavailable'}
+    iq_stats = _intents.status() if _INTENTS_OK and _intents else {'err': 'intents_unavailable'}
+    rc_stats = _reconciler.status() if _RECONCILER_OK and _reconciler else {'err': 'reconciler_unavailable'}
 
     drift_pct = None
     drift_status = 'unknown'
@@ -7970,18 +8048,26 @@ def lifecycle_status():
         except Exception as _e:
             drift_status = f'err: {_e}'
 
+    halt = _reconciler.is_halted() if _RECONCILER_OK and _reconciler else False
+    authoritative = os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1'
+
     return jsonify({
-        'step': 1,
+        'step': 3,
+        'mode': 'authoritative' if authoritative else 'observe',
+        'halt_flag': halt,
         'ledger': ledger_stats,
         'snapshot': snap_stats,
+        'intents': iq_stats,
+        'reconciler': rc_stats,
         'drift': {
             'pct': round(drift_pct, 4) if drift_pct is not None else None,
             'status': drift_status,
             'ledger_open_count': ledger_stats.get('open_trades_count'),
             'exchange_open_count': exch_open_count,
         },
-        'reconciler_active': False,
-        'note': 'Step 1: ledger + snapshot scaffolded, reconciler NOT writing yet',
+        'note': ('AUTHORITATIVE: reconciler is sole writer. Legacy close() emits FORCE_CLOSE intent.'
+                 if authoritative else
+                 'OBSERVE: reconciler logs would-close decisions but does not execute. Legacy close() still active.'),
     })
 
 
