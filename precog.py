@@ -1894,10 +1894,7 @@ def invariants_status():
 
 @app.route('/audit/deep', methods=['GET'])
 def audit_deep():
-    """One-click deep audit over the past N hours (default 5).
-    Pulls HL fills, breaks down trades/WR/PnL/fees/per-coin/per-hour,
-    plus contract/invariants/shadow state. Returns JSON by default,
-    or HTML if ?format=html."""
+    """One-click deep audit over the past N hours (default 5)."""
     try:
         hours = float(flask_request.args.get('hours', '5'))
     except Exception:
@@ -2198,6 +2195,466 @@ a{{color:var(--acid)}}
     resp = Response(html, mimetype='text/html')
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return resp
+
+
+@app.route('/audit/elasticity', methods=['GET'])
+def audit_elasticity():
+    """Filter elasticity analysis.
+
+    Computes expectancy for each of: TAKEN (live fills), CAPACITY_REJECTED
+    (max_pos/margin/same_side), EDGE_REJECTED (conf/regime/whitelist/
+    correlation/funding/htf). Compares them to surface whether each filter
+    is removing bad trades (FVS < 0, correct) or destroying edge (FVS > 0).
+
+    Query params:
+      ?hours=24  (window for live fills comparison; shadow is all-time)
+      ?format=html or json
+    """
+    try:
+        try:
+            hours = float(flask_request.args.get('hours', '24'))
+        except Exception:
+            hours = 24.0
+        fmt = flask_request.args.get('format', 'json').lower()
+
+        import urllib.request as _ureq
+        from collections import defaultdict as _dd
+        import statistics as _stat
+
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - int(hours * 3600 * 1000)
+
+        # ─── TAKEN TRADES: HL fills ─────────────────────────────
+        taken_rmults = []       # R-multiples: pnl% / sl%
+        taken_pnl_pcts = []
+        try:
+            body = json.dumps({'type': 'userFills', 'user': WALLET}).encode()
+            req = _ureq.Request('https://api.hyperliquid.xyz/info', method='POST',
+                                data=body, headers={'Content-Type': 'application/json'})
+            with _ureq.urlopen(req, timeout=10) as resp:
+                fills = json.loads(resp.read())
+            closes = [f for f in fills
+                      if f.get('time', 0) >= cutoff and float(f.get('closedPnl', 0)) != 0]
+            # Approximate R = pnl_pct / sl_pct. Use fallback 2.5% SL if unknown.
+            DEFAULT_SL = 0.025
+            for c in closes:
+                pnl_usd = float(c.get('closedPnl', 0))
+                try:
+                    entry_px = float(c.get('px', 0))
+                    sz = abs(float(c.get('sz', 0)))
+                    notional = entry_px * sz
+                    if notional > 0:
+                        pnl_pct = pnl_usd / notional
+                        r_mult = pnl_pct / DEFAULT_SL
+                        taken_pnl_pcts.append(pnl_pct * 100)
+                        taken_rmults.append(r_mult)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # ─── SHADOW RESOLVED: rejected trades with outcomes ─────
+        shadow_by_reason = _dd(list)  # reason -> list of (pnl_pct, r_mult, outcome)
+        shadow_by_class = _dd(list)
+
+        if _SR_OK and _shadow_rej is not None:
+            try:
+                # Access internals directly for full resolved list
+                # This is idiomatic for this audit — status() truncates
+                with _shadow_rej._LOCK:
+                    resolved = list(_shadow_rej._RESOLVED)
+                for rec in resolved:
+                    outcome = rec.get('outcome')
+                    if outcome not in ('tp', 'sl'):  # skip timeouts for expectancy
+                        continue
+                    reason = rec.get('reason', 'unknown')
+                    cls = rec.get('rejection_class') or _shadow_rej.classify_reason(reason)
+                    pnl_pct = rec.get('pnl_pct', 0.0)  # already percent
+                    sl_pct = rec.get('sl_pct', 0.025) * 100
+                    r_mult = pnl_pct / sl_pct if sl_pct > 0 else 0
+                    shadow_by_reason[reason].append({
+                        'pnl_pct': pnl_pct, 'r_mult': r_mult, 'outcome': outcome
+                    })
+                    shadow_by_class[cls].append({
+                        'pnl_pct': pnl_pct, 'r_mult': r_mult, 'outcome': outcome
+                    })
+            except Exception as e:
+                print(f"[elasticity] shadow access err: {e}", flush=True)
+
+        # ─── COMPUTE EXPECTANCY STATS ────────────────────────────
+        def _stats(samples_pnl, samples_r):
+            n = len(samples_pnl)
+            if n == 0:
+                return {'n': 0, 'wr': None, 'ev_pct': None, 'ev_r': None,
+                        'std_r': None, 'mean_win_r': None, 'mean_loss_r': None}
+            wins = [r for r in samples_r if r > 0]
+            losses = [r for r in samples_r if r < 0]
+            wr = len(wins) / n if n > 0 else 0
+            ev_pct = sum(samples_pnl) / n
+            ev_r = sum(samples_r) / n
+            std_r = _stat.pstdev(samples_r) if n > 1 else 0
+            return {
+                'n': n,
+                'wr': round(wr, 3),
+                'ev_pct': round(ev_pct, 3),
+                'ev_r': round(ev_r, 3),
+                'std_r': round(std_r, 3),
+                'mean_win_r': round(sum(wins)/len(wins), 3) if wins else None,
+                'mean_loss_r': round(sum(losses)/len(losses), 3) if losses else None,
+                'wins': len(wins),
+                'losses': len(losses),
+            }
+
+        taken_stats = _stats(taken_pnl_pcts, taken_rmults)
+
+        # Per-class
+        class_stats = {}
+        for cls, recs in shadow_by_class.items():
+            pnls = [r['pnl_pct'] for r in recs]
+            rs = [r['r_mult'] for r in recs]
+            class_stats[cls] = _stats(pnls, rs)
+
+        # Per-reason (the filters themselves)
+        reason_stats = {}
+        for reason, recs in shadow_by_reason.items():
+            pnls = [r['pnl_pct'] for r in recs]
+            rs = [r['r_mult'] for r in recs]
+            s = _stats(pnls, rs)
+            # FVS = EV(blocked) - EV(taken). Positive = filter destroying edge.
+            fvs = None
+            if s['ev_r'] is not None and taken_stats['ev_r'] is not None:
+                fvs = round(s['ev_r'] - taken_stats['ev_r'], 3)
+            s['fvs_r'] = fvs
+            s['rejection_class'] = _shadow_rej.classify_reason(reason) if _SR_OK and _shadow_rej else 'UNCLASSIFIED'
+            reason_stats[reason] = s
+
+        # ─── DELTAS ────────────────────────────────────────────
+        ev_taken_r = taken_stats['ev_r']
+        ev_capacity_r = class_stats.get('CAPACITY', {}).get('ev_r')
+        ev_edge_r = class_stats.get('EDGE', {}).get('ev_r')
+        delta_capacity = (ev_capacity_r - ev_taken_r) if (ev_capacity_r is not None and ev_taken_r is not None) else None
+        delta_edge = (ev_edge_r - ev_taken_r) if (ev_edge_r is not None and ev_taken_r is not None) else None
+
+        # ─── OPPORTUNITY LOSS ─────────────────────────────────
+        # R per day suppressed. Pending rejections × per-reason EV × (hours_window/24) factor.
+        opp_loss = {'capacity_r_per_day': None, 'edge_r_per_day': None,
+                    'capacity_n_pending': 0, 'edge_n_pending': 0}
+        if _SR_OK and _shadow_rej is not None:
+            try:
+                with _shadow_rej._LOCK:
+                    pending = list(_shadow_rej._PENDING)
+                    resolved_count = len(_shadow_rej._RESOLVED)
+                # Get age of oldest resolved record for daily rate extrapolation
+                if pending:
+                    oldest_ts = min(p['created_ts'] for p in pending)
+                    age_days = max((time.time() - oldest_ts) / 86400, 0.0001)
+                else:
+                    age_days = 1
+
+                cap_pending = sum(1 for p in pending
+                                  if _shadow_rej.classify_reason(p.get('reason', '')) == 'CAPACITY')
+                edge_pending = sum(1 for p in pending
+                                   if _shadow_rej.classify_reason(p.get('reason', '')) == 'EDGE')
+                opp_loss['capacity_n_pending'] = cap_pending
+                opp_loss['edge_n_pending'] = edge_pending
+
+                if ev_capacity_r is not None:
+                    # Assume pending resolve to same EV as historical resolved
+                    opp_loss['capacity_r_per_day'] = round(
+                        (cap_pending / age_days) * ev_capacity_r, 2)
+                if ev_edge_r is not None:
+                    opp_loss['edge_r_per_day'] = round(
+                        (edge_pending / age_days) * ev_edge_r, 2)
+            except Exception:
+                pass
+
+        # ─── DECISION SIGNALS ─────────────────────────────────
+        decisions = {
+            'filters_optimal': 'UNCLEAR',
+            'most_restrictive_on_positive_ev': None,
+            'most_effective_remover_negative_ev': None,
+            'expand_whitelist': 'UNCLEAR',
+            'raise_max_positions': 'UNCLEAR',
+            'notes': [],
+        }
+
+        # Check elite whitelist directly
+        whitelist = reason_stats.get('not_elite_whitelisted', {})
+        if whitelist.get('n', 0) >= 10:  # min sample
+            fvs = whitelist.get('fvs_r', 0) or 0
+            ev = whitelist.get('ev_r', 0) or 0
+            if ev > 0 and fvs > 0.1:
+                decisions['expand_whitelist'] = 'YES'
+                decisions['notes'].append(
+                    f"not_elite_whitelisted: n={whitelist['n']}, EV={ev:+.2f}R > taken "
+                    f"EV, FVS={fvs:+.2f}R. Filter is blocking winners.")
+            elif ev < 0 and fvs < -0.1:
+                decisions['expand_whitelist'] = 'NO'
+                decisions['notes'].append(
+                    f"not_elite_whitelisted: EV={ev:+.2f}R, correctly blocking losers.")
+            else:
+                decisions['expand_whitelist'] = 'CONDITIONAL'
+        else:
+            decisions['notes'].append(
+                f"not_elite_whitelisted sample too small ({whitelist.get('n', 0)}). Need 10+.")
+
+        # Max positions assessment
+        if ev_capacity_r is not None and class_stats.get('CAPACITY', {}).get('n', 0) >= 10:
+            if ev_capacity_r > 0 and (delta_capacity or 0) > 0.1:
+                decisions['raise_max_positions'] = 'YES'
+                decisions['notes'].append(
+                    f"CAPACITY: EV={ev_capacity_r:+.2f}R, better than taken "
+                    f"EV={ev_taken_r:+.2f}R. Leaving money on table.")
+            elif ev_capacity_r < 0:
+                decisions['raise_max_positions'] = 'NO'
+                decisions['notes'].append(
+                    f"CAPACITY: EV={ev_capacity_r:+.2f}R, cap correctly blocking losers.")
+            else:
+                decisions['raise_max_positions'] = 'CONDITIONAL'
+        else:
+            decisions['notes'].append(
+                f"CAPACITY sample too small (n={class_stats.get('CAPACITY', {}).get('n', 0)}).")
+
+        # Most restrictive filter on positive EV
+        positive_fvs = [
+            (r, s) for r, s in reason_stats.items()
+            if s.get('n', 0) >= 5 and (s.get('fvs_r') or 0) > 0
+        ]
+        if positive_fvs:
+            positive_fvs.sort(key=lambda x: -(x[1]['fvs_r'] or 0))
+            most_restrictive = positive_fvs[0]
+            decisions['most_restrictive_on_positive_ev'] = {
+                'reason': most_restrictive[0],
+                'fvs_r': most_restrictive[1]['fvs_r'],
+                'n': most_restrictive[1]['n'],
+            }
+
+        # Most effective at removing negative EV
+        negative_fvs = [
+            (r, s) for r, s in reason_stats.items()
+            if s.get('n', 0) >= 5 and (s.get('fvs_r') or 0) < 0
+        ]
+        if negative_fvs:
+            negative_fvs.sort(key=lambda x: (x[1]['fvs_r'] or 0))
+            most_effective = negative_fvs[0]
+            decisions['most_effective_remover_negative_ev'] = {
+                'reason': most_effective[0],
+                'fvs_r': most_effective[1]['fvs_r'],
+                'n': most_effective[1]['n'],
+            }
+
+        # Overall optimality
+        if decisions['expand_whitelist'] == 'YES' or decisions['raise_max_positions'] == 'YES':
+            decisions['filters_optimal'] = 'NO'
+        elif decisions['expand_whitelist'] == 'NO' and decisions['raise_max_positions'] == 'NO':
+            decisions['filters_optimal'] = 'YES'
+        else:
+            decisions['filters_optimal'] = 'UNCLEAR'
+
+        result = {
+            'as_of_utc': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now_ms/1000)),
+            'live_window_hours': hours,
+            'shadow_all_time': True,
+            'taken': taken_stats,
+            'by_class': class_stats,
+            'by_reason': reason_stats,
+            'deltas': {
+                'ev_taken_r': ev_taken_r,
+                'ev_capacity_r': ev_capacity_r,
+                'ev_edge_r': ev_edge_r,
+                'delta_capacity': round(delta_capacity, 3) if delta_capacity is not None else None,
+                'delta_edge': round(delta_edge, 3) if delta_edge is not None else None,
+            },
+            'opportunity_loss': opp_loss,
+            'decisions': decisions,
+        }
+
+        if fmt != 'html':
+            return jsonify(result)
+
+        # ─── HTML RENDERING ────────────────────────────────────
+        def _fmt_r(v):
+            if v is None: return '—'
+            s = f"{v:+.2f}R"
+            return s
+
+        def _color(v):
+            if v is None: return 'cool'
+            if v > 0.1: return 'ok'
+            if v < -0.1: return 'hot'
+            return 'amber'
+
+        # Reason rows, sorted by FVS (most destructive first)
+        reason_items = sorted(
+            reason_stats.items(),
+            key=lambda x: -(x[1].get('fvs_r') or -999)
+        )
+        reason_rows = ''
+        for reason, s in reason_items:
+            fvs = s.get('fvs_r')
+            fvs_color = _color(fvs)
+            verdict = (
+                'DESTROYING EDGE' if fvs and fvs > 0.1 else
+                'NEUTRAL' if fvs is not None and abs(fvs) <= 0.1 else
+                'REMOVING LOSERS' if fvs and fvs < -0.1 else
+                '—'
+            )
+            wr_s = f"{s.get('wr')*100:.0f}%" if s.get('wr') is not None else '—'
+            ev_r = s.get('ev_r')
+            ev_s = _fmt_r(ev_r)
+            reason_rows += (
+                f'<tr><td class="mono">{reason}</td>'
+                f'<td style="font-size:9px;letter-spacing:0.2em">{s.get("rejection_class", "—")}</td>'
+                f'<td class="num">{s.get("n", 0)}</td>'
+                f'<td class="num">{wr_s}</td>'
+                f'<td class="num {_color(ev_r)}">{ev_s}</td>'
+                f'<td class="num {fvs_color}" style="font-weight:600">{_fmt_r(fvs)}</td>'
+                f'<td style="font-size:10px;color:var(--{fvs_color})">{verdict}</td></tr>'
+            )
+
+        # Decision pills
+        def _decision_pill(label, value):
+            if value in ('YES',):
+                color = 'hot'
+            elif value in ('NO',):
+                color = 'ok'
+            elif value == 'CONDITIONAL':
+                color = 'amber'
+            else:
+                color = 'cool'
+            return f'<span style="padding:3px 10px;border:1px solid var(--{color});color:var(--{color});font-size:11px;letter-spacing:0.2em">{value}</span>'
+
+        opt_color = {'YES': 'ok', 'NO': 'hot', 'UNCLEAR': 'amber'}.get(decisions['filters_optimal'], 'cool')
+
+        mr = decisions.get('most_restrictive_on_positive_ev')
+        mr_str = f"<strong class='mono hot'>{mr['reason']}</strong> (FVS {mr['fvs_r']:+.2f}R, n={mr['n']})" if mr else '<span style="opacity:0.5">none detected</span>'
+
+        me = decisions.get('most_effective_remover_negative_ev')
+        me_str = f"<strong class='mono ok'>{me['reason']}</strong> (FVS {me['fvs_r']:+.2f}R, n={me['n']})" if me else '<span style="opacity:0.5">none detected</span>'
+
+        notes_html = ''.join(f'<li style="margin-bottom:6px">{n}</li>' for n in decisions.get('notes', []))
+
+        html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Filter Elasticity · {result['as_of_utc']}</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Cormorant+Garamond:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root{{--void:#07080a;--carbon:#0d0e11;--chrome:#c8ccd4;--bone:#d9d6cd;--acid:#b8ff2f;--hot:#ef4444;--amber:#f59e0b;--cool:#64748b;--oxide:#d97706;--line:rgba(200,204,212,0.08)}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--void);color:var(--chrome);font-family:'JetBrains Mono',monospace;font-size:12px;padding:20px;line-height:1.5}}
+h1{{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:28px;color:var(--bone);margin-bottom:4px}}
+h2{{font-size:11px;letter-spacing:0.35em;text-transform:uppercase;color:var(--bone);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:12px}}
+.sub{{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:var(--chrome);opacity:0.5;margin-bottom:20px}}
+.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:0;margin-bottom:24px;padding:18px 0;border-top:1px solid var(--acid);border-bottom:1px solid var(--line)}}
+.stat{{padding:0 18px;border-left:1px solid var(--line)}}
+.stat:first-child{{border-left:none}}
+.stat-val{{font-family:'Cormorant Garamond',serif;font-size:28px;line-height:1;color:var(--bone)}}
+.stat-sub{{font-size:10px;color:var(--chrome);opacity:0.55;margin-top:3px}}
+.stat-lbl{{font-size:9px;letter-spacing:0.3em;text-transform:uppercase;opacity:0.55;margin-top:8px}}
+.ok{{color:var(--acid)}}.hot{{color:var(--hot)}}.amber{{color:var(--amber)}}.cool{{color:var(--cool)}}
+.section{{margin-bottom:24px}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}
+th{{text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.25em;text-transform:uppercase;opacity:0.6;border-bottom:1px solid var(--line);font-weight:400}}
+td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--bone)}}
+.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.mono{{font-family:'JetBrains Mono',monospace}}
+.decisions{{padding:20px;border:1px solid var(--{opt_color});background:linear-gradient(180deg,rgba(184,255,47,0.03),transparent);margin-bottom:24px}}
+.decisions h3{{font-size:11px;letter-spacing:0.3em;text-transform:uppercase;color:var(--{opt_color});font-weight:600}}
+.decisions .v{{font-family:'Cormorant Garamond',serif;font-size:34px;margin:6px 0;color:var(--bone)}}
+.dec-row{{display:grid;grid-template-columns:240px 1fr;gap:12px;padding:6px 0;border-bottom:1px solid var(--line);font-size:11px}}
+.dec-row:last-child{{border:none}}
+.dec-lbl{{color:var(--chrome);opacity:0.7;text-transform:uppercase;font-size:10px;letter-spacing:0.2em}}
+ul{{padding-left:18px;font-size:11px}}
+a{{color:var(--acid)}}
+@media(max-width:700px){{.grid{{grid-template-columns:1fr}}.dec-row{{grid-template-columns:1fr}}}}
+</style></head><body>
+
+<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+<h1>Filter Elasticity Analysis</h1>
+<a href="/violations" style="font-size:10px;letter-spacing:0.3em">VIOLATIONS →</a>
+</div>
+<div class="sub">{result['as_of_utc']} UTC · live window {hours}h · shadow all-time</div>
+
+<div class="decisions">
+    <h3>Decision Signal</h3>
+    <div class="v {opt_color}">{decisions['filters_optimal']}</div>
+    <div style="font-size:11px;color:var(--chrome);opacity:0.8;margin-bottom:16px">Are filters optimal?</div>
+
+    <div class="dec-row"><div class="dec-lbl">Expand whitelist?</div><div>{_decision_pill('', decisions['expand_whitelist'])}</div></div>
+    <div class="dec-row"><div class="dec-lbl">Raise max positions?</div><div>{_decision_pill('', decisions['raise_max_positions'])}</div></div>
+    <div class="dec-row"><div class="dec-lbl">Most restrictive on +EV</div><div>{mr_str}</div></div>
+    <div class="dec-row"><div class="dec-lbl">Best at removing -EV</div><div>{me_str}</div></div>
+</div>
+
+<div class="grid">
+    <div class="stat">
+        <div class="stat-val">{_fmt_r(ev_taken_r)}</div>
+        <div class="stat-sub">n={taken_stats['n']} · WR {taken_stats.get('wr', 0)*100 if taken_stats.get('wr') else 0:.0f}%</div>
+        <div class="stat-lbl">EV TAKEN</div>
+    </div>
+    <div class="stat">
+        <div class="stat-val {_color(ev_capacity_r)}">{_fmt_r(ev_capacity_r)}</div>
+        <div class="stat-sub">n={class_stats.get('CAPACITY',{}).get('n',0)} · Δ {_fmt_r(delta_capacity)}</div>
+        <div class="stat-lbl">EV CAPACITY</div>
+    </div>
+    <div class="stat">
+        <div class="stat-val {_color(ev_edge_r)}">{_fmt_r(ev_edge_r)}</div>
+        <div class="stat-sub">n={class_stats.get('EDGE',{}).get('n',0)} · Δ {_fmt_r(delta_edge)}</div>
+        <div class="stat-lbl">EV EDGE</div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Per-Filter Value Score (FVS = EV_blocked − EV_taken)</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>FILTER</th>
+                <th>CLASS</th>
+                <th class="num">N</th>
+                <th class="num">WR</th>
+                <th class="num">EV/trade</th>
+                <th class="num">FVS</th>
+                <th>VERDICT</th>
+            </tr>
+        </thead>
+        <tbody>{reason_rows or '<tr><td colspan=7 style="opacity:0.5;padding:20px">No resolved shadow data yet. Wait for shadow rejections to hit TP or SL.</td></tr>'}</tbody>
+    </table>
+    <div style="margin-top:10px;font-size:10px;opacity:0.55;line-height:1.6">
+        <strong style="color:var(--hot)">FVS &gt; +0.1R</strong> = filter is destroying edge (blocking winners) ·
+        <strong style="color:var(--amber)">|FVS| ≤ 0.1R</strong> = neutral ·
+        <strong style="color:var(--acid)">FVS &lt; -0.1R</strong> = filter is correctly removing losers
+    </div>
+</div>
+
+<div class="section">
+    <h2>Opportunity Loss (Pending Pipeline)</h2>
+    <div style="font-size:11px;line-height:1.8">
+        <div>CAPACITY rejections pending: <strong>{opp_loss['capacity_n_pending']}</strong> · R/day at historical EV: <strong>{opp_loss['capacity_r_per_day'] if opp_loss['capacity_r_per_day'] is not None else '—'}</strong></div>
+        <div>EDGE rejections pending: <strong>{opp_loss['edge_n_pending']}</strong> · R/day at historical EV: <strong>{opp_loss['edge_r_per_day'] if opp_loss['edge_r_per_day'] is not None else '—'}</strong></div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Notes</h2>
+    <ul>{notes_html or '<li style="opacity:0.5">(no notes)</li>'}</ul>
+</div>
+
+<div style="margin-top:40px;padding-top:12px;border-top:1px solid var(--line);font-size:9px;opacity:0.5;letter-spacing:0.2em;text-transform:uppercase">
+    <a href="/audit/deep?format=html">DEEP AUDIT</a> ·
+    <a href="?hours=24&format=html">24h</a> ·
+    <a href="?hours=48&format=html">48h</a> ·
+    <a href="?hours=168&format=html">7d</a> ·
+    <a href="?format=json">json</a>
+</div>
+
+</body></html>"""
+        resp = Response(html, mimetype='text/html')
+        resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return resp
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'tb': traceback.format_exc()[-800:]}), 500
 
 
 @app.route('/shadow_trades', methods=['GET'])
