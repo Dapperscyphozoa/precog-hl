@@ -209,6 +209,20 @@ except Exception as _e:
     _SR_OK = False
     print(f'[shadow_trades] import failed (non-fatal): {_e}', flush=True)
 
+# Promotion engine — controlled leak of edge rejections into live (A/B test).
+try:
+    import promotion_engine as _promo
+    _PROMO_OK = True
+except Exception as _e:
+    _promo = None
+    _PROMO_OK = False
+    print(f'[promotion_engine] import failed (non-fatal): {_e}', flush=True)
+
+# Pending experimental tags: coin -> tag dict. Populated in signal-reject path
+# when a promotion is granted. Consumed at entry completion to register with
+# promotion engine + annotate position metadata.
+_EXPERIMENT_PENDING = {}
+
 # Profit management — extend_winners + partial_exit_tp1.
 # Uses exchange-side TP/SL modifications, not polling closes.
 try:
@@ -349,6 +363,20 @@ def update_coin_wr(coin, win, state):
 def record_close(pos, coin, pnl_pct, state):
     """Record a closed trade. pnl_pct is already percent (e.g. -2.0 = -2%)."""
     if pnl_pct is None: return
+
+    # EXPERIMENTAL: track outcome in promotion bucket if this was experimental
+    if pos and pos.get('experimental') and _PROMO_OK and _promo is not None:
+        try:
+            sl_pct = pos.get('sl_pct', 0.025) * 100  # convert to pct
+            pnl_r = (pnl_pct / sl_pct) if sl_pct > 0 else 0
+            # Estimate pnl_usd from notional
+            entry_px = pos.get('entry', 0)
+            sz = pos.get('size', 0)
+            notional = entry_px * sz if (entry_px and sz) else 0
+            pnl_usd = (pnl_pct / 100) * notional
+            _promo.record_outcome(coin, pnl_usd, pnl_r=pnl_r, outcome=pos.get('exit_reason', 'close'))
+        except Exception as _pe:
+            print(f'[precog] promo outcome err: {_pe}', flush=True)
 
     # INVARIANT #5: trade audit — record expected vs actual levels
     if _INV_OK and _invariants is not None:
@@ -2675,6 +2703,29 @@ a{{color:var(--acid)}}
     except Exception as e:
         import traceback
         return jsonify({'error': str(e), 'tb': traceback.format_exc()[-800:]}), 500
+
+
+@app.route('/experiment', methods=['GET'])
+def experiment_status():
+    """Promotion engine status — experimental bucket tracking, A/B test state."""
+    try:
+        if not _PROMO_OK or _promo is None:
+            return jsonify({'error': 'promotion_engine not loaded'}), 503
+        return jsonify(_promo.status())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/experiment/reset_kill', methods=['POST'])
+def experiment_reset_kill():
+    """Manual kill-switch reset. POST-only to avoid accidental browser resets."""
+    try:
+        if not _PROMO_OK or _promo is None:
+            return jsonify({'error': 'promotion_engine not loaded'}), 503
+        _promo.reset_kill_switch()
+        return jsonify({'status': 'kill_switch_reset', 'new_state': _promo.status()})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/shadow_trades', methods=['GET'])
@@ -5452,11 +5503,32 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _shadow_record_rejection(coin, sig, f'per_coin_filter_{flt}')
                 sig = None; signal_engine = None
     elif percoin_configs.ELITE_MODE and not percoin_configs.is_elite(coin):
-        # Coin not in 139-whitelist: hard-block. Do not trade.
+        # Coin not in 139-whitelist: normally hard-block.
+        # EXPERIMENT: 20% leak into live, 50% size, strict caps.
         if sig:
-            log(f"{coin} {sig} BLOCKED — not in 139-coin elite whitelist")
-            _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
-        sig = None; signal_engine = None
+            _experimental_promotion = None
+            if _PROMO_OK and _promo is not None:
+                try:
+                    _experimental_promotion = _promo.maybe_promote(
+                        coin, sig,
+                        conf_score=conf,
+                        account_equity=balance
+                    )
+                except Exception as _pe:
+                    print(f'[precog] promo engine err: {_pe}', flush=True)
+                    _experimental_promotion = None
+
+            if _experimental_promotion and _experimental_promotion.get('promote'):
+                # Let the signal through as an EXPERIMENTAL trade.
+                # Tag will be attached to position metadata when entry completes.
+                _EXPERIMENT_PENDING[coin] = _experimental_promotion['tag']
+                log(f"{coin} {sig} EXPERIMENTAL PROMOTION · size_mult={_experimental_promotion['size_mult']} · {_experimental_promotion['reason']}")
+                log_signal(coin, f'EXPERIMENT:{sig}', sig)
+            else:
+                reason_note = (_experimental_promotion or {}).get('reason', 'disabled')
+                log(f"{coin} {sig} BLOCKED — not in 139-coin elite whitelist ({reason_note})")
+                _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
+                sig = None; signal_engine = None
 
     # Opposite-signal exit: if we hold OPPOSITE-SIDE position AND it's profitable, close it first.
     # Under CONTRACT: this is advisory — queue and let TP/SL resolve.
@@ -5955,6 +6027,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as _tfe:
             pass  # non-fatal: fall back to neutral sizing
 
+        # EXPERIMENTAL PROMOTION: apply size multiplier if this signal is
+        # flagged for experimental promotion. Halves position size.
+        if coin in _EXPERIMENT_PENDING:
+            _exp_tag = _EXPERIMENT_PENDING.get(coin, {})
+            _exp_size_mult = _exp_tag.get('size_mult', 0.5)
+            risk_mult = risk_mult * _exp_size_mult
+            log(f"{coin} EXPERIMENTAL sizing: mult={_exp_size_mult} · final risk_mult={risk_mult:.2f}")
+
         log(f"{coin} CONF={conf_score} conf_mult={size_mult} adapt={adapt:.2f} final_mult={risk_mult:.2f} regime={cur_regime} {conf_breakdown}")
     except Exception as e:
         log(f"{coin} conf err: {e}")
@@ -6329,6 +6409,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'sigs': _sigs_for_pm,
                                                 'size': sz,
                                                 'tf': '15m'}
+                    # Register experimental promotion if pending
+                    if coin in _EXPERIMENT_PENDING and _PROMO_OK and _promo is not None:
+                        _exp_tag = _EXPERIMENT_PENDING.pop(coin)
+                        state['positions'][coin]['experimental'] = True
+                        state['positions'][coin]['exp_tag'] = _exp_tag
+                        try:
+                            _promo.record_promotion(coin, 'SELL', _exp_tag)
+                        except Exception as _pe:
+                            print(f'[precog] promo record err: {_pe}', flush=True)
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
@@ -6401,6 +6490,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'sigs': _sigs_for_pm,
                                                 'size': sz,
                                                 'tf': '15m'}
+                    # Register experimental promotion if pending
+                    if coin in _EXPERIMENT_PENDING and _PROMO_OK and _promo is not None:
+                        _exp_tag = _EXPERIMENT_PENDING.pop(coin)
+                        state['positions'][coin]['experimental'] = True
+                        state['positions'][coin]['exp_tag'] = _exp_tag
+                        try:
+                            _promo.record_promotion(coin, 'BUY', _exp_tag)
+                        except Exception as _pe:
+                            print(f'[precog] promo record err: {_pe}', flush=True)
 
 # ═══════════════════════════════════════════════════════
 
