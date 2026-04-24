@@ -47,11 +47,27 @@ _deps = {
 
 # Config
 _INTERVAL_SEC = 15
+_INTERVAL_SEC_DEGRADED = 5       # faster reconcile when drift degraded
 _MAX_INTENTS_PER_CYCLE = 50
-_DRIFT_UNSAFE_THRESHOLD = 0.05    # 5% drift → halt
-_DRIFT_HEALTHY_THRESHOLD = 0.01   # 1% drift → healthy
+_DRIFT_DEGRADED_THRESHOLD = 0.01  # 1% drift → degraded (spec: reduce entries, skip high-risk, faster cycle)
+_DRIFT_UNSAFE_THRESHOLD = 0.05    # 5% drift → unsafe (halt new entries)
+_DRIFT_CRITICAL_CYCLES = 5        # sustained unsafe for N cycles → emergency flag
+_DRIFT_HEALTHY_THRESHOLD = 0.01   # <1% drift → healthy
 _DRIFT_HALT_RECOVERY_CYCLES = 3   # N consecutive healthy cycles to clear halt
 _RECONCILER_STALE_SEC = 60         # if daemon stalls > this, halt new entries
+_RECONCILER_EMERGENCY_STALL_SEC = 120  # if daemon stalls > this, emergency flag
+
+# Backpressure (spec §6)
+_INTENT_BACKLOG_PAUSE_THRESHOLD = 50
+
+# Circuit breaker config
+_CB_WINDOW = 20
+_CB_ERROR_RATE_TRIP = 0.30
+
+# Idempotency ring
+_RECENT_CLOSED_RING_SIZE = 100
+_recent_closed_trade_ids = []
+_cycle_error_flags = []
 
 _METRICS = {
     'mode': 'observe',
@@ -60,6 +76,7 @@ _METRICS = {
     'closes_executed': 0,
     'closes_skipped_idempotent': 0,
     'closes_skipped_stale_snapshot': 0,
+    'closes_skipped_ring_dedup': 0,
     'exchange_fills_matched': 0,
     'exchange_fills_unmatched': 0,
     'orphans_adopted': 0,
@@ -73,11 +90,64 @@ _METRICS = {
     'healthy_streak': 0,
     'last_drift_pct': None,
     'observe_would_close_count': 0,
+    # Step 4 additions
+    'drift_tier': 'unknown',           # healthy | degraded | unsafe | critical (per spec §1)
+    'unsafe_streak': 0,                # consecutive cycles at unsafe drift
+    'emergency_flatten_authorized': False,
+    'circuit_breaker_tripped': False,
+    'circuit_breaker_tripped_ts': 0.0,
+    'circuit_breaker_error_rate': 0.0,
+    'forced_snapshot_refreshes': 0,
+    'recent_closed_ring_size': 0,
+    # Spec §2 autonomous behaviors
+    'entry_limiter': 'full',           # full | reduced | halted
+    'skip_high_risk_coins': False,
+    'pause_new_intents': False,        # backpressure flag
+    'reconciler_lag_s': 0.0,           # seconds since last cycle
+    'orphans_repaired_authoritatively': 0,  # reconciler-owned adoption count
 }
 
 
 def _is_authoritative():
+    """Returns True only if env=1 AND circuit breaker not tripped."""
+    if _METRICS.get('circuit_breaker_tripped'):
+        return False  # circuit breaker forces observe mode
     return os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1'
+
+
+def _record_cycle_error(is_error):
+    """Track error rate for circuit breaker."""
+    global _cycle_error_flags
+    _cycle_error_flags.append(1 if is_error else 0)
+    if len(_cycle_error_flags) > _CB_WINDOW:
+        _cycle_error_flags = _cycle_error_flags[-_CB_WINDOW:]
+
+    if len(_cycle_error_flags) >= _CB_WINDOW:
+        rate = sum(_cycle_error_flags) / len(_cycle_error_flags)
+        with _LOCK:
+            _METRICS['circuit_breaker_error_rate'] = round(rate, 3)
+            if rate >= _CB_ERROR_RATE_TRIP and not _METRICS['circuit_breaker_tripped']:
+                _METRICS['circuit_breaker_tripped'] = True
+                _METRICS['circuit_breaker_tripped_ts'] = time.time()
+                _log(f"⚠⚠ CIRCUIT BREAKER TRIPPED: error rate {rate*100:.1f}% >= {_CB_ERROR_RATE_TRIP*100:.0f}% "
+                     f"— forcing observe mode (manual reset via /lifecycle/emergency)")
+
+
+def _in_recent_closed_ring(trade_id):
+    """Idempotency guard — was this trade_id closed very recently?"""
+    return trade_id in _recent_closed_trade_ids
+
+
+def _add_to_recent_closed_ring(trade_id):
+    """Add trade_id to ring buffer of recent closes."""
+    global _recent_closed_trade_ids
+    if trade_id in _recent_closed_trade_ids:
+        return
+    _recent_closed_trade_ids.append(trade_id)
+    if len(_recent_closed_trade_ids) > _RECENT_CLOSED_RING_SIZE:
+        _recent_closed_trade_ids = _recent_closed_trade_ids[-_RECENT_CLOSED_RING_SIZE:]
+    with _LOCK:
+        _METRICS['recent_closed_ring_size'] = len(_recent_closed_trade_ids)
 
 
 def _log(msg):
@@ -137,25 +207,75 @@ def _compute_drift(snap, ledger_stats):
         return None
 
 
-def _update_halt_flag(drift_pct):
-    """Update halt flag based on drift."""
+def _update_drift_tier(drift_pct, intent_backlog=0):
+    """Step 4 spec §2: multi-tier drift handling with autonomous controls.
+
+    healthy  (<1%)    → normal
+    degraded (1-5%)   → reduce entries, skip high-risk coins, faster reconcile
+    unsafe   (≥5%)    → halt new entries
+    critical (unsafe sustained for N cycles) → emergency flatten authorized
+    """
     if drift_pct is None:
         return
+
     with _LOCK:
-        if drift_pct >= _DRIFT_UNSAFE_THRESHOLD:
-            if not _METRICS['halt_flag']:
-                _METRICS['halt_flag'] = True
-                _METRICS['halt_since_ts'] = time.time()
-                _METRICS['healthy_streak'] = 0
-                _log(f"⚠ HALT: drift {drift_pct*100:.2f}% >= {_DRIFT_UNSAFE_THRESHOLD*100:.0f}% — blocking new entries")
-        elif drift_pct < _DRIFT_HEALTHY_THRESHOLD:
+        prev_halt = _METRICS['halt_flag']
+
+        if drift_pct < _DRIFT_HEALTHY_THRESHOLD:
+            tier = 'healthy'
             _METRICS['healthy_streak'] += 1
+            _METRICS['unsafe_streak'] = 0
+            _METRICS['entry_limiter'] = 'full'
+            _METRICS['skip_high_risk_coins'] = False
             if _METRICS['halt_flag'] and _METRICS['healthy_streak'] >= _DRIFT_HALT_RECOVERY_CYCLES:
                 _METRICS['halt_flag'] = False
                 _METRICS['halt_since_ts'] = 0.0
+                _METRICS['emergency_flatten_authorized'] = False
                 _log(f"✓ HALT CLEARED after {_METRICS['healthy_streak']} healthy cycles")
-        else:
+        elif drift_pct < _DRIFT_UNSAFE_THRESHOLD:
+            tier = 'degraded'
             _METRICS['healthy_streak'] = 0
+            _METRICS['unsafe_streak'] = 0
+            _METRICS['entry_limiter'] = 'reduced'
+            _METRICS['skip_high_risk_coins'] = True
+            _log(f"drift DEGRADED: {drift_pct*100:.2f}% — reduce_entries=on, skip_high_risk=on, faster_reconcile=on")
+        else:
+            tier = 'unsafe'
+            _METRICS['healthy_streak'] = 0
+            _METRICS['unsafe_streak'] += 1
+            _METRICS['entry_limiter'] = 'halted'
+            _METRICS['skip_high_risk_coins'] = True
+            if not prev_halt:
+                _METRICS['halt_flag'] = True
+                _METRICS['halt_since_ts'] = time.time()
+                _log(f"⚠ HALT: drift {drift_pct*100:.2f}% >= {_DRIFT_UNSAFE_THRESHOLD*100:.0f}% — blocking new entries")
+            if _METRICS['unsafe_streak'] >= _DRIFT_CRITICAL_CYCLES:
+                tier = 'critical'
+                if not _METRICS['emergency_flatten_authorized']:
+                    _METRICS['emergency_flatten_authorized'] = True
+                    _log(f"⚠⚠⚠ CRITICAL: drift unsafe for {_METRICS['unsafe_streak']} cycles — "
+                         f"emergency flatten authorized (manual trigger via /lifecycle/emergency)")
+
+        # Backpressure — spec §6
+        _METRICS['pause_new_intents'] = (intent_backlog > _INTENT_BACKLOG_PAUSE_THRESHOLD)
+
+        _METRICS['drift_tier'] = tier
+
+    # Staged remediation — force snapshot refresh on degraded/unsafe/critical
+    if tier in ('degraded', 'unsafe', 'critical'):
+        try:
+            snap = _deps.get('snapshot')
+            if snap:
+                snap.force_refresh()
+                with _LOCK:
+                    _METRICS['forced_snapshot_refreshes'] += 1
+        except Exception as e:
+            _log(f"forced refresh err: {e}")
+
+
+def _update_halt_flag(drift_pct):
+    """Legacy alias — routes to multi-tier handler."""
+    _update_drift_tier(drift_pct)
 
 
 def _process_intent(intent, snap, authoritative):
@@ -171,10 +291,17 @@ def _process_intent(intent, snap, authoritative):
         _log(f"INTENT NO-TID: {coin} {intent.get('type')} (no trade_id resolved)")
         return 'no_tid'
 
-    # Idempotency check
+    # Step 4 idempotency ring — prevents double-close race with native fills
+    if _in_recent_closed_ring(tid):
+        with _LOCK:
+            _METRICS['closes_skipped_ring_dedup'] += 1
+        return 'ring_dedup'
+
+    # Idempotency check (ledger authoritative)
     if ledger and ledger.is_closed(tid):
         with _LOCK:
             _METRICS['closes_skipped_idempotent'] += 1
+        _add_to_recent_closed_ring(tid)  # keep ring warm
         return 'already_closed'
 
     position = snap.get('positions', {}).get(coin)
@@ -202,6 +329,8 @@ def _process_intent(intent, snap, authoritative):
                 _METRICS['exchange_fills_unmatched'] += 1
             if ok:
                 _METRICS['closes_executed'] += 1
+        if ok:
+            _add_to_recent_closed_ring(tid)
         return 'closed_via_exchange_fill'
 
     # Case B: position still open — execute the close
@@ -242,11 +371,19 @@ def _process_intent(intent, snap, authoritative):
     with _LOCK:
         if ok:
             _METRICS['closes_executed'] += 1
+    if ok:
+        _add_to_recent_closed_ring(tid)
     return 'closed_via_intent'
 
 
 def _detect_orphans(snap, ledger_stats):
-    """Coins on exchange but not in ledger as open."""
+    """Spec §5: Orphan repair engine.
+    If exchange has position but ledger doesn't, reconciler ADOPTS (authoritatively).
+    Prevents ghost exposure and untracked risk.
+
+    Note: precog.py main loop also does adoption; both paths now use
+    latest_open_trade_id_for_coin() first to prevent duplicates (Step 4 fix).
+    """
     ledger = _deps['ledger']
     if not ledger:
         return
@@ -257,12 +394,28 @@ def _detect_orphans(snap, ledger_stats):
         )
     except Exception:
         ledger_open_coins = set()
+
     for coin in exch_coins - ledger_open_coins:
-        _log(f"ORPHAN DETECTED: {coin} on exchange, not in ledger open set")
-        # NOTE: main loop's reconcile block in precog.py handles adoption already.
-        # We just count + log here.
-        with _LOCK:
-            _METRICS['orphans_adopted'] += 1
+        pos = snap['positions'].get(coin, {})
+        side_char = pos.get('side', 'L')  # 'L' or 'S' from snapshot
+        entry_px = pos.get('entry', 0) or 0
+        try:
+            new_tid = ledger.new_trade_id()
+            ledger.append_entry(
+                coin=coin,
+                side='BUY' if side_char == 'L' else 'SELL',
+                entry_price=entry_px,
+                engine='RECONCILED',
+                source='reconcile_orphan_adopt',
+                cloid=None,
+                trade_id=new_tid,
+            )
+            _log(f"ORPHAN ADOPTED: {coin} trade_id={new_tid[:8]} side={side_char} entry={entry_px}")
+            with _LOCK:
+                _METRICS['orphans_repaired_authoritatively'] += 1
+                _METRICS['orphans_adopted'] += 1
+        except Exception as e:
+            _log(f"orphan adopt err {coin}: {e}")
 
 
 def _detect_missing_closes(snap, authoritative):
@@ -305,12 +458,28 @@ def _detect_missing_closes(snap, authoritative):
                     _METRICS['exchange_fills_matched'] += 1
                 else:
                     _METRICS['exchange_fills_unmatched'] += 1
+        if ok:
+            _add_to_recent_closed_ring(tid)
 
 
 def _cycle():
-    """One reconcile cycle."""
+    """One reconcile cycle. Spec §7 order:
+       1. refresh snapshot
+       2. compute drift
+       3. apply drift controls
+       4. process intents
+       5. repair orphans
+       6. repair missing closes (reconcile_lifecycle)
+    """
     t0 = time.time()
+    last_ts_before = _METRICS.get('last_cycle_ts', 0) or 0
+    if last_ts_before:
+        lag_before = t0 - last_ts_before
+        with _LOCK:
+            _METRICS['reconciler_lag_s'] = round(lag_before, 2)
+
     authoritative = _is_authoritative()
+    cycle_had_error = False
     with _LOCK:
         _METRICS['mode'] = 'authoritative' if authoritative else 'observe'
         _METRICS['cycles_total'] += 1
@@ -324,22 +493,41 @@ def _cycle():
             _log("SKIP: missing deps")
             return
 
+        # 1. Refresh snapshot (implicitly — daemon runs independently, but we can poke)
         snap = snapshot.get()
+        if snap.get('stale'):
+            # Try forced refresh before giving up
+            try:
+                snapshot.force_refresh()
+                snap = snapshot.get()
+            except Exception: pass
+
         if snap.get('stale'):
             with _LOCK:
                 _METRICS['closes_skipped_stale_snapshot'] += 1
-            _log(f"SKIP cycle: snapshot stale (age={snap.get('age_sec'):.1f}s)")
+                # Stale snapshot counts as halt condition
+                _METRICS['halt_flag'] = True
+            _log(f"SKIP cycle: snapshot stale (age={snap.get('age_sec'):.1f}s) — halt asserted")
             return
 
         ledger_stats = ledger.stats()
 
-        # 1. Process intents (by unique trade_id; last-wins)
+        # 2. Compute drift + get intent backlog
+        drift_pct = _compute_drift(snap, ledger_stats)
+        intent_backlog = iq.status().get('queue_depth', 0)
+        with _LOCK:
+            _METRICS['last_drift_pct'] = drift_pct
+
+        # 3. Apply drift controls (updates halt_flag, entry_limiter, skip_high_risk, etc.)
+        _update_drift_tier(drift_pct, intent_backlog)
+
+        # 4. Process intents (spec §7)
         intents = iq.drain(max_items=_MAX_INTENTS_PER_CYCLE)
         if intents:
             by_tid = {}
             for intent in intents:
                 tid = _resolve_trade_id(intent) or f"_no_tid_{intent.get('coin')}"
-                by_tid[tid] = intent  # last-wins dedup
+                by_tid[tid] = intent
             for tid_key, intent in by_tid.items():
                 try:
                     _process_intent(intent, snap, authoritative)
@@ -351,33 +539,34 @@ def _cycle():
                         _METRICS['last_error'] = f"process_intent: {e}"
                     _log(f"process_intent err {intent}: {e}")
 
-        # 2. Detect orphans (advisory only — precog.py main loop handles adoption)
+        # 5. Repair orphans (authoritative per spec §5)
         _detect_orphans(snap, ledger_stats)
 
-        # 3. Detect missing-closes (reconciler-owned in authoritative mode)
+        # 6. Repair missing closes (reconcile lifecycle)
         _detect_missing_closes(snap, authoritative)
-
-        # 4. Drift metric + halt flag
-        drift_pct = _compute_drift(snap, ledger_stats)
-        _update_halt_flag(drift_pct)
-        with _LOCK:
-            _METRICS['last_drift_pct'] = drift_pct
 
         with _LOCK:
             _METRICS['last_cycle_ts'] = time.time()
             _METRICS['last_cycle_duration_ms'] = int((time.time() - t0) * 1000)
     except Exception as e:
+        cycle_had_error = True
         with _LOCK:
             _METRICS['errors_total'] += 1
             _METRICS['last_error'] = f"cycle: {e}"
         _log(f"cycle err: {e}")
+    finally:
+        _record_cycle_error(cycle_had_error)
 
 
 def _run():
     _log(f"daemon started (interval={_INTERVAL_SEC}s, mode={'authoritative' if _is_authoritative() else 'observe'})")
     while not _STOP.is_set():
         _cycle()
-        _STOP.wait(_INTERVAL_SEC)
+        # Spec §2B: increase_reconcile_frequency when degraded
+        with _LOCK:
+            tier = _METRICS.get('drift_tier', 'unknown')
+        interval = _INTERVAL_SEC_DEGRADED if tier in ('degraded', 'unsafe', 'critical') else _INTERVAL_SEC
+        _STOP.wait(interval)
 
 
 def start(deps=None, interval_sec=None):
@@ -400,7 +589,75 @@ def stop():
 
 def is_halted():
     with _LOCK:
-        return _METRICS['halt_flag']
+        if _METRICS['halt_flag']:
+            return True
+        last_ts = _METRICS.get('last_cycle_ts') or 0
+        if last_ts and (time.time() - last_ts > _RECONCILER_STALE_SEC):
+            return True
+        return False
+
+
+def entry_limiter():
+    """Spec §2B: 'full' | 'reduced' | 'halted'. process() reads this."""
+    with _LOCK:
+        if _METRICS['halt_flag']:
+            return 'halted'
+        return _METRICS.get('entry_limiter', 'full')
+
+
+def should_skip_high_risk():
+    """Spec §2B.skip_high_risk_coins."""
+    with _LOCK:
+        return _METRICS.get('skip_high_risk_coins', False)
+
+
+def should_pause_intents():
+    """Spec §6 backpressure."""
+    with _LOCK:
+        return _METRICS.get('pause_new_intents', False)
+
+
+def is_stall_emergency():
+    """Reconciler has not cycled in _RECONCILER_EMERGENCY_STALL_SEC seconds."""
+    with _LOCK:
+        last_ts = _METRICS.get('last_cycle_ts') or 0
+        if not last_ts:
+            return False
+        return (time.time() - last_ts) > _RECONCILER_EMERGENCY_STALL_SEC
+
+
+def emergency_reset(action):
+    """Admin controls for emergency endpoint.
+
+    action:
+      'clear_halt'       — force-clear halt flag and unsafe streak
+      'clear_breaker'    — reset circuit breaker
+      'clear_emergency'  — clear emergency_flatten_authorized
+      'clear_ring'       — empty recent-closed ring buffer
+      'clear_all'        — all of the above
+    """
+    global _cycle_error_flags, _recent_closed_trade_ids
+    with _LOCK:
+        if action in ('clear_halt', 'clear_all'):
+            _METRICS['halt_flag'] = False
+            _METRICS['halt_since_ts'] = 0.0
+            _METRICS['unsafe_streak'] = 0
+            _METRICS['healthy_streak'] = 0
+            _log("ADMIN: halt flag cleared")
+        if action in ('clear_breaker', 'clear_all'):
+            _METRICS['circuit_breaker_tripped'] = False
+            _METRICS['circuit_breaker_tripped_ts'] = 0.0
+            _METRICS['circuit_breaker_error_rate'] = 0.0
+            _cycle_error_flags = []
+            _log("ADMIN: circuit breaker reset")
+        if action in ('clear_emergency', 'clear_all'):
+            _METRICS['emergency_flatten_authorized'] = False
+            _log("ADMIN: emergency flatten authorization cleared")
+        if action in ('clear_ring', 'clear_all'):
+            _recent_closed_trade_ids = []
+            _METRICS['recent_closed_ring_size'] = 0
+            _log("ADMIN: recent-closed ring buffer cleared")
+    return {'action': action, 'ok': True, 'at': time.time()}
 
 
 def status():
@@ -412,4 +669,14 @@ def status():
     m['interval_sec'] = _INTERVAL_SEC
     last_ts = m.get('last_cycle_ts') or 0
     m['cycle_stale'] = (time.time() - last_ts > _RECONCILER_STALE_SEC) if last_ts else True
+    m['stall_emergency'] = (time.time() - last_ts > _RECONCILER_EMERGENCY_STALL_SEC) if last_ts else False
+    m['thresholds'] = {
+        'drift_warn': _DRIFT_WARN_THRESHOLD,
+        'drift_degraded': _DRIFT_DEGRADED_THRESHOLD,
+        'drift_unsafe': _DRIFT_UNSAFE_THRESHOLD,
+        'drift_critical_cycles': _DRIFT_CRITICAL_CYCLES,
+        'cb_error_rate_trip': _CB_ERROR_RATE_TRIP,
+        'stall_sec': _RECONCILER_STALE_SEC,
+        'emergency_stall_sec': _RECONCILER_EMERGENCY_STALL_SEC,
+    }
     return m
