@@ -6093,32 +6093,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _shadow_record_rejection(coin, sig, f'per_coin_filter_{flt}')
                 sig = None; signal_engine = None
     elif percoin_configs.ELITE_MODE and not percoin_configs.is_elite(coin):
-        # Coin not in 139-whitelist: normally hard-block.
-        # EXPERIMENT: 20% leak into live, 50% size, strict caps.
+        # Coin not in elite whitelist: HARD BLOCK.
+        # Experimental promotion disabled 2026-04-23 — live data showed
+        # non-whitelist coins (BTC, FARTCOIN, PROMPT, RENDER, LINK) were
+        # the largest loss concentrations. WR 0-20% on leaked signals
+        # vs 57-73% OOS prediction on whitelist coins. Leak = -$140 realized.
         if sig:
-            _experimental_promotion = None
-            if _PROMO_OK and _promo is not None:
-                try:
-                    _experimental_promotion = _promo.maybe_promote(
-                        coin, sig,
-                        conf_score=conf,
-                        account_equity=balance
-                    )
-                except Exception as _pe:
-                    print(f'[precog] promo engine err: {_pe}', flush=True)
-                    _experimental_promotion = None
-
-            if _experimental_promotion and _experimental_promotion.get('promote'):
-                # Let the signal through as an EXPERIMENTAL trade.
-                # Tag will be attached to position metadata when entry completes.
-                _EXPERIMENT_PENDING[coin] = _experimental_promotion['tag']
-                log(f"{coin} {sig} EXPERIMENTAL PROMOTION · size_mult={_experimental_promotion['size_mult']} · {_experimental_promotion['reason']}")
-                log_signal(coin, f'EXPERIMENT:{sig}', sig)
-            else:
-                reason_note = (_experimental_promotion or {}).get('reason', 'disabled')
-                log(f"{coin} {sig} BLOCKED — not in 139-coin elite whitelist ({reason_note})")
-                _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
-                sig = None; signal_engine = None
+            log(f"{coin} {sig} BLOCKED — not in enterprise whitelist")
+            _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
+            sig = None; signal_engine = None
 
     # REVERSAL CONTRACT v2: market-close → confirm closed → allow new entry
     # this tick. Option A per Phase 1 spec. No queueing, no waiting for TP/SL.
