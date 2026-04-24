@@ -239,6 +239,31 @@ td.good { color: var(--acid); }
     </table>
 </div>
 
+<!-- SECTION 3.5: Rejection Classification Heatmap -->
+<div class="section">
+    <div class="section-hdr">
+        <h2>Rejection Classification · Edge vs Capacity</h2>
+        <span class="meta" id="rejClassMeta">—</span>
+    </div>
+    <div class="two-col" style="gap: 20px;">
+        <!-- Class summary cards -->
+        <div>
+            <div id="classCards" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="empty">awaiting data…</div>
+            </div>
+            <div style="margin-top: 16px; font-size: 10px; color: var(--chrome); opacity: 0.55; line-height: 1.7;">
+                <div><span style="color: var(--acid);">●</span> <strong>EDGE</strong>: signal-quality filter fired. If WR &gt; 50% → filters are too aggressive.</div>
+                <div><span style="color: var(--oxide);">●</span> <strong>CAPACITY</strong>: resource-limit blocked trade. If WR &gt; 50% → raise caps, leaving money on table.</div>
+                <div><span style="color: var(--cool);">●</span> <strong>UNCLASSIFIED</strong>: unmapped reason. Review + classify.</div>
+            </div>
+        </div>
+        <!-- Heatmap: reason × outcome grid -->
+        <div>
+            <div id="rejHeatmap"></div>
+        </div>
+    </div>
+</div>
+
 <!-- SECTION 4: Position integrity -->
 <div class="section">
     <div class="section-hdr">
@@ -316,14 +341,16 @@ async function fetchJson(url) {
 }
 
 async function refresh() {
-    const [inv, con, tfi] = await Promise.all([
+    const [inv, con, tfi, shd] = await Promise.all([
         fetchJson('/invariants'),
         fetchJson('/contract'),
         fetchJson('/tf_isolation'),
+        fetchJson('/shadow_trades'),
     ]);
     STATE.invariants = inv;
     STATE.contract = con;
     STATE.tf_iso = tfi;
+    STATE.shadow = shd;
     ingestViolations();
     render();
 }
@@ -473,6 +500,7 @@ function render() {
     renderFeed();
     renderBreakdown();
     renderRoot();
+    renderRejClass();
     renderPositions();
     renderRepairs();
 }
@@ -643,6 +671,90 @@ function renderRoot() {
             <td class="mono">${fmtTime(d.last)}</td>
         </tr>`;
     }).join('');
+}
+
+function renderRejClass() {
+    const shd = STATE.shadow;
+    if (!shd) {
+        document.getElementById('classCards').innerHTML = '<div class="empty">shadow_trades unavailable</div>';
+        document.getElementById('rejHeatmap').innerHTML = '';
+        return;
+    }
+    const byClass = shd.by_class || {};
+    const byReason = shd.by_reason || {};
+    const classOrder = ['EDGE', 'CAPACITY', 'UNCLASSIFIED'];
+    const classColor = { EDGE: 'var(--acid)', CAPACITY: 'var(--oxide)', UNCLASSIFIED: 'var(--cool)' };
+
+    // Cards per class
+    const cards = classOrder
+        .filter(c => byClass[c])
+        .map(c => {
+            const d = byClass[c];
+            const wr = d.win_rate !== null && d.win_rate !== undefined ? (d.win_rate * 100).toFixed(0) + '%' : '—';
+            const exp = d.expectancy_pct !== undefined ? (d.expectancy_pct > 0 ? '+' : '') + d.expectancy_pct.toFixed(2) + '%' : '—';
+            const wrCls = d.win_rate === null ? '' : d.win_rate >= 0.5 ? 'hot' : 'ok';
+            const wrLabel = c === 'CAPACITY'
+                ? (d.win_rate >= 0.5 ? 'leaving money on table' : 'cap is correctly blocking losers')
+                : (d.win_rate >= 0.5 ? 'filter too aggressive' : 'filter earning keep');
+            return `<div style="padding: 16px; border: 1px solid ${classColor[c]}; background: linear-gradient(180deg, rgba(${c==='EDGE'?'184,255,47':c==='CAPACITY'?'217,118,6':'100,116,139'}, 0.04), transparent);">
+                <div style="font-size: 10px; letter-spacing: 0.3em; text-transform: uppercase; color: ${classColor[c]}; font-weight: 600;">${c}</div>
+                <div style="display: flex; align-items: baseline; gap: 12px; margin-top: 10px;">
+                    <div style="font-family: 'Cormorant Garamond', serif; font-size: 28px; color: var(--bone);">${d.n_resolved}</div>
+                    <div style="font-size: 10px; color: var(--chrome); opacity: 0.6;">resolved · ${d.pending} pending</div>
+                </div>
+                <div style="margin-top: 10px; display: flex; gap: 16px; font-size: 11px;">
+                    <div><span style="opacity: 0.55;">WR</span> <strong class="stat-val ${wrCls}" style="font-size: 14px; font-family: inherit;">${wr}</strong></div>
+                    <div><span style="opacity: 0.55;">Exp</span> <strong style="font-size: 13px; color: ${parseFloat(d.expectancy_pct)>=0?'var(--acid)':'var(--hot)'};">${exp}</strong></div>
+                </div>
+                ${d.n_resolved > 0 ? `<div style="margin-top: 8px; font-size: 9px; color: var(--chrome); opacity: 0.55; font-style: italic;">${wrLabel}</div>` : ''}
+                <div style="margin-top: 8px; font-size: 9px; color: var(--chrome); opacity: 0.5;">${(d.reasons || []).slice(0,4).join(', ')}${(d.reasons || []).length > 4 ? '...' : ''}</div>
+            </div>`;
+        }).join('');
+    document.getElementById('classCards').innerHTML = cards || '<div class="empty">no rejections yet</div>';
+
+    // Heatmap: rows = reason, cells = win/loss/timeout/pending, color by WR
+    const reasons = Object.entries(byReason).sort((a,b) => b[1].n - a[1].n).slice(0, 15);
+    if (reasons.length === 0) {
+        document.getElementById('rejHeatmap').innerHTML = '<div class="empty">no resolved shadow trades yet</div>';
+    } else {
+        const rows = reasons.map(([reason, d]) => {
+            const cls = d.class || 'UNCLASSIFIED';
+            const wr = d.win_rate;
+            let bg = 'rgba(100,116,139,0.1)';
+            if (wr !== null && wr !== undefined) {
+                if (wr >= 0.7) bg = 'rgba(239,68,68,0.35)';       // high WR on rejected = BAD (we blocked winners)
+                else if (wr >= 0.5) bg = 'rgba(245,158,11,0.3)';
+                else if (wr >= 0.3) bg = 'rgba(184,255,47,0.15)';
+                else bg = 'rgba(184,255,47,0.3)';                   // low WR on rejected = GOOD (we blocked losers)
+            }
+            const expSign = d.expectancy_pct >= 0 ? 'bad' : 'good';
+            return `<tr style="background: ${bg};">
+                <td class="mono" style="font-size: 10px;">${reason}</td>
+                <td style="color: ${classColor[cls]}; font-size: 9px; letter-spacing: 0.15em;">${cls}</td>
+                <td class="num mono">${d.n}</td>
+                <td class="num ${expSign}">${wr !== null && wr !== undefined ? (wr*100).toFixed(0)+'%' : '—'}</td>
+                <td class="num ${expSign}">${d.expectancy_pct >= 0 ? '+' : ''}${d.expectancy_pct.toFixed(2)}%</td>
+            </tr>`;
+        }).join('');
+        document.getElementById('rejHeatmap').innerHTML = `
+            <table style="font-size: 10px;">
+                <thead>
+                    <tr>
+                        <th>REASON</th>
+                        <th>CLASS</th>
+                        <th class="num">N</th>
+                        <th class="num">WR</th>
+                        <th class="num">EXP</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        `;
+    }
+
+    const totalResolved = Object.values(byClass).reduce((s, d) => s + (d.n_resolved || 0), 0);
+    const totalPending = shd.pending_count || 0;
+    document.getElementById('rejClassMeta').textContent = `${totalResolved} resolved · ${totalPending} pending`;
 }
 
 function renderPositions() {
