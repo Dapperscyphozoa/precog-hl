@@ -68,6 +68,9 @@ body::after {
 .status-cluster { display: flex; gap: 32px; align-items: center; }
 .status-item { font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--chrome); opacity: 0.7; }
 .status-item strong { color: var(--acid); font-weight: 600; letter-spacing: 0.1em; }
+.audit-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--acid); text-decoration: none; border: 1px solid var(--acid); background: rgba(184, 255, 47, 0.05); font-weight: 600; transition: all 0.15s ease; }
+.audit-btn:hover { background: var(--acid); color: var(--void); }
+.audit-btn::after { content: '→'; font-size: 13px; }
 .pulse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--acid); margin-right: 8px; box-shadow: 0 0 12px var(--glow); animation: pulse 1.5s ease-in-out infinite; vertical-align: middle; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
@@ -242,7 +245,7 @@ body::after {
         <div class="status-item"><span class="pulse-dot"></span>SYS ONLINE</div>
         <div class="status-item">SESSION · <strong id="session-name">LONDON</strong></div>
         <div class="status-item">UTC · <strong id="utc-clock">—</strong></div>
-        <div class="status-item"><a href="/violations" style="color: var(--acid); text-decoration: none; letter-spacing: 0.15em;">AUDIT →</a></div>
+        <a href="/violations" class="audit-btn">AUDIT</a>
     </div>
 </div>
 
