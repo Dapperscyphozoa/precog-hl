@@ -437,6 +437,46 @@ def stats() -> dict:
         }
 
 
+def dedupe_open_trades():
+    """One-time cleanup — for each coin with multiple open trades, keep the earliest
+    (lowest event_seq) and close the rest with reason='reconcile_duplicate_entry'.
+
+    Returns dict of dedup actions taken:
+        {'coins_affected': int, 'dupes_closed': int, 'details': [...]}
+    """
+    actions = {'coins_affected': 0, 'dupes_closed': 0, 'details': []}
+    with _LOCK:
+        by_coin_open = dict(_INDEX['by_coin_open'])
+
+    for coin, tid_set in by_coin_open.items():
+        if len(tid_set) <= 1:
+            continue
+        # Sort by event_seq ascending — keep earliest
+        tids_sorted = sorted(
+            tid_set,
+            key=lambda t: int(_INDEX['by_trade_id'].get(t, {}).get('event_seq') or 0)
+        )
+        keeper = tids_sorted[0]
+        dupes = tids_sorted[1:]
+        actions['coins_affected'] += 1
+        for dup_tid in dupes:
+            ok = append_close(
+                trade_id=dup_tid,
+                exit_price=None,
+                pnl=None,
+                close_reason='reconcile_duplicate_entry',
+                source='ledger_dedupe',
+            )
+            if ok:
+                actions['dupes_closed'] += 1
+                actions['details'].append({
+                    'coin': coin,
+                    'kept': keeper[:8],
+                    'closed': dup_tid[:8],
+                })
+    return actions
+
+
 # ─────────────────────────────────────────────────────────
 # Boot: migrate + index
 # ─────────────────────────────────────────────────────────
