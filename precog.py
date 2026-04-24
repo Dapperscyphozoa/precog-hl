@@ -1796,6 +1796,34 @@ def health():
                     'regime':cur_regime,
                     'recent_logs':LOG_BUFFER[-20:]})
 
+@app.route('/confluence', methods=['GET'])
+def confluence_status():
+    """System B status: fires, WR, PnL, open positions."""
+    try:
+        import confluence_worker as cw
+        st = cw.status()
+        wr = 0
+        total_closed = st.get('wins', 0) + st.get('losses', 0)
+        if total_closed > 0:
+            wr = st['wins'] * 100 // total_closed
+        return jsonify({
+            'enabled': cw.ENABLED,
+            'dry_run': cw.DRY_RUN,
+            'scan_interval_s': cw.SCAN_INTERVAL_S,
+            'max_positions': cw.MAX_POSITIONS,
+            'risk_pct': cw.RISK_PCT,
+            'total_fires': st.get('total_fires', 0),
+            'wins': st.get('wins', 0),
+            'losses': st.get('losses', 0),
+            'timeouts': st.get('timeouts', 0),
+            'wr_pct': wr,
+            'total_pnl_pct': st.get('total_pnl_pct', 0.0),
+            'open_positions': st.get('open_positions', {}),
+            'last_fire_ts': st.get('last_fire_ts', {}),
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
 @app.route('/regime', methods=['GET'])
 def regime_status():
     """Return current regime detector state + per-coin coverage."""
@@ -7819,6 +7847,15 @@ if __name__ == '__main__':
     # Run precog signal loop in background thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
+
+    # SYSTEM B — Confluence engine worker (optional, gated by env var)
+    try:
+        import sys as _sys
+        import confluence_worker as _cw
+        _cw.start(_sys.modules[__name__])
+    except Exception as _e:
+        log(f"confluence worker init failed (non-fatal): {_e}")
+
     # Run latency arbitrage module in background thread
     # LA KILLED — was burning 60 API calls/sec with 0 trades, causing 429s
     # Run Flask webhook server in main thread (Render expects port 10000)
