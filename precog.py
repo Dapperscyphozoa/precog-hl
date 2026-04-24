@@ -4439,8 +4439,15 @@ def place_native_sl(coin, is_long, entry, size):
 def _shadow_record_rejection(coin, side, reason, meta=None):
     """Helper: resolve TP/SL pct + current price, then record rejection to shadow.
 
-    Silently no-ops on any failure. Non-blocking.
+    Also calls log_signal() so the dashboard signal feed shows filtered signals
+    (not just trades that fired). Silently no-ops on any failure. Non-blocking.
     """
+    # Always log to signal feed first (cheap), even if shadow fails
+    try:
+        log_signal(coin, f'REJECT:{reason}', side)
+    except Exception:
+        pass
+
     if not _SR_OK or _shadow_rej is None:
         return
     try:

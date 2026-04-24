@@ -907,7 +907,7 @@ async function loadHeatmap() {
         const d = await r.json();
         const cw = d.coin_wr || {};
         const entries = Object.entries(cw)
-            .filter(([c,s]) => (s.wins||0)+(s.losses||0) >= 3)
+            .filter(([c,s]) => (s.wins||0)+(s.losses||0) >= 1)
             .sort((a,b) => (b[1].wr||0)-(a[1].wr||0));
         document.getElementById('heatmap').innerHTML = entries.map(([c,s]) => {
             const n = (s.wins||0)+(s.losses||0);
@@ -922,7 +922,7 @@ async function loadHeatmap() {
                 <div style="font-size:9px;opacity:0.7">${wr.toFixed(0)}% · ${n}</div>
             </div>`;
         }).join('') || '<div style="opacity:0.5;padding:20px">// no closed trades yet</div>';
-        document.getElementById('heat-meta').textContent = entries.length + ' coins · 3+ trades';
+        document.getElementById('heat-meta').textContent = entries.length + ' coins · ' + entries.reduce((sum,[c,s]) => sum + (s.wins||0)+(s.losses||0), 0) + ' trades';
     } catch (e) {}
 }
 
