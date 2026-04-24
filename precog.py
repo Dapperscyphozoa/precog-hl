@@ -2093,6 +2093,8 @@ def audit_deep():
                 f'<td class="num {_c(d.get("expectancy_pct"))}">{d.get("expectancy_pct", 0):+.2f}%</td></tr>'
             )
 
+    equity_str = f"${equity:.2f}" if isinstance(equity, (int, float)) else "—"
+
     html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AUDIT · {hours}h · {verdict['label']}</title>
@@ -2145,7 +2147,7 @@ a{{color:var(--acid)}}
     <div class="stat"><div class="stat-val {_c(net)}">${net:+.2f}</div><div class="stat-lbl">Net PnL</div></div>
     <div class="stat"><div class="stat-val">{rr:.2f}</div><div class="stat-lbl">R:R</div></div>
     <div class="stat"><div class="stat-val">{audit['trading']['closes_per_hour']:.1f}</div><div class="stat-lbl">Closes/Hr</div></div>
-    <div class="stat"><div class="stat-val">${equity:.2f if equity else 0}</div><div class="stat-lbl">Equity</div></div>
+    <div class="stat"><div class="stat-val">{equity_str}</div><div class="stat-lbl">Equity</div></div>
 </div>
 
 <div class="two">
