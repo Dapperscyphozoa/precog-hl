@@ -7397,11 +7397,20 @@ def main():
     if _RECONCILER_OK and _reconciler is not None and _LEDGER_OK and _INTENTS_OK:
         try:
             def _execute_close_on_exchange(coin):
-                """Market-close a position. Returns fill_px or None.
-                CRITICAL: uses _close_direct to bypass the close() shim and
-                prevent infinite intent->reconciler->intent loop in authoritative mode."""
+                """RAW exchange close via _close_direct.
+                Returns pct (real close) or None (failure — ledger write must be blocked).
+
+                CRITICAL: returning a non-None value when _close_direct failed caused the
+                HMSTR-12-closes-in-4-min loop (ledger marked closed, exchange still open,
+                re-adoption next cycle).
+                """
                 try:
-                    _close_direct(coin)  # direct execution, no intent emission
+                    result = _close_direct(coin)
+                    if result is None:
+                        log(f"[reconciler] _close_direct returned None for {coin} — "
+                            f"will NOT write ledger close (reconciler retry next cycle)")
+                        return None
+                    # _close_direct succeeded (returned pct). Return best-effort exit price.
                     return get_mid(coin)
                 except Exception as e:
                     log(f"[reconciler] execute_close err {coin}: {e}")
