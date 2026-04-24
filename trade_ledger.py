@@ -477,6 +477,41 @@ def dedupe_open_trades():
     return actions
 
 
+def close_missing_on_exchange(live_exchange_coins):
+    """One-time cleanup — for each open ledger trade whose coin is NOT in
+    live_exchange_coins, record a CLOSE with reason='reconcile_missing_on_cleanup'.
+
+    Purpose: flush stale open trades left over from the Step 2 adoption-bug period
+    where positions closed on exchange but ledger never recorded the close
+    (observe mode couldn't execute closes).
+
+    live_exchange_coins: iterable of coin strings currently open on exchange.
+    """
+    exch_set = set(live_exchange_coins or [])
+    actions = {'closed_missing': 0, 'details': []}
+    with _LOCK:
+        # snapshot open coins
+        open_trades = []
+        for tid, rec in _INDEX['by_trade_id'].items():
+            if tid in _INDEX['open_trades']:
+                open_trades.append((tid, rec.get('coin', '')))
+
+    for tid, coin in open_trades:
+        if not coin or coin in exch_set:
+            continue
+        ok = append_close(
+            trade_id=tid,
+            exit_price=None,
+            pnl=None,
+            close_reason='reconcile_missing_on_cleanup',
+            source='ledger_cleanup',
+        )
+        if ok:
+            actions['closed_missing'] += 1
+            actions['details'].append({'coin': coin, 'closed': tid[:8]})
+    return actions
+
+
 # ─────────────────────────────────────────────────────────
 # Boot: migrate + index
 # ─────────────────────────────────────────────────────────
