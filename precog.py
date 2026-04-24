@@ -8230,16 +8230,17 @@ def lifecycle_emergency():
             return jsonify({'err': 'close_coin requires ?coin=<SYMBOL>'}), 400
         coin = coin.upper()
         # Route through the same pipeline a legitimate close() would take.
-        # In authoritative mode: emits FORCE_CLOSE intent → reconciler drains →
-        # _close_direct fires with escalating slip → verify → ledger write.
+        # CRITICAL: use ledger as trade_id source of truth, not state (state can
+        # hold a stale trade_id where the ledger trade is already closed).
         try:
-            pos = state.get('positions', {}).get(coin)
-            tid = pos.get('trade_id') if pos else None
-            if not tid and _LEDGER_OK and _ledger:
+            tid = None
+            if _LEDGER_OK and _ledger:
                 tid = _ledger.latest_open_trade_id_for_coin(coin)
+            if not tid:
+                return jsonify({'err': f'no OPEN ledger trade for {coin}'}), 404
             if _INTENTS_OK and _intents is not None:
                 _intents.emit('FORCE_CLOSE', coin, trade_id=tid, reason='admin_close')
-                log(f"[admin] FORCE_CLOSE emitted for {coin} trade_id={str(tid)[:8] if tid else 'N/A'}")
+                log(f"[admin] FORCE_CLOSE emitted for {coin} trade_id={tid[:8]}")
                 return jsonify({'action': 'close_coin', 'coin': coin,
                                 'trade_id': tid, 'ok': True,
                                 'note': 'intent emitted; reconciler will execute within 15s'})
