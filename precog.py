@@ -5649,7 +5649,7 @@ def close(coin, state_ref=None, reason=None):
     AUTHORITATIVE mode (RECONCILER_AUTHORITATIVE=1):
         Becomes a shim. Emits FORCE_CLOSE intent for the reconciler to resolve.
         Returns None. All callers must treat close() as fire-and-forget.
-        Reconciler is the sole writer.
+        Reconciler is the sole writer (uses _close_direct() to bypass shim).
     """
     # STEP 3: shim routing
     if os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1':
@@ -5659,8 +5659,16 @@ def close(coin, state_ref=None, reason=None):
                           reason=reason or 'legacy_close_shim')
         # DO NOT execute — reconciler handles it.
         return None
+    return _close_direct(coin, state_ref)
 
-    # LEGACY direct-execution path (observe mode)
+
+def _close_direct(coin, state_ref=None):
+    """Direct market-close bypass — the legacy close logic, without shim routing.
+
+    CRITICAL: only callers are (a) close() in observe mode, (b) reconciler's
+    execute_close_fn in authoritative mode. Never call this from strategy/process
+    logic — doing so bypasses the intent queue and the reconciler's authority.
+    """
     live = get_all_positions_live(force=True).get(coin)
     if not live: return None
     is_buy=live['size']<0; size=abs(live['size']); px=get_mid(coin)
@@ -5677,8 +5685,7 @@ def close(coin, state_ref=None, reason=None):
         pnl_usd = live['pnl']
         log(f"CLOSE {coin} {size}@{slip} | entry={entry} exit={px} | {pct:+.2f}% | ${pnl_usd:+.3f}")
         log_trade('HL', coin, 'CLOSE', px, pnl_usd, 'close')
-        cancel_trigger_orders(coin)  # Kill orphaned SL orders
-        # Monitor hook
+        cancel_trigger_orders(coin)
         try:
             import monitor
             monitor.record_close(coin, pct/100, pnl_usd, 0, 'close')
@@ -7391,10 +7398,10 @@ def main():
         try:
             def _execute_close_on_exchange(coin):
                 """Market-close a position. Returns fill_px or None.
-                ONLY used by reconciler in authoritative mode."""
+                CRITICAL: uses _close_direct to bypass the close() shim and
+                prevent infinite intent->reconciler->intent loop in authoritative mode."""
                 try:
-                    pnl = close(coin)  # existing close() does market-close
-                    # Return mid as best-effort fill_px; reconciler will also try to read fill
+                    _close_direct(coin)  # direct execution, no intent emission
                     return get_mid(coin)
                 except Exception as e:
                     log(f"[reconciler] execute_close err {coin}: {e}")
