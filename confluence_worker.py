@@ -39,15 +39,44 @@ RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 STATE_FILE      = '/var/data/confluence_state.json'
 LOG_FILE        = '/var/data/confluence.log'
 
+# ─── FIX 4: slippage reality gap ─────────────────────────────────────
+# Track expected vs actual fill; kill coin if avg slip > 0.15%
+SLIPPAGE_KILL_THRESHOLD_PCT = 0.15  # kill coin above this
+SLIPPAGE_MIN_SAMPLES = 5             # need at least N fills before killing
+
+# ─── FIX 5: coin decay detection ─────────────────────────────────────
+DECAY_MIN_TRADES = 10
+DECAY_WR_THRESHOLD = 0.35
+DECAY_PNL_THRESHOLD = 0.0
+
+# ─── FIX 2: confluence dedupe ────────────────────────────────────────
+# Hash = (coin, side, first_signal_ts) — any signal sharing this key is
+# treated as the same confluence event and blocked within 24h window
+DEDUPE_WINDOW_S = 24 * 3600
+
+# ─── FIX B: entry drift control ──────────────────────────────────────
+MAX_SIGNAL_AGE_S = 15 * 60   # 1 × 15m bar; skip signals older than 1 bar
+
 _state = {
-    'last_fire_ts': {},      # coin -> ts (cooldown tracking)
-    'open_positions': {},    # coin -> {side, entry, ts, size_usd, tp, sl}
+    'last_fire_ts': {},          # coin -> ts (24h cooldown tracking)
+    'open_positions': {},        # coin -> {side, entry, ts, ...}
     'total_fires': 0,
     'wins': 0,
     'losses': 0,
     'timeouts': 0,
     'total_pnl_pct': 0.0,
     'started_at': int(time.time()),
+    # fix 1: per-coin last processed bar timestamp (prevents partial candle eval)
+    'last_bar_ts': {},           # coin -> bar_ts_sec
+    # fix 2: confluence event dedupe
+    'fired_events': {},          # event_key "coin|side|first_ts" -> fire_ts
+    # fix 3: position queue (when cap hit)
+    'pending_queue': [],         # list of {coin, signal, queued_ts}
+    # fix 4: slippage tracking
+    'slippage_samples': {},      # coin -> [pct, pct, ...]
+    'killed_coins': {},          # coin -> {reason, ts}
+    # fix 5: per-coin live perf
+    'coin_stats': {},            # coin -> {n, w, l, pnl_pct}
 }
 _state_lock = threading.Lock()
 
@@ -86,20 +115,40 @@ def _load_state():
 
 def _fetch_15m_bars(coin, n_bars=800):
     """Use precog's info client to pull 15m candles. Returns list of
-    {t, o, h, l, c, v} or None on failure."""
+    {t, o, h, l, c, v} with ONLY fully-closed bars aligned to 00/15/30/45.
+    Returns None on failure or if no new closed bar since last process."""
     try:
-        end = int(time.time() * 1000)
-        start = end - n_bars * 15 * 60 * 1000
-        raw = _precog.info.candles_snapshot(coin, '15m', start, end)
+        # Current fully-closed 15m boundary (exclusive upper bound)
+        now_s = int(time.time())
+        BAR_S = 15 * 60
+        latest_closed_start = (now_s // BAR_S - 1) * BAR_S   # last fully-closed bar start (sec)
+
+        end_ms = (latest_closed_start + BAR_S) * 1000  # request up to end of last closed bar
+        start_ms = end_ms - n_bars * BAR_S * 1000
+        raw = _precog.info.candles_snapshot(coin, '15m', start_ms, end_ms)
         bars = []
         for b in raw:
+            t = int(b['t'])
+            t_s = t // 1000 if t > 10**12 else t
+            # Drop any unaligned or not-yet-closed bar
+            if t_s % BAR_S != 0:
+                continue
+            if t_s > latest_closed_start:
+                continue  # still open bar — drop it
             bars.append({
-                't': int(b['t']),
+                't': t_s,
                 'o': float(b['o']), 'h': float(b['h']),
                 'l': float(b['l']), 'c': float(b['c']),
                 'v': float(b['v']),
             })
-        return bars if len(bars) >= 100 else None
+        if len(bars) < 100:
+            return None
+        # Short-circuit: if we already processed this latest bar, skip
+        with _state_lock:
+            last_seen = _state['last_bar_ts'].get(coin, 0)
+        if bars[-1]['t'] <= last_seen:
+            return None
+        return bars
     except Exception as e:
         if '429' not in str(e):
             _log(f"{coin} candle err: {str(e)[:80]}")
@@ -153,7 +202,8 @@ def _size_and_fire(coin, signal, equity):
          f"TP={tp_px:.4f} SL={sl_px:.4f} [{'DRY' if DRY_RUN else 'LIVE'}]")
 
     if DRY_RUN:
-        return {'dry_run': True, 'size_coin': size_coin, 'tp': tp_px, 'sl': sl_px}
+        return {'dry_run': True, 'size_coin': size_coin, 'tp': tp_px, 'sl': sl_px,
+                'expected_px': entry, 'actual_px': entry}
 
     try:
         # IOC limit into slip price
@@ -162,11 +212,55 @@ def _size_and_fire(coin, signal, equity):
             {'limit': {'tif': 'Ioc'}}, reduce_only=False
         )
         _log(f"{coin} order result: {str(r)[:200]}")
+
+        # ─── FIX 4: record actual slippage vs expected ───
+        actual_px = _extract_avg_fill_px(r)
+        if actual_px and entry > 0:
+            slip_pct = abs(actual_px - entry) / entry * 100
+            _record_slippage(coin, slip_pct)
+            _log(f"{coin} slip: expected={entry:.4f} actual={actual_px:.4f} "
+                 f"delta={slip_pct:.3f}%")
+            if isinstance(r, dict):
+                r['expected_px'] = entry
+                r['actual_px'] = actual_px
+                r['slip_pct'] = slip_pct
         return r
     except Exception as e:
         _log(f"{coin} order FAIL: {e}")
         traceback.print_exc()
         return None
+
+def _extract_avg_fill_px(order_result):
+    """Best-effort extraction of fill price from HL exchange.order response."""
+    try:
+        if not isinstance(order_result, dict):
+            return None
+        # HL response shape: {'status':'ok','response':{'data':{'statuses':[{'filled':{'avgPx':'...','totalSz':'...'}}]}}}
+        data = order_result.get('response', {}).get('data', {})
+        for s in data.get('statuses', []):
+            f = s.get('filled') or {}
+            px = f.get('avgPx')
+            if px:
+                return float(px)
+        return None
+    except Exception:
+        return None
+
+def _record_slippage(coin, slip_pct):
+    with _state_lock:
+        arr = _state['slippage_samples'].setdefault(coin, [])
+        arr.append(float(slip_pct))
+        if len(arr) > 50:
+            arr[:] = arr[-50:]
+        # Kill check
+        if len(arr) >= SLIPPAGE_MIN_SAMPLES:
+            avg = sum(arr) / len(arr)
+            if avg > SLIPPAGE_KILL_THRESHOLD_PCT:
+                _state['killed_coins'][coin] = {
+                    'reason': f'avg_slippage {avg:.3f}% > {SLIPPAGE_KILL_THRESHOLD_PCT}%',
+                    'ts': int(time.time()),
+                }
+                _log(f"*** {coin} KILLED: avg slippage {avg:.3f}% over {len(arr)} fills")
 
 def _register_position(coin, signal, fill_result):
     """Track cluster position locally for monitoring + exit management."""
@@ -255,7 +349,30 @@ def _close_position(coin, reason, pnl=None):
     elif reason == 'timeout':
         with _state_lock:
             _state['timeouts'] += 1
+
+    # ─── FIX 5: per-coin tracking + decay check ───
+    _update_coin_stats(coin, pnl if pnl is not None else 0.0)
     _save_state()
+
+def _update_coin_stats(coin, pnl_decimal):
+    """Track per-coin performance; kill on decay."""
+    with _state_lock:
+        s = _state['coin_stats'].setdefault(coin, {'n': 0, 'w': 0, 'l': 0, 'pnl_pct': 0.0})
+        s['n'] += 1
+        if pnl_decimal > 0:
+            s['w'] += 1
+        elif pnl_decimal < 0:
+            s['l'] += 1
+        s['pnl_pct'] += pnl_decimal * 100
+
+        if s['n'] >= DECAY_MIN_TRADES:
+            wr = s['w'] / max(s['w'] + s['l'], 1)
+            if wr < DECAY_WR_THRESHOLD and s['pnl_pct'] < DECAY_PNL_THRESHOLD:
+                _state['killed_coins'][coin] = {
+                    'reason': f'decay: n={s["n"]} WR={wr:.1%} pnl={s["pnl_pct"]:+.2f}%',
+                    'ts': int(time.time()),
+                }
+                _log(f"*** {coin} KILLED (decay): WR={wr:.1%} pnl={s['pnl_pct']:+.2f}% over {s['n']} trades")
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────
 def _scan_once():
@@ -276,54 +393,151 @@ def _scan_once():
         _log(f"balance read err: {e}")
         return
 
-    # Respect concurrent-position cap
-    with _state_lock:
-        n_open = len(_state['open_positions'])
-
-    if n_open >= MAX_POSITIONS:
-        _log(f"at max positions ({n_open}/{MAX_POSITIONS}), scan only (no new fires)")
-
-    fires_this_scan = 0
+    # ─── Collect candidate signals first (scan-then-fire pattern) ───
+    # This lets us queue by priority when cap is hit (Fix 3)
+    candidates = []  # list of (signal_dict, first_ts) — queued by newness
     now_ts = int(time.time())
+
+    with _state_lock:
+        killed = set(_state['killed_coins'].keys())
+        fired_events = dict(_state['fired_events'])
+
+    # Purge old dedupe entries
+    for k, fire_ts in list(fired_events.items()):
+        if now_ts - fire_ts > DEDUPE_WINDOW_S:
+            with _state_lock:
+                _state['fired_events'].pop(k, None)
+
     for coin in coins:
         try:
+            # Fix 4/5 kill filter
+            if coin in killed:
+                continue
             # Cooldown
             if not _ce.should_enter(coin, _state['last_fire_ts'], now_ts):
                 continue
             # Already in position?
             if _in_position(coin):
                 continue
-            # At cap?
-            with _state_lock:
-                if len(_state['open_positions']) >= MAX_POSITIONS:
-                    break
-            # Fetch + evaluate
+            # Fetch + evaluate (Fix 1: only fully-closed bars)
             bars = _fetch_15m_bars(coin, 800)
             if not bars:
                 continue
             sig = _ce.eval_coin(coin, bars, now_ts=now_ts)
+            # Mark bar as processed even if no signal
+            with _state_lock:
+                _state['last_bar_ts'][coin] = bars[-1]['t']
             if not sig:
                 continue
-            # Gate
+
+            # ─── Fix B: entry drift control ───
+            latest_sig_ts = sig.get('latest_signal_ts') or sig.get('ts')
+            sig_age = now_ts - latest_sig_ts
+            if sig_age > MAX_SIGNAL_AGE_S:
+                _log(f"{coin} {sig['side']} stale ({sig_age}s > {MAX_SIGNAL_AGE_S}s) — skip")
+                continue
+
+            # ─── Fix 2: confluence event dedupe ───
+            # Use first signal ts across the agreeing systems as the event anchor
+            first_ts = sig.get('latest_signal_ts') or sig.get('ts')
+            # Bucket to confluence window so minor drift doesn't break dedupe
+            ts_bucket = (first_ts // DEDUPE_WINDOW_S) * DEDUPE_WINDOW_S
+            evt_key = f"{coin}|{sig['side']}|{ts_bucket}"
+            if evt_key in fired_events:
+                continue  # already fired this event
+
+            # Entry gate
             ok, why = _entry_gate_ok(coin, sig['side'])
             if not ok:
-                _log(f"{coin} {sig['side']} confluence n={sig['n_sys']} — gated by {why}")
+                _log(f"{coin} {sig['side']} n={sig['n_sys']} — gated by {why}")
+                continue
+
+            sig['_evt_key'] = evt_key
+            sig['_first_ts'] = first_ts
+            candidates.append(sig)
+        except Exception as e:
+            _log(f"{coin} scan err: {e}")
+
+    # ─── Fix 3: priority queue — newest first when cap is hit ───
+    candidates.sort(key=lambda s: -s['_first_ts'])
+
+    fires_this_scan = 0
+    queued_this_scan = 0
+    for sig in candidates:
+        coin = sig['coin']
+        try:
+            with _state_lock:
+                n_open = len(_state['open_positions'])
+            if n_open >= MAX_POSITIONS:
+                # Queue it; older queued entries drop off if stale
+                with _state_lock:
+                    _state['pending_queue'].append({
+                        'coin': coin, 'signal': sig, 'queued_ts': now_ts
+                    })
+                    # Keep queue bounded + fresh
+                    cutoff = now_ts - MAX_SIGNAL_AGE_S
+                    _state['pending_queue'] = [
+                        q for q in _state['pending_queue'] if q['queued_ts'] >= cutoff
+                    ][-50:]
+                queued_this_scan += 1
                 continue
             # Fire
             fill = _size_and_fire(coin, sig, equity)
             if fill is not None:
                 _register_position(coin, sig, fill)
+                with _state_lock:
+                    _state['fired_events'][sig['_evt_key']] = now_ts
                 fires_this_scan += 1
-            time.sleep(0.1)  # be kind to rate limits
+            time.sleep(0.1)
         except Exception as e:
-            _log(f"{coin} scan err: {e}")
+            _log(f"{coin} fire err: {e}")
 
     _monitor_exits()
+
+    # ─── Fix 3: drain queue if exits freed slots ───
+    drained = 0
+    with _state_lock:
+        queue_snapshot = list(_state['pending_queue'])
+    for q in queue_snapshot:
+        with _state_lock:
+            n_open = len(_state['open_positions'])
+        if n_open >= MAX_POSITIONS:
+            break
+        age = now_ts - q['queued_ts']
+        if age > MAX_SIGNAL_AGE_S:
+            # Stale — drop
+            with _state_lock:
+                if q in _state['pending_queue']:
+                    _state['pending_queue'].remove(q)
+            continue
+        sig = q['signal']
+        coin = sig['coin']
+        if _in_position(coin) or coin in killed:
+            with _state_lock:
+                if q in _state['pending_queue']:
+                    _state['pending_queue'].remove(q)
+            continue
+        try:
+            fill = _size_and_fire(coin, sig, equity)
+            if fill is not None:
+                _register_position(coin, sig, fill)
+                with _state_lock:
+                    _state['fired_events'][sig['_evt_key']] = now_ts
+                    if q in _state['pending_queue']:
+                        _state['pending_queue'].remove(q)
+                drained += 1
+        except Exception as e:
+            _log(f"{coin} queue drain err: {e}")
+
     with _state_lock:
         n_open = len(_state['open_positions'])
+        q_len = len(_state['pending_queue'])
+        n_killed = len(_state['killed_coins'])
         stats = f"fires={_state['total_fires']} W={_state['wins']} L={_state['losses']} " \
                 f"TO={_state['timeouts']} pnl={_state['total_pnl_pct']:+.2f}%"
-    _log(f"scan done: +{fires_this_scan} new | open={n_open}/{MAX_POSITIONS} | {stats}")
+    _log(f"scan done: +{fires_this_scan} new +{drained} drained +{queued_this_scan} queued "
+         f"| open={n_open}/{MAX_POSITIONS} queue={q_len} killed={n_killed} | {stats}")
+    _save_state()
 
 def _loop():
     _load_state()
