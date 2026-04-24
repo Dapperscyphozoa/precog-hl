@@ -5233,8 +5233,24 @@ def try_tier_bump(incoming_coin, state, live_positions):
         log(f"TIER-BUMP: freed ~${freed:.0f} by closing {count} lower-tier positions for {incoming_coin}")
     return freed, count
 
-def place(coin, is_buy, size):
-    """HL-compliant price rounding + maker/taker handling."""
+def place(coin, is_buy, size, cloid=None):
+    """HL-compliant price rounding + maker/taker handling.
+
+    Step 2: accepts optional cloid for exchange-side identity binding.
+    cloid derives from trade_id by caller; see entry sites in process()/webhook.
+    """
+    # Convert cloid string to hyperliquid Cloid object if provided
+    _cloid_obj = None
+    if cloid:
+        try:
+            from hyperliquid.utils.types import Cloid
+            # HL requires cloid as 16-byte hex padded: '0x' + 32 hex chars
+            hex_str = cloid.encode().hex()[:32].ljust(32, '0')
+            _cloid_obj = Cloid.from_str('0x' + hex_str)
+        except Exception as _ce:
+            log(f"cloid construction err {coin}: {_ce} — placing without cloid")
+            _cloid_obj = None
+
     px = get_mid(coin)
     if not px: return None
     set_isolated_leverage(coin)
@@ -5265,7 +5281,7 @@ def place(coin, is_buy, size):
     else:
         maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
     try:
-        r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False)
+        r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False, cloid=_cloid_obj)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
         if 'error' in status:
             log(f"MAKER {coin} rejected: {status['error']} @ {maker_px}")
@@ -5332,7 +5348,7 @@ def place(coin, is_buy, size):
     px = get_mid(coin) or px
     slip_px = round_price(coin, px * (1.005 if is_buy else 0.995))
     try:
-        r = exchange.order(coin, is_buy, size, slip_px, {'limit':{'tif':'Ioc'}}, reduce_only=False)
+        r = exchange.order(coin, is_buy, size, slip_px, {'limit':{'tif':'Ioc'}}, reduce_only=False, cloid=_cloid_obj)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
         if 'error' in status:
             log(f"TAKER {coin} rejected: {status['error']} @ {slip_px}"); return None
@@ -7084,8 +7100,22 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 # rejected as reduce_only violations (bug fix 2026-04-22: 5 of 6 new
                 # shorts opened with TP but no SL because re-computed sz differed).
                 sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
-                fill_px = place(coin, False, sz)
+                # STEP 2: generate trade identity before placing
+                _trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
+                _cloid = (f"{_trade_id[:8]}{coin[:4]}{'S'}"[:16]) if _trade_id else None
+                fill_px = place(coin, False, sz, cloid=_cloid)
                 if fill_px:
+                    # STEP 2: ENTRY event to ledger — binds identity before any further writes
+                    if _LEDGER_OK and _ledger is not None and _trade_id:
+                        try:
+                            _ledger.append_entry(
+                                coin=coin, side='SELL', entry_price=fill_px,
+                                engine=signal_engine, source='precog_signal',
+                                sl_pct=None, tp_pct=None,  # populated below after EP
+                                cloid=_cloid, trade_id=_trade_id,
+                            )
+                        except Exception as _le:
+                            log(f"[ledger] append_entry err {coin}: {_le}")
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_sell')
                         except Exception: pass
@@ -7125,7 +7155,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'tp_pct': _tp_pct_used,
                                                 'sigs': _sigs_for_pm,
                                                 'size': sz,
-                                                'tf': '15m'}
+                                                'tf': '15m',
+                                                'trade_id': _trade_id,
+                                                'cloid': _cloid}
                     # Register experimental promotion if pending
                     if coin in _EXPERIMENT_PENDING and _PROMO_OK and _promo is not None:
                         _exp_tag = _EXPERIMENT_PENDING.pop(coin)
@@ -7169,8 +7201,22 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 try_tier_bump(coin, state, live_positions)
                 # CRITICAL: compute sz ONCE — calc_size is not deterministic (see short path above)
                 sz = calc_size(equity, px, risk_pct, risk_mult, coin=coin, side=sig)
-                fill_px = place(coin, True, sz)
+                # STEP 2: generate trade identity before placing
+                _trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
+                _cloid = (f"{_trade_id[:8]}{coin[:4]}{'L'}"[:16]) if _trade_id else None
+                fill_px = place(coin, True, sz, cloid=_cloid)
                 if fill_px:
+                    # STEP 2: ENTRY event to ledger
+                    if _LEDGER_OK and _ledger is not None and _trade_id:
+                        try:
+                            _ledger.append_entry(
+                                coin=coin, side='BUY', entry_price=fill_px,
+                                engine=signal_engine, source='precog_signal',
+                                sl_pct=None, tp_pct=None,
+                                cloid=_cloid, trade_id=_trade_id,
+                            )
+                        except Exception as _le:
+                            log(f"[ledger] append_entry err {coin}: {_le}")
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_buy')
                         except Exception: pass
@@ -7208,7 +7254,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                                 'tp_pct': _tp_pct_used,
                                                 'sigs': _sigs_for_pm,
                                                 'size': sz,
-                                                'tf': '15m'}
+                                                'tf': '15m',
+                                                'trade_id': _trade_id,
+                                                'cloid': _cloid}
                     # Register experimental promotion if pending
                     if coin in _EXPERIMENT_PENDING and _PROMO_OK and _promo is not None:
                         _exp_tag = _EXPERIMENT_PENDING.pop(coin)
@@ -7358,19 +7406,55 @@ def main():
             for k in list(state['positions'].keys()):
                 if state['positions'][k] and k not in live_positions:
                     log(f"RECONCILE: phantom {k} cleared (may be liquidation or native SL)")
+                    # STEP 2: also close in ledger if trade_id known (reconciler_missing reason)
+                    _phantom_tid = state['positions'][k].get('trade_id')
+                    if _phantom_tid and _LEDGER_OK and _ledger is not None:
+                        try:
+                            if not _ledger.is_closed(_phantom_tid):
+                                _ledger.append_close(
+                                    trade_id=_phantom_tid,
+                                    exit_price=None,
+                                    pnl=None,
+                                    close_reason='reconcile_phantom_clear',
+                                    source='reconcile',
+                                )
+                                log(f"[ledger] phantom {k} trade_id={_phantom_tid[:8]} marked closed")
+                        except Exception as _le:
+                            log(f"[ledger] phantom close err {k}: {_le}")
                     state['positions'].pop(k)
             # Track live-only positions (HL has it, state doesn't)
             for k in live_positions:
                 if k not in state['positions']:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
+                    # STEP 2: orphan detection — position on exchange with no state binding
+                    # Adopt it AND write ENTRY to ledger so it has a trade_id going forward.
+                    _adopt_trade_id = None
+                    if _LEDGER_OK and _ledger is not None:
+                        try:
+                            _adopt_trade_id = _ledger.new_trade_id()
+                            _ledger.append_entry(
+                                coin=k,
+                                side='BUY' if side == 'L' else 'SELL',
+                                entry_price=entry_px,
+                                engine='RECONCILED',
+                                source='reconcile_adopt',
+                                cloid=None,  # no cloid for adopted orphans
+                                trade_id=_adopt_trade_id,
+                            )
+                            log(f"RECONCILE LEDGER: adopted {k} as trade_id={_adopt_trade_id[:8]}")
+                        except Exception as _le:
+                            log(f"[ledger] reconcile adopt err {k}: {_le}")
+                    else:
+                        log(f"ORPHAN POSITION: {k} on exchange — ledger unavailable, cannot bind identity")
                     # opened_at = now (not now-3600). Previous value guaranteed
                     # dust-sweep would kill adopted positions on the same tick
                     # because age would immediately exceed DUST_MIN_AGE_SEC (30min).
                     # Post-deploy positions get a fresh 30min grace window.
                     state['positions'][k] = {'side':side, 'opened_at':now, 'entry':entry_px,
                                              'stage':'initial', 'peak':entry_px,
-                                             'engine':'RECONCILED', 'source':'reconcile'}
+                                             'engine':'RECONCILED', 'source':'reconcile',
+                                             'trade_id': _adopt_trade_id}
                     log(f"RECONCILE: adopting existing {k} {side} (fresh 30min grace window)")
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(k, 'reconcile_adopt', size_after=abs(live_positions[k]['size']), origin='reconcile_loop')
@@ -7716,8 +7800,22 @@ def main():
                                 # Apply both conviction and gate multipliers to size calc
                                 wh_risk_mult = min(RISK_MULT_CEIL, risk_mult * wh_size_mult * wh_gate_mult * _wh_mtf_mult * _wh_partial)
                                 sz = calc_size(equity, px, risk_pct, wh_risk_mult, coin=coin, side=side_str)
-                                fill = place(coin, is_buy, sz)
+                                # STEP 2: generate trade identity before placing
+                                _wh_trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
+                                _wh_cloid = (f"{_wh_trade_id[:8]}{coin[:4]}{'L' if is_buy else 'S'}"[:16]) if _wh_trade_id else None
+                                fill = place(coin, is_buy, sz, cloid=_wh_cloid)
                                 if fill:
+                                    # STEP 2: ENTRY event to ledger
+                                    if _LEDGER_OK and _ledger is not None and _wh_trade_id:
+                                        try:
+                                            _ledger.append_entry(
+                                                coin=coin, side=side_str, entry_price=fill,
+                                                engine='WEBHOOK', source='webhook',
+                                                sl_pct=None, tp_pct=None,
+                                                cloid=_wh_cloid, trade_id=_wh_trade_id,
+                                            )
+                                        except Exception as _le:
+                                            log(f"[ledger] webhook append_entry err {coin}: {_le}")
                                     # ENFORCE PROTECTION: atomic TP+SL with authoritative size
                                     _ep_res = enforce_position_protection(coin, is_buy, fill, origin='webhook')
                                     _sl_pct_used = _ep_res.get('sl_pct')
@@ -7741,6 +7839,8 @@ def main():
                                         'conf': wh_conf,
                                         'conf_mult': wh_size_mult,
                                         'gate_mult': wh_gate_mult,
+                                        'trade_id': _wh_trade_id,
+                                        'cloid': _wh_cloid,
                                     }
                                     log(f"WEBHOOK OPEN {coin} {side_str} @ {fill} (px_src={'bybit_ws' if px==by_px else 'hl_mid'}, age={by_age}ms)")
                                     log_trade('HL', coin, side_str, fill, 0, 'webhook')
