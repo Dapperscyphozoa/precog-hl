@@ -66,7 +66,9 @@ _CB_ERROR_RATE_TRIP = 0.30
 
 # Idempotency ring
 _RECENT_CLOSED_RING_SIZE = 100
+_RECENT_CLOSED_COIN_TTL_SEC = 45   # skip orphan-adopt for coins closed within this window
 _recent_closed_trade_ids = []
+_recent_closed_coins = {}          # coin -> ts of most recent close
 _cycle_error_flags = []
 
 _METRICS = {
@@ -138,16 +140,26 @@ def _in_recent_closed_ring(trade_id):
     return trade_id in _recent_closed_trade_ids
 
 
-def _add_to_recent_closed_ring(trade_id):
-    """Add trade_id to ring buffer of recent closes."""
+def _add_to_recent_closed_ring(trade_id, coin=None):
+    """Add trade_id to ring buffer of recent closes; also track coin with timestamp."""
     global _recent_closed_trade_ids
     if trade_id in _recent_closed_trade_ids:
         return
     _recent_closed_trade_ids.append(trade_id)
     if len(_recent_closed_trade_ids) > _RECENT_CLOSED_RING_SIZE:
         _recent_closed_trade_ids = _recent_closed_trade_ids[-_RECENT_CLOSED_RING_SIZE:]
+    if coin:
+        _recent_closed_coins[coin] = time.time()
     with _LOCK:
         _METRICS['recent_closed_ring_size'] = len(_recent_closed_trade_ids)
+
+
+def _coin_recently_closed(coin):
+    """True if we closed this coin within the last _RECENT_CLOSED_COIN_TTL_SEC."""
+    ts = _recent_closed_coins.get(coin)
+    if not ts:
+        return False
+    return (time.time() - ts) < _RECENT_CLOSED_COIN_TTL_SEC
 
 
 def _log(msg):
@@ -330,7 +342,7 @@ def _process_intent(intent, snap, authoritative):
             if ok:
                 _METRICS['closes_executed'] += 1
         if ok:
-            _add_to_recent_closed_ring(tid)
+            _add_to_recent_closed_ring(tid, coin=coin)
         return 'closed_via_exchange_fill'
 
     # Case B: position still open — execute the close
@@ -372,7 +384,7 @@ def _process_intent(intent, snap, authoritative):
         if ok:
             _METRICS['closes_executed'] += 1
     if ok:
-        _add_to_recent_closed_ring(tid)
+        _add_to_recent_closed_ring(tid, coin=coin)
     return 'closed_via_intent'
 
 
@@ -396,6 +408,10 @@ def _detect_orphans(snap, ledger_stats):
         ledger_open_coins = set()
 
     for coin in exch_coins - ledger_open_coins:
+        # Skip coins we just closed — exchange snapshot lag would re-adopt otherwise
+        if _coin_recently_closed(coin):
+            _log(f"ORPHAN SKIP: {coin} was closed in last {_RECENT_CLOSED_COIN_TTL_SEC}s — snapshot lag")
+            continue
         pos = snap['positions'].get(coin, {})
         side_char = pos.get('side', 'L')  # 'L' or 'S' from snapshot
         entry_px = pos.get('entry', 0) or 0
@@ -459,7 +475,7 @@ def _detect_missing_closes(snap, authoritative):
                 else:
                     _METRICS['exchange_fills_unmatched'] += 1
         if ok:
-            _add_to_recent_closed_ring(tid)
+            _add_to_recent_closed_ring(tid, coin=coin)
 
 
 def _cycle():
