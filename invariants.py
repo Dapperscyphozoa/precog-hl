@@ -210,7 +210,7 @@ def assert_entry_protection(coin, tp_pct_used, sl_pct_used, close_fn, pos_info=N
 # ─────────────────────────────────────────────────────
 # #3 ORDER PERSISTENCE + #6 DEADMAN
 # ─────────────────────────────────────────────────────
-def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn, place_sl_fn, close_fn):
+def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn, place_sl_fn, close_fn, enforce_fn=None):
     """Scan all open positions. For each:
     - Check if SL is on exchange
     - Check if TP is on exchange
@@ -323,32 +323,48 @@ def check_protection_coverage(live_positions_fn, get_open_orders_fn, place_tp_fn
             if tp_invalid: missing.append('TP_invalid')
             if sl_invalid: missing.append('SL_invalid')
             print(f"{_LOG_PREFIX} ⚠ {coin} naked ({', '.join(missing)}) "
-                  f"for {naked_duration:.0f}s — attempting recreation", flush=True)
+                  f"for {naked_duration:.0f}s — calling enforce_protection", flush=True)
 
-            # Attempt to replace missing/invalid orders
+            # PHASE 1: call enforce_protection (atomic cancel+replace+verify)
+            # INSTEAD of scattered place_sl/tp + recreation logic.
             is_long = sz > 0
-            # If size mismatch, old orders must be cancelled before placing new
-            # ones, else HL rejects duplicates. The place_*_fn's should handle
-            # this, but we pass a hint via a module-level flag checked by caller.
-            try:
-                if not has_sl or sl_invalid:
-                    sl_res = place_sl_fn(coin, is_long, entry, abs(sz))
-                    if sl_res is not None:
-                        print(f"{_LOG_PREFIX} {coin} SL recreated ({sl_res})", flush=True)
+            if enforce_fn is not None:
+                try:
+                    ep_result = enforce_fn(coin, is_long, entry, origin='deadman_repair')
+                    if ep_result.get('success'):
+                        print(f"{_LOG_PREFIX} {coin} enforce_protection SUCCESS "
+                              f"(replaced={ep_result.get('replaced')}, "
+                              f"dur={ep_result.get('duration_sec', 0):.1f}s)", flush=True)
+                    elif ep_result.get('emergency_closed'):
+                        print(f"{_LOG_PREFIX} {coin} enforce_protection EMERGENCY CLOSED "
+                              f"({ep_result.get('reason')})", flush=True)
+                        with _LOCK:
+                            _VIOLATIONS['deadman_triggered'] += 1
+                        _classify_violation(coin, 'deadman_triggered',
+                                            naked_duration=round(naked_duration, 1),
+                                            pos_size=abs(sz),
+                                            ep_reason=ep_result.get('reason'))
                     else:
-                        print(f"{_LOG_PREFIX} {coin} SL RECREATION FAILED", flush=True)
-            except Exception as e:
-                print(f"{_LOG_PREFIX} {coin} SL recreation err: {e}", flush=True)
-
-            try:
-                if not has_tp or tp_invalid:
-                    tp_res = place_tp_fn(coin, is_long, entry, abs(sz))
-                    if tp_res is not None:
-                        print(f"{_LOG_PREFIX} {coin} TP recreated ({tp_res})", flush=True)
-                    else:
-                        print(f"{_LOG_PREFIX} {coin} TP RECREATION FAILED", flush=True)
-            except Exception as e:
-                print(f"{_LOG_PREFIX} {coin} TP recreation err: {e}", flush=True)
+                        print(f"{_LOG_PREFIX} {coin} enforce_protection FAILED "
+                              f"({ep_result.get('reason')})", flush=True)
+                except Exception as e:
+                    print(f"{_LOG_PREFIX} {coin} enforce_protection err: {e}", flush=True)
+            else:
+                # Legacy fallback path (should not happen in phase 1)
+                try:
+                    if not has_sl or sl_invalid:
+                        sl_res = place_sl_fn(coin, is_long, entry, abs(sz))
+                        if sl_res is not None:
+                            print(f"{_LOG_PREFIX} {coin} SL recreated ({sl_res}) [LEGACY]", flush=True)
+                except Exception as e:
+                    print(f"{_LOG_PREFIX} {coin} SL err: {e}", flush=True)
+                try:
+                    if not has_tp or tp_invalid:
+                        tp_res = place_tp_fn(coin, is_long, entry, abs(sz))
+                        if tp_res is not None:
+                            print(f"{_LOG_PREFIX} {coin} TP recreated ({tp_res}) [LEGACY]", flush=True)
+                except Exception as e:
+                    print(f"{_LOG_PREFIX} {coin} TP err: {e}", flush=True)
 
             # DEADMAN: if SL still missing > EMERGENCY_CLOSE_AFTER_SEC, close
             if (not has_sl or sl_invalid) and naked_duration > EMERGENCY_CLOSE_AFTER_SEC:
@@ -461,7 +477,7 @@ def audit_close(coin, entry_price, tp_pct, sl_pct, exit_price, exit_reason,
 # Deadman daemon
 # ─────────────────────────────────────────────────────
 def start_deadman_daemon(live_positions_fn, get_open_orders_fn,
-                         place_tp_fn, place_sl_fn, close_fn):
+                         place_tp_fn, place_sl_fn, close_fn, enforce_fn=None):
     """Launch the deadman scan daemon. Idempotent."""
     global _DAEMON_RUNNING
     if _DAEMON_RUNNING:
@@ -473,7 +489,7 @@ def start_deadman_daemon(live_positions_fn, get_open_orders_fn,
             try:
                 check_protection_coverage(
                     live_positions_fn, get_open_orders_fn,
-                    place_tp_fn, place_sl_fn, close_fn)
+                    place_tp_fn, place_sl_fn, close_fn, enforce_fn=enforce_fn)
             except Exception as e:
                 print(f"{_LOG_PREFIX} deadman loop err: {e}", flush=True)
             time.sleep(DEADMAN_INTERVAL_SEC)

@@ -218,6 +218,15 @@ except Exception as _e:
     _PROMO_OK = False
     print(f'[promotion_engine] import failed (non-fatal): {_e}', flush=True)
 
+# Enforce Protection — single atomic authority for TP/SL lifecycle.
+try:
+    import enforce_protection as _ep
+    _EP_OK = True
+except Exception as _e:
+    _ep = None
+    _EP_OK = False
+    print(f'[enforce_protection] import failed (non-fatal): {_e}', flush=True)
+
 # Pending experimental tags: coin -> tag dict. Populated in signal-reject path
 # when a promotion is granted. Consumed at entry completion to register with
 # promotion engine + annotate position metadata.
@@ -2705,6 +2714,18 @@ a{{color:var(--acid)}}
         return jsonify({'error': str(e), 'tb': traceback.format_exc()[-800:]}), 500
 
 
+@app.route('/enforce', methods=['GET'])
+def enforce_status():
+    """Enforce Protection stats — replacement/verification counts,
+    deadline breach counters, currently-halted coins."""
+    try:
+        if not _EP_OK or _ep is None:
+            return jsonify({'error': 'enforce_protection not loaded'}), 503
+        return jsonify(_ep.stats())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/experiment', methods=['GET'])
 def experiment_status():
     """Promotion engine status — experimental bucket tracking, A/B test state."""
@@ -5159,6 +5180,130 @@ def flatten_all(reason='KILL'):
         close(coin)
         time.sleep(0.3)
 
+
+# ═══════════════════════════════════════════════════════
+# ENFORCE PROTECTION — adapter helpers for enforce_protection.py
+# ═══════════════════════════════════════════════════════
+
+def _ep_fetch_size(coin):
+    """Fetch authoritative position size from HL. Direct call (no cache)
+    because we need point-in-time truth during protection enforcement."""
+    try:
+        us = info.user_state(WALLET)
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            if p.get('coin', '').upper() == coin.upper():
+                szi = float(p.get('szi', 0))
+                if abs(szi) > 1e-12:
+                    return abs(szi)
+        return None
+    except Exception as e:
+        log(f'[ep_fetch_size] {coin} err: {e}')
+        return None
+
+
+def _ep_fetch_orders(coin):
+    """Fetch open trigger orders for coin. Uses frontend_open_orders which
+    returns a richer payload including 'isTrigger', 'triggerPx', 'tpsl'."""
+    try:
+        fo = _cached_frontend_orders() or []
+        out = []
+        for o in fo:
+            if o.get('coin', '').upper() != coin.upper():
+                continue
+            # Trigger orders have isTrigger=True, and tpsl in {'tp','sl',None}
+            if not o.get('isTrigger'):
+                continue
+            tpsl = o.get('tpsl') or ''
+            if tpsl.lower() not in ('tp', 'sl'):
+                continue
+            out.append({
+                'oid': o.get('oid'),
+                'sz': float(o.get('sz', 0) or 0),
+                'tpsl': tpsl,
+                'triggerPx': float(o.get('triggerPx', 0) or 0),
+                'side': o.get('side'),
+            })
+        return out
+    except Exception as e:
+        log(f'[ep_fetch_orders] {coin} err: {e}')
+        return []
+
+
+def _ep_cancel_order(coin, oid):
+    """Cancel a specific order by oid."""
+    try:
+        r = exchange.cancel(coin, oid)
+        # Invalidate cache so fetch_orders returns fresh state
+        try:
+            _cache['fo'] = None
+            _cache['fo_ts'] = 0
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        log(f'[ep_cancel] {coin} oid={oid} err: {e}')
+        return False
+
+
+def enforce_position_protection(coin, is_long, entry_px, origin='unknown'):
+    """Single call to protect a position: idempotent, atomic, authoritative.
+
+    Phase 1 contract:
+    - SL verified ≤ 5s or emergency close
+    - TP verified ≤ 15s or repair (no close)
+    - Cloid idempotency
+    - Coin halted 5min after critical execution failure
+    """
+    if not _EP_OK or _ep is None:
+        # Fallback: legacy pattern
+        sl_pct = place_native_sl(coin, is_long, entry_px, _ep_fetch_size(coin) or 0)
+        tp_pct = place_native_tp(coin, is_long, entry_px, _ep_fetch_size(coin) or 0)
+        return {
+            'success': (sl_pct is not None and tp_pct is not None),
+            'tp_pct': tp_pct, 'sl_pct': sl_pct,
+            'replaced': False, 'tp_placed': tp_pct is not None,
+            'sl_placed': sl_pct is not None, 'actual_size': None,
+            'reason': 'legacy_fallback' if not _EP_OK else None,
+            'emergency_closed': False, 'coin_halted': False,
+        }
+    # Wire emergency_close to precog's close() which is the authorized path
+    def _emergency_close_fn(c, reason):
+        try:
+            log(f"{c} EMERGENCY CLOSE triggered by enforce_protection: {reason}")
+            # Use authorized path through contract if available
+            if _EC_OK and _contract is not None:
+                _contract.authorize_close(c, f'enforce_{reason}', ttl_sec=30)
+            close(c)
+            state.get('positions', {}).pop(c, None)
+            return True
+        except Exception as _ece:
+            log(f"{c} emergency close err: {_ece}")
+            return False
+
+    return _ep.enforce_protection(
+        coin=coin,
+        is_long=is_long,
+        entry_px=entry_px,
+        fetch_size_fn=_ep_fetch_size,
+        fetch_orders_fn=_ep_fetch_orders,
+        cancel_order_fn=_ep_cancel_order,
+        place_tp_fn=place_native_tp,
+        place_sl_fn=place_native_sl,
+        log_fn=log,
+        emergency_close_fn=_emergency_close_fn,
+        origin=origin,
+    )
+
+
+def is_coin_execution_halted(coin):
+    """Check if coin is halted from new entries due to critical execution failure."""
+    if not _EP_OK or _ep is None:
+        return False
+    try: return _ep.is_coin_halted(coin)
+    except Exception: return False
+
+
 # ═══════════════════════════════════════════════════════
 # PROCESS — one coin per tick
 # ═══════════════════════════════════════════════════════
@@ -5235,18 +5380,34 @@ def place_native_sl(coin, is_long, entry, size):
         # at SL placement left positions naked indefinitely. Protect_all would
         # try again later but the window between fill and SL attachment is
         # where flash crashes wipe accounts. Inline retry keeps positions safe.
+        # Deterministic cloid for HL-level idempotency: retries with same
+        # (coin, side, purpose, size) get same cloid → HL dedups.
+        _sl_cloid = None
+        if _EP_OK and _ep is not None:
+            try: _sl_cloid = _ep.cloid_for(coin, 'SHORT' if not is_long else 'LONG', 'sl', sl_size)
+            except Exception: pass
         r = None
         last_err = None
         for attempt in range(4):
             try:
+                order_kwargs = {
+                    'reduce_only': True,
+                }
+                if _sl_cloid:
+                    order_kwargs['cloid'] = _sl_cloid
                 r = exchange.order(coin, sl_side, sl_size, limit_px,
                                {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "sl"}},
-                               reduce_only=True)
+                               **order_kwargs)
                 # success — break out
                 break
             except Exception as _e:
                 last_err = _e
                 err_str = str(_e).lower()
+                # Cloid collision = HL already has this order → treat as success
+                if 'cloid' in err_str or 'duplicate' in err_str:
+                    log(f"{coin} SL cloid dedup'd by HL (idempotency worked): {_e}")
+                    r = {'response': {'data': {'statuses': [{'resting': {'oid': 'dedup'}}]}}}
+                    break
                 if '429' in err_str or 'rate' in err_str or 'timeout' in err_str or 'connection' in err_str:
                     # Exponential backoff: 0.5s, 1.5s, 3.5s
                     backoff = 0.5 * (3 ** attempt)
@@ -5371,18 +5532,29 @@ def place_native_tp(coin, is_long, entry, size):
         limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
         tp_size = float(round_size(coin, actual_size))
         tp_side = not is_long
+        # Deterministic cloid for HL-level idempotency
+        _tp_cloid = None
+        if _EP_OK and _ep is not None:
+            try: _tp_cloid = _ep.cloid_for(coin, 'SHORT' if not is_long else 'LONG', 'tp', tp_size)
+            except Exception: pass
         # 2026-04-22: retry on transient errors, same as SL path
         r = None
         last_err = None
         for attempt in range(4):
             try:
+                order_kwargs = {'reduce_only': True}
+                if _tp_cloid: order_kwargs['cloid'] = _tp_cloid
                 r = exchange.order(coin, tp_side, tp_size, limit_px,
                                {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
-                               reduce_only=True)
+                               **order_kwargs)
                 break
             except Exception as _e:
                 last_err = _e
                 err_str = str(_e).lower()
+                if 'cloid' in err_str or 'duplicate' in err_str:
+                    log(f"{coin} TP cloid dedup'd by HL (idempotency worked): {_e}")
+                    r = {'response': {'data': {'statuses': [{'resting': {'oid': 'dedup'}}]}}}
+                    break
                 if '429' in err_str or 'rate' in err_str or 'timeout' in err_str or 'connection' in err_str:
                     backoff = 0.5 * (3 ** attempt)
                     log(f"{coin} TP attempt {attempt+1} hit transient err ({_e}) — retry in {backoff:.1f}s")
@@ -5406,6 +5578,15 @@ def place_native_tp(coin, is_long, entry, size):
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
+
+    # EXECUTION CONTRACT v2: block new activity on halted coins.
+    # Halt is set after emergency close from enforce_protection failure.
+    # 5-min cooldown; cleared automatically by next successful enforce.
+    if is_coin_execution_halted(coin):
+        # Only log occasionally to avoid spam (once per ~10 ticks)
+        if hash(coin + str(int(time.time() / 300))) % 10 == 0:
+            log(f"{coin} EXECUTION HALTED — skipping (critical execution failure)")
+        return
 
     # TF ISOLATION: 15m engine owns only 15m-tagged positions. If a position
     # exists and it's NOT 15m, do NOT interfere. 1h/4h engines manage those.
@@ -5530,34 +5711,49 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
                 sig = None; signal_engine = None
 
-    # Opposite-signal exit: if we hold OPPOSITE-SIDE position AND it's profitable, close it first.
-    # Under CONTRACT: this is advisory — queue and let TP/SL resolve.
-    # Without contract: legacy behavior.
+    # REVERSAL CONTRACT v2: market-close → confirm closed → allow new entry
+    # this tick. Option A per Phase 1 spec. No queueing, no waiting for TP/SL.
     if sig and coin in state.get('positions', {}):
         pos = state['positions'][coin]
         if pos and ((pos.get('side')=='L' and sig=='SELL') or (pos.get('side')=='S' and sig=='BUY')):
-            if _EC_OK and _contract is not None:
-                _contract.queue_reversal(coin, sig, 'signal_reversal')
-                log(f"{coin} OPP-EXIT QUEUED under contract ({sig})")
-                sig = None; signal_engine = None
-            else:
-                try:
-                    live = live_positions.get(coin, {})
-                    cur_pnl = live.get('pnl', 0) if live else 0
-                    entry_px = pos.get('entry', 0)
-                    tp_pct = pos.get('tp_pct')
-                    size_abs = abs(live.get('size', 0))
-                    notional = size_abs * entry_px if entry_px else 0
-                    threshold = notional * (tp_pct or 0.06) * 0.50 if notional else 0.10
-                    if cur_pnl >= threshold:
-                        close(coin)
-                        log(f"{coin} OPP-EXIT on {sig} signal (locking +${cur_pnl:.2f} >= 50%TP threshold ${threshold:.2f})")
-                    else:
-                        log(f"{coin} OPP-EXIT skipped: pos at ${cur_pnl:+.2f} below 50%TP threshold ${threshold:.2f}")
-                        sig = None; signal_engine = None
-                except Exception as e:
-                    log(f"opp-exit err {coin}: {e}")
+            try:
+                log(f"{coin} REVERSAL {pos.get('side')} → {sig}: HARD CLOSE")
+                # Authorize close through contract (maintains contract invariants)
+                if _EC_OK and _contract is not None:
+                    try:
+                        _contract.authorize_close(coin, 'signal_reversal', ttl_sec=30)
+                    except Exception:
+                        pass
+                # Execute market close
+                close(coin)
+                # Confirm closed: poll HL until size=0 (5s timeout)
+                _rev_confirmed = False
+                _rev_start = time.time()
+                while time.time() - _rev_start < 5.0:
+                    time.sleep(0.5)
+                    try:
+                        actual = _ep_fetch_size(coin)
+                        if actual is None or actual < 1e-9:
+                            _rev_confirmed = True
+                            break
+                    except Exception:
+                        pass
+                if _rev_confirmed:
+                    # Cancel any residual TP/SL (reduce-only orders are now stale)
+                    try:
+                        residual = _ep_fetch_orders(coin) or []
+                        for o in residual:
+                            _ep_cancel_order(coin, o.get('oid'))
+                    except Exception: pass
+                    state['positions'].pop(coin, None)
+                    log(f"{coin} REVERSAL confirmed closed in {time.time()-_rev_start:.1f}s; proceeding with new {sig} entry")
+                    # sig remains set → new entry flows normally below
+                else:
+                    log(f"{coin} REVERSAL CLOSE TIMEOUT (size still >0 after 5s) — skipping new entry")
                     sig = None; signal_engine = None
+            except Exception as e:
+                log(f"{coin} reversal err: {e}")
+                sig = None; signal_engine = None
     # Secondary: pullback engine (OOS 84.9% WR / PF 9.83)
     if not sig:
         try:
@@ -6374,13 +6570,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_sell')
                         except Exception: pass
-                    _sl_pct_used = place_native_sl(coin, False, fill_px, sz)
+                    # ENFORCE PROTECTION: atomic TP+SL placement with exchange
+                    # size authority. Replaces old sequential place_native_sl/tp.
+                    _ep_result = enforce_position_protection(coin, False, fill_px, origin='precog_15m_sell')
+                    _sl_pct_used = _ep_result.get('sl_pct')
+                    _tp_pct_used = _ep_result.get('tp_pct')
                     if _INV_OK and _invariants is not None:
-                        try: _invariants.record_action(coin, 'sl_place', size_after=sz, origin='precog_15m_sell', detail={'sl_pct': _sl_pct_used})
-                        except Exception: pass
-                    _tp_pct_used = place_native_tp(coin, False, fill_px, sz)
-                    if _INV_OK and _invariants is not None:
-                        try: _invariants.record_action(coin, 'tp_place', size_after=sz, origin='precog_15m_sell', detail={'tp_pct': _tp_pct_used})
+                        try:
+                            _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
+                            _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
                         except Exception: pass
                     # CONTRACT: both TP and SL must be on exchange. If either
                     # is None, emergency close immediately (naked position).
@@ -6457,13 +6655,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_buy')
                         except Exception: pass
-                    _sl_pct_used = place_native_sl(coin, True, fill_px, sz)
+                    # ENFORCE PROTECTION: atomic TP+SL placement with exchange
+                    # size authority. Replaces old sequential place_native_sl/tp.
+                    _ep_result = enforce_position_protection(coin, True, fill_px, origin='precog_15m_buy')
+                    _sl_pct_used = _ep_result.get('sl_pct')
+                    _tp_pct_used = _ep_result.get('tp_pct')
                     if _INV_OK and _invariants is not None:
-                        try: _invariants.record_action(coin, 'sl_place', size_after=sz, origin='precog_15m_buy', detail={'sl_pct': _sl_pct_used})
-                        except Exception: pass
-                    _tp_pct_used = place_native_tp(coin, True, fill_px, sz)
-                    if _INV_OK and _invariants is not None:
-                        try: _invariants.record_action(coin, 'tp_place', size_after=sz, origin='precog_15m_buy', detail={'tp_pct': _tp_pct_used})
+                        try:
+                            _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
+                            _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
                         except Exception: pass
                     # CONTRACT: enforce TP/SL presence post-entry
                     if _EC_OK and _contract is not None:
@@ -6526,6 +6726,7 @@ def main():
                 place_tp_fn=place_native_tp,
                 place_sl_fn=place_native_sl,
                 close_fn=close,
+                enforce_fn=enforce_position_protection,  # PHASE 1: daemon repairs via enforce
             )
         except Exception as e:
             log(f"deadman daemon start err: {e}")
@@ -6632,6 +6833,15 @@ def main():
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(k, 'reconcile_adopt', size_after=abs(live_positions[k]['size']), origin='reconcile_loop')
                         except Exception: pass
+                    # ENFORCE PROTECTION: adopted positions may be naked.
+                    # Fire protection enforcement; will no-op if TP+SL already sized correctly.
+                    try:
+                        _is_long_adopt = (side == 'L')
+                        _ep_res = enforce_position_protection(k, _is_long_adopt, entry_px, origin='reconcile_adopt')
+                        if _ep_res.get('replaced'):
+                            log(f"RECONCILE {k}: protection enforced (was naked or mis-sized)")
+                    except Exception as _ee:
+                        log(f"RECONCILE {k}: enforce_protection err: {_ee}")
 
             # PROFIT MANAGEMENT: check every open 15m position for TP1 partial
             # exit or TP extension. Runs each tick. Uses exchange-side order
@@ -6966,8 +7176,10 @@ def main():
                                 sz = calc_size(equity, px, risk_pct, wh_risk_mult, coin=coin, side=side_str)
                                 fill = place(coin, is_buy, sz)
                                 if fill:
-                                    _sl_pct_used = place_native_sl(coin, is_buy, fill, sz)
-                                    _tp_pct_used = place_native_tp(coin, is_buy, fill, sz)
+                                    # ENFORCE PROTECTION: atomic TP+SL with authoritative size
+                                    _ep_res = enforce_position_protection(coin, is_buy, fill, origin='webhook')
+                                    _sl_pct_used = _ep_res.get('sl_pct')
+                                    _tp_pct_used = _ep_res.get('tp_pct')
                                     try:
                                         _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
                                     except Exception:
