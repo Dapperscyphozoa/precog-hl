@@ -1892,6 +1892,33 @@ def invariants_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+_AUDIT_FILLS_CACHE = {'data': None, 'ts': 0}
+_AUDIT_CACHE_TTL = 30  # seconds
+
+def _fetch_user_fills_cached():
+    """Fetch HL userFills with 30s cache. On 429, serve stale cache.
+    Returns (fills, cache_age_sec) or (None, None) on permanent failure."""
+    import urllib.request as _ureq
+    now = time.time()
+    if _AUDIT_FILLS_CACHE['data'] is not None and now - _AUDIT_FILLS_CACHE['ts'] < _AUDIT_CACHE_TTL:
+        return _AUDIT_FILLS_CACHE['data'], int(now - _AUDIT_FILLS_CACHE['ts'])
+    try:
+        body = json.dumps({'type': 'userFills', 'user': WALLET}).encode()
+        req = _ureq.Request('https://api.hyperliquid.xyz/info', method='POST',
+                            data=body, headers={'Content-Type': 'application/json'})
+        with _ureq.urlopen(req, timeout=10) as resp:
+            fills = json.loads(resp.read())
+        _AUDIT_FILLS_CACHE['data'] = fills
+        _AUDIT_FILLS_CACHE['ts'] = now
+        return fills, 0
+    except Exception as e:
+        # On any error, fall back to stale cache if we have one
+        if _AUDIT_FILLS_CACHE['data'] is not None:
+            age = int(now - _AUDIT_FILLS_CACHE['ts'])
+            return _AUDIT_FILLS_CACHE['data'], age
+        raise
+
+
 @app.route('/audit/deep', methods=['GET'])
 def audit_deep():
     """One-click deep audit over the past N hours (default 5)."""
@@ -1907,16 +1934,13 @@ def audit_deep():
     now_ms = int(time.time() * 1000)
     cutoff = now_ms - int(hours * 3600 * 1000)
 
-    # 1. HL fills
+    # 1. HL fills (cached, falls back to stale on 429)
     fills = []
+    cache_age = 0
     try:
-        body = json.dumps({'type': 'userFills', 'user': WALLET}).encode()
-        req = _ureq.Request('https://api.hyperliquid.xyz/info', method='POST',
-                            data=body, headers={'Content-Type': 'application/json'})
-        with _ureq.urlopen(req, timeout=10) as resp:
-            fills = json.loads(resp.read())
+        fills, cache_age = _fetch_user_fills_cached()
     except Exception as e:
-        return jsonify({'error': f'HL fills fetch: {e}'}), 500
+        return jsonify({'error': f'HL fills fetch: {e}'}), 503
 
     recent = [f for f in fills if f.get('time', 0) >= cutoff]
     closes = [f for f in recent if float(f.get('closedPnl', 0)) != 0]
@@ -2228,11 +2252,7 @@ def audit_elasticity():
         taken_rmults = []       # R-multiples: pnl% / sl%
         taken_pnl_pcts = []
         try:
-            body = json.dumps({'type': 'userFills', 'user': WALLET}).encode()
-            req = _ureq.Request('https://api.hyperliquid.xyz/info', method='POST',
-                                data=body, headers={'Content-Type': 'application/json'})
-            with _ureq.urlopen(req, timeout=10) as resp:
-                fills = json.loads(resp.read())
+            fills, _ = _fetch_user_fills_cached()
             closes = [f for f in fills
                       if f.get('time', 0) >= cutoff and float(f.get('closedPnl', 0)) != 0]
             # Approximate R = pnl_pct / sl_pct. Use fallback 2.5% SL if unknown.
