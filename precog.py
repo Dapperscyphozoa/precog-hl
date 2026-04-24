@@ -242,6 +242,27 @@ except Exception as _e:
     _PM_OK = False
     print(f'[profit_mgmt] import failed (non-fatal): {_e}', flush=True)
 
+# ─────────────────────────────────────────────────────────
+# STEP 1 LIFECYCLE REBUILD — ledger + snapshot layers
+# These load but are NOT wired into behavior yet (Step 1 is prep only).
+# Behavior activation happens in Step 3-4.
+# ─────────────────────────────────────────────────────────
+try:
+    import trade_ledger as _ledger
+    _LEDGER_OK = True
+except Exception as _e:
+    _ledger = None
+    _LEDGER_OK = False
+    print(f'[ledger] CRITICAL: trade_ledger import failed: {_e}', flush=True)
+
+try:
+    import exchange_snapshot as _snapshot
+    _SNAPSHOT_OK = True
+except Exception as _e:
+    _snapshot = None
+    _SNAPSHOT_OK = False
+    print(f'[snapshot] exchange_snapshot import failed: {_e}', flush=True)
+
 # Reflexivity detector — silent telemetry.
 # Crowding + move position + reaction-to-reaction scoring at signal fire.
 try:
@@ -5610,6 +5631,84 @@ def close(coin, state_ref=None):
         log(f"close err {coin}: {e}")
         return None
 
+# ═══════════════════════════════════════════════════════
+# STEP 1 — close_trade() defined, NOT YET WIRED.
+# Reconciler (Step 2-3) will be the sole caller. Nothing calls this yet.
+# Purpose: single-writer authority for trade close events.
+# ═══════════════════════════════════════════════════════
+def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
+                pnl=None, source='reconcile'):
+    """Single-writer close. Idempotent. Returns True on recorded close, False on duplicate.
+
+    Contract: THIS FUNCTION WILL EVENTUALLY BE THE ONLY WRITER OF CLOSE STATE.
+    All other close paths must route through here via the reconciler.
+
+    Step 1: defined but unused. All existing close() call sites continue to work.
+    """
+    if not _LEDGER_OK or _ledger is None:
+        log(f'[close_trade] LEDGER UNAVAILABLE trade_id={trade_id}')
+        return False
+
+    trade = _ledger.get_by_trade_id(trade_id)
+    if not trade:
+        log(f'[close_trade] unknown trade_id={trade_id} reason={close_reason}')
+        return False
+
+    if trade.get('event_type') == 'CLOSE':
+        return False  # already closed — idempotent
+
+    coin = trade.get('coin', '')
+    try:
+        entry_price_f = float(trade.get('entry_price') or 0)
+    except (TypeError, ValueError):
+        entry_price_f = 0
+    side = trade.get('side', '')
+
+    # Compute PnL if not supplied (best-effort — reconciler should pass USD from fills)
+    if pnl is None and exit_price is not None and entry_price_f > 0:
+        try:
+            exit_f = float(exit_price)
+            move_pct = (exit_f - entry_price_f) / entry_price_f
+            if side == 'SELL' or side == 'S':
+                move_pct = -move_pct
+            pnl = round(move_pct * entry_price_f, 4)
+        except Exception:
+            pnl = 0
+
+    ok = _ledger.append_close(
+        trade_id=trade_id,
+        exit_price=exit_price,
+        pnl=pnl,
+        close_reason=close_reason,
+        exchange_fill_id=exchange_fill_id,
+        source=source,
+    )
+    if not ok:
+        return False
+
+    # Update derivative state — this is where risk_ladder/coin_wr get wired
+    try:
+        if coin and coin in state.get('positions', {}):
+            state['positions'].pop(coin, None)
+        if pnl is not None:
+            state['last_pnl_close'] = pnl
+            if close_reason not in ('timeout', 'max_hold', 'reconcile_missing'):
+                won = pnl > 0
+                try: update_coin_wr(coin, won, state)
+                except Exception as _e: log(f'[close_trade] coin_wr err: {_e}')
+                try: risk_ladder.record_trade(won)
+                except Exception as _e: log(f'[close_trade] risk_ladder err: {_e}')
+                if not won:
+                    state['consec_losses'] = state.get('consec_losses', 0) + 1
+                else:
+                    state['consec_losses'] = 0
+    except Exception as _e:
+        log(f'[close_trade] state update err: {_e}')
+
+    log(f'[close_trade] {coin} trade_id={trade_id[:8]} reason={close_reason} '
+        f'pnl={pnl} exit={exit_price}')
+    return True
+
 def flatten_all(reason='KILL'):
     live = get_all_positions_live()
     log(f"FLATTEN ALL ({reason}): {len(live)} positions")
@@ -7153,6 +7252,29 @@ def main():
 
     try: bybit_ws.start()
     except Exception as e: log(f"bybit_ws err: {e}")
+
+    # STEP 1 LIFECYCLE: start exchange snapshot daemon (read-only)
+    if _SNAPSHOT_OK and _snapshot is not None:
+        try:
+            def _user_state_wrapper(w):
+                return info.user_state(w)
+            def _user_fills_wrapper(w, start_ms, end_ms):
+                try:
+                    import urllib.request, json as _json
+                    body = _json.dumps({'type':'userFillsByTime','user':w,
+                                        'startTime':start_ms,'endTime':end_ms}).encode()
+                    req = urllib.request.Request('https://api.hyperliquid.xyz/info',
+                        data=body, headers={'Content-Type':'application/json'})
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return _json.loads(r.read())
+                except Exception: return []
+            _snapshot.start(
+                user_state_fn=_user_state_wrapper,
+                user_fills_fn=_user_fills_wrapper,
+                wallet=WALLET,
+                refresh_interval_sec=5,
+            )
+        except Exception as e: log(f"snapshot start err: {e}")
     try: orderbook_ws.start()
     except Exception as e: log(f"orderbook_ws err: {e}")
     try: liquidation_ws.start()
@@ -7722,6 +7844,45 @@ def tuner_log():
         return jsonify({'status':'no_log'})
     except Exception as e:
         return jsonify({'error':str(e)})
+
+
+@app.route('/lifecycle', methods=['GET'])
+def lifecycle_status():
+    """Step 1 scaffold — ledger + snapshot status.
+    Reconciler wiring happens in Step 3. Drift metric live from Step 1 for observation."""
+    ledger_stats = _ledger.stats() if _LEDGER_OK and _ledger else {'err': 'ledger_unavailable'}
+    snap_stats = _snapshot.status() if _SNAPSHOT_OK and _snapshot else {'err': 'snapshot_unavailable'}
+
+    drift_pct = None
+    drift_status = 'unknown'
+    exch_open_count = None
+    if _LEDGER_OK and _SNAPSHOT_OK:
+        try:
+            snap = _snapshot.get()
+            exch_open_count = len(snap['positions'])
+            if not snap['stale']:
+                ledger_open = ledger_stats.get('open_trades_count', 0)
+                denom = max(exch_open_count, 1)
+                drift_pct = abs(exch_open_count - ledger_open) / denom
+                drift_status = ('healthy' if drift_pct < 0.01
+                                else 'degraded' if drift_pct < 0.05
+                                else 'unsafe')
+        except Exception as _e:
+            drift_status = f'err: {_e}'
+
+    return jsonify({
+        'step': 1,
+        'ledger': ledger_stats,
+        'snapshot': snap_stats,
+        'drift': {
+            'pct': round(drift_pct, 4) if drift_pct is not None else None,
+            'status': drift_status,
+            'ledger_open_count': ledger_stats.get('open_trades_count'),
+            'exchange_open_count': exch_open_count,
+        },
+        'reconciler_active': False,
+        'note': 'Step 1: ledger + snapshot scaffolded, reconciler NOT writing yet',
+    })
 
 
 @app.route('/dash', methods=['GET'])
