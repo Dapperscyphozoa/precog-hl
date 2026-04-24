@@ -263,7 +263,9 @@ def _scan_once():
         _log("precog not initialized yet, skip")
         return
 
-    coins = list(getattr(_precog, 'COINS', []))
+    # OOS-validated whitelist (190 tested, 99 passed PnL>=+2% on 60d 2-sys confluence)
+    CONFLUENCE_UNIVERSE = ['JUP', 'PENGU', 'MINA', 'MANTA', 'MOVE', 'ENA', 'GRIFFAIN', 'DYDX', 'WLD', 'ZEREBRO', 'GMX', 'HEMI', 'VIRTUAL', 'ALT', 'UNI', 'XPL', 'ZEN', 'MON', 'IP', 'ZEC', 'ENS', 'IOTA', 'SKY', 'TRB', 'BTC', 'CFX', 'LAYER', 'XLM', 'XMR', 'ZRO', 'LINEA', 'PENDLE', 'PYTH', 'SAGA', 'W', 'BCH', 'POPCAT', '2Z', 'EIGEN', 'HYPER', 'ME', 'ARB', 'GOAT', 'MET', 'MORPHO', 'ORDI', 'STX', 'kPEPE', 'PAXG', 'UMA', 'GAS', 'PURR', 'GALA', 'PNUT', 'FTT', 'MAV', 'SUPER', 'PUMP', 'BABY', 'FARTCOIN', 'SEI', 'TIA', 'MNT', 'ACE', 'PROMPT', '0G', 'ZK', 'NEAR', 'NIL', 'MERL', 'TRX', 'DOT', 'HYPE', 'LINK', 'MELANIA', 'NXPC', 'SUI', 'AAVE', 'IO', 'kLUNC', 'MEW', 'POLYX', 'AR', 'FIL', 'INIT', 'WIF', 'ZORA', 'kNEIRO', 'XRP', 'LTC', 'ANIME', 'BLAST', 'IMX', 'KAITO', 'RESOLV', 'REZ', 'RENDER', 'ALGO', 'VVV']
+    coins = CONFLUENCE_UNIVERSE
     if not coins:
         _log("no coin universe defined, skip")
         return
