@@ -1507,6 +1507,32 @@ def tv_to_hl(ticker):
 
 app = Flask(__name__)
 
+# Shared navigation — injected into every HTML endpoint for consistent UX
+PRECOG_NAV = '''<style>
+.precog-nav{position:sticky;top:0;z-index:1000;background:rgba(7,8,10,0.92);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid rgba(200,204,212,0.08);padding:10px 16px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:'JetBrains Mono',monospace;margin:-20px -20px 20px -20px}
+.precog-nav .nav-brand{font-family:'Cormorant Garamond',serif;font-size:15px;color:#d9d6cd;padding-right:12px;margin-right:4px;letter-spacing:0.15em;text-transform:uppercase;font-weight:300;opacity:0.85;border-right:1px solid rgba(200,204,212,0.1);text-decoration:none}
+.precog-nav a{display:inline-flex;align-items:center;padding:6px 12px;font-size:10px;letter-spacing:0.25em;text-transform:uppercase;color:#c8ccd4;text-decoration:none;border:1px solid rgba(200,204,212,0.12);background:transparent;transition:all 0.12s ease;white-space:nowrap;font-weight:500}
+.precog-nav a:hover{border-color:#b8ff2f;color:#b8ff2f;background:rgba(184,255,47,0.06)}
+.precog-nav a.current{border-color:#b8ff2f;color:#b8ff2f;background:rgba(184,255,47,0.1)}
+.precog-nav .nav-sep{flex:1}
+.precog-nav .nav-tag{font-size:9px;color:#64748b;letter-spacing:0.25em;opacity:0.6;padding-left:6px}
+@media(max-width:700px){.precog-nav{padding:8px 10px;gap:4px}.precog-nav .nav-brand{font-size:13px;width:100%;padding:0 0 6px 0;margin:0 0 4px 0;border-right:none;border-bottom:1px solid rgba(200,204,212,0.1)}.precog-nav a{padding:5px 8px;font-size:9px;letter-spacing:0.18em}.precog-nav .nav-tag{width:100%;padding:6px 0 0 0;text-align:center}}
+</style>
+<nav class="precog-nav">
+<a href="/" class="nav-brand">PRECOG</a>
+<a href="/" data-page="dashboard">Dash</a>
+<a href="/violations" data-page="violations">Audit</a>
+<a href="/audit/deep?format=html" data-page="deep">Deep</a>
+<a href="/audit/elasticity?format=html" data-page="elasticity">Elasticity</a>
+<a href="/shadow/compare?format=html" data-page="shadow">Shadow</a>
+<a href="/enforce" data-page="enforce">Enforce</a>
+<a href="/experiment" data-page="experiment">Experiment</a>
+<div class="nav-sep"></div>
+<span class="nav-tag">v8.28 · phase 1</span>
+</nav>
+<script>(function(){var p=location.pathname,c="";if(p==="/"||p==="")c="dashboard";else if(p.indexOf("/violations")===0||p==="/audit")c="violations";else if(p.indexOf("/audit/deep")===0)c="deep";else if(p.indexOf("/audit/elasticity")===0)c="elasticity";else if(p.indexOf("/shadow")===0)c="shadow";else if(p.indexOf("/enforce")===0)c="enforce";else if(p.indexOf("/experiment")===0)c="experiment";document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.getAttribute("data-page")===c)a.classList.add("current")})})();</script>
+'''
+
 # Register post-mortem endpoints (no-op if module failed to import)
 if _POSTMORTEM_OK and _postmortem is not None:
     try:
@@ -2186,7 +2212,7 @@ td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--
 a{{color:var(--acid)}}
 @media(max-width:700px){{.grid{{grid-template-columns:repeat(3,1fr)}}.two{{grid-template-columns:1fr}}}}
 </style></head><body>
-
+{PRECOG_NAV}
 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
 <h1>Deep Audit · {hours}h</h1>
 <a href="/violations" style="font-size:10px;letter-spacing:0.3em">VIOLATIONS →</a>
@@ -2625,7 +2651,7 @@ ul{{padding-left:18px;font-size:11px}}
 a{{color:var(--acid)}}
 @media(max-width:700px){{.grid{{grid-template-columns:1fr}}.dec-row{{grid-template-columns:1fr}}}}
 </style></head><body>
-
+{PRECOG_NAV}
 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
 <h1>Filter Elasticity Analysis</h1>
 <a href="/violations" style="font-size:10px;letter-spacing:0.3em">VIOLATIONS →</a>
@@ -2721,7 +2747,84 @@ def enforce_status():
     try:
         if not _EP_OK or _ep is None:
             return jsonify({'error': 'enforce_protection not loaded'}), 503
-        return jsonify(_ep.stats())
+        data = _ep.stats()
+        if flask_request.args.get('format') == 'json':
+            return jsonify(data)
+        # HTML view
+        halted = data.get('currently_halted', {})
+        halted_rows = ''.join(
+            f'<tr><td class="mono hot">{c}</td><td class="num">{t:.0f}s</td></tr>'
+            for c, t in halted.items()
+        ) or '<tr><td colspan=2 style="opacity:0.5;padding:20px">no halted coins</td></tr>'
+        by_coin = data.get('by_coin', {})
+        coin_rows = ''.join(
+            f'<tr><td class="mono">{c}</td><td class="num">{v.get("enforced")}</td>'
+            f'<td class="num">{v.get("replaced")}</td><td class="num">{v.get("failed")}</td></tr>'
+            for c, v in sorted(by_coin.items(), key=lambda x: -x[1].get("enforced", 0))[:20]
+        ) or '<tr><td colspan=4 style="opacity:0.5;padding:20px">no enforcement events</td></tr>'
+        dl = data.get('deadlines', {})
+        html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ENFORCE · Protection Contract</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Cormorant+Garamond:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root{{--void:#07080a;--chrome:#c8ccd4;--bone:#d9d6cd;--acid:#b8ff2f;--hot:#ef4444;--amber:#f59e0b;--cool:#64748b;--line:rgba(200,204,212,0.08)}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--void);color:var(--chrome);font-family:'JetBrains Mono',monospace;font-size:12px;padding:20px;line-height:1.5}}
+h1{{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:28px;color:var(--bone)}}
+h2{{font-size:11px;letter-spacing:0.35em;text-transform:uppercase;color:var(--bone);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:12px}}
+.sub{{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;opacity:0.5;margin-bottom:20px}}
+.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-bottom:24px;padding:18px 0;border-top:1px solid var(--acid);border-bottom:1px solid var(--line)}}
+.stat{{padding:0 18px;border-left:1px solid var(--line)}}
+.stat:first-child{{border:none}}
+.stat-val{{font-family:'Cormorant Garamond',serif;font-size:26px;color:var(--bone)}}
+.stat-lbl{{font-size:9px;letter-spacing:0.3em;opacity:0.55;margin-top:6px}}
+.ok{{color:var(--acid)}}.hot{{color:var(--hot)}}.amber{{color:var(--amber)}}.cool{{color:var(--cool)}}
+.section{{margin-bottom:24px}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}
+th{{text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.25em;opacity:0.6;border-bottom:1px solid var(--line);font-weight:400}}
+td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--bone)}}
+.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.mono{{font-family:'JetBrains Mono',monospace}}
+.two{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}
+a{{color:var(--acid)}}
+@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}.two{{grid-template-columns:1fr}}}}
+</style></head><body>
+{PRECOG_NAV}
+<h1>Enforce Protection Contract</h1>
+<div class="sub">Deadlines: SL ≤ {dl.get('sl_sec')}s (critical) · TP ≤ {dl.get('tp_sec')}s (repair) · FULL ≤ {dl.get('full_sec')}s</div>
+
+<div class="grid">
+    <div class="stat"><div class="stat-val">{data.get('enforced_total', 0)}</div><div class="stat-lbl">Enforced</div></div>
+    <div class="stat"><div class="stat-val ok">{data.get('verified_ok', 0)}</div><div class="stat-lbl">Verified OK</div></div>
+    <div class="stat"><div class="stat-val amber">{data.get('replaced', 0)}</div><div class="stat-lbl">Replaced</div></div>
+    <div class="stat"><div class="stat-val hot">{data.get('failed', 0)}</div><div class="stat-lbl">Failed</div></div>
+    <div class="stat"><div class="stat-val hot">{data.get('sl_deadline_breach', 0)}</div><div class="stat-lbl">SL Breaches</div></div>
+    <div class="stat"><div class="stat-val amber">{data.get('tp_deadline_breach', 0)}</div><div class="stat-lbl">TP Breaches</div></div>
+    <div class="stat"><div class="stat-val hot">{data.get('emergency_closes', 0)}</div><div class="stat-lbl">Emergency Closes</div></div>
+    <div class="stat"><div class="stat-val">{data.get('coin_halts_total', 0)}</div><div class="stat-lbl">Halt Total</div></div>
+</div>
+
+<div class="two">
+    <div class="section">
+        <h2>Currently Halted Coins</h2>
+        <table><thead><tr><th>COIN</th><th class="num">SECONDS LEFT</th></tr></thead>
+        <tbody>{halted_rows}</tbody></table>
+    </div>
+    <div class="section">
+        <h2>By Coin (top 20)</h2>
+        <table><thead><tr><th>COIN</th><th class="num">ENFORCED</th><th class="num">REPLACED</th><th class="num">FAILED</th></tr></thead>
+        <tbody>{coin_rows}</tbody></table>
+    </div>
+</div>
+
+<div style="margin-top:40px;padding-top:12px;border-top:1px solid var(--line);font-size:9px;opacity:0.5;letter-spacing:0.2em;text-transform:uppercase">
+Auto-refreshes on navigation · <a href="?format=json">json</a>
+</div>
+<script>setTimeout(function(){{location.reload()}},30000);</script>
+</body></html>"""
+        resp = Response(html, mimetype='text/html')
+        resp.headers['Cache-Control'] = 'no-cache'
+        return resp
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2865,7 +2968,7 @@ td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--
 a{{color:var(--acid)}}
 @media(max-width:700px){{.pair{{grid-template-columns:1fr}}.classes{{grid-template-columns:1fr}}}}
 </style></head><body>
-
+{PRECOG_NAV}
 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
 <h1>Shadow vs Live · Expectancy Validation</h1>
 <a href="/violations" style="font-size:10px;letter-spacing:0.3em">AUDIT →</a>
@@ -2927,7 +3030,118 @@ def experiment_status():
     try:
         if not _PROMO_OK or _promo is None:
             return jsonify({'error': 'promotion_engine not loaded'}), 503
-        return jsonify(_promo.status())
+        data = _promo.status()
+        if flask_request.args.get('format') == 'json':
+            return jsonify(data)
+
+        def _fmt_r(v):
+            if v is None: return '—'
+            return f"{v:+.2f}R"
+
+        active = data.get('active_positions', {})
+        active_rows = ''.join(
+            f'<tr><td class="mono">{c}</td><td>{info.get("side")}</td>'
+            f'<td class="num">{int(time.time()-info.get("promoted_ts", time.time()))}s</td></tr>'
+            for c, info in active.items()
+        ) or '<tr><td colspan=3 style="opacity:0.5;padding:20px">no active experimental positions</td></tr>'
+
+        recent = data.get('recent_resolved', [])[-12:]
+        recent_rows = ''.join(
+            f'<tr><td class="mono">{r.get("coin")}</td><td>{r.get("side")}</td>'
+            f'<td class="num {"ok" if r.get("pnl_usd",0)>0 else "hot"}">${r.get("pnl_usd",0):+.2f}</td>'
+            f'<td class="num">{_fmt_r(r.get("pnl_r"))}</td>'
+            f'<td class="num">{int(r.get("held_sec") or 0)}s</td></tr>'
+            for r in reversed(recent)
+        ) or '<tr><td colspan=5 style="opacity:0.5;padding:20px">no resolutions yet</td></tr>'
+
+        kill_banner = ''
+        if data.get('kill_active'):
+            secs = data.get('kill_paused_remaining_sec', 0)
+            kill_banner = (
+                f'<div style="padding:16px;border:1px solid var(--hot);margin-bottom:20px;background:rgba(239,68,68,0.05)">'
+                f'<div style="font-size:11px;letter-spacing:0.3em;color:var(--hot);font-weight:600">KILL SWITCH ACTIVE</div>'
+                f'<div style="margin-top:8px;font-size:12px">{data.get("kill_reason")} · resumes in {secs}s</div>'
+                f'</div>'
+            )
+
+        enabled_label = 'ENABLED' if data.get('enabled') else 'DISABLED'
+        enabled_color = 'ok' if data.get('enabled') else 'cool'
+
+        html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Experiment · Whitelist Leak</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Cormorant+Garamond:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root{{--void:#07080a;--chrome:#c8ccd4;--bone:#d9d6cd;--acid:#b8ff2f;--hot:#ef4444;--amber:#f59e0b;--cool:#64748b;--line:rgba(200,204,212,0.08)}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--void);color:var(--chrome);font-family:'JetBrains Mono',monospace;font-size:12px;padding:20px;line-height:1.5}}
+h1{{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:28px;color:var(--bone)}}
+h2{{font-size:11px;letter-spacing:0.35em;text-transform:uppercase;color:var(--bone);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:12px}}
+.sub{{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;opacity:0.5;margin-bottom:20px}}
+.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-bottom:24px;padding:18px 0;border-top:1px solid var(--acid);border-bottom:1px solid var(--line)}}
+.stat{{padding:0 18px;border-left:1px solid var(--line)}}
+.stat:first-child{{border:none}}
+.stat-val{{font-family:'Cormorant Garamond',serif;font-size:26px;color:var(--bone)}}
+.stat-lbl{{font-size:9px;letter-spacing:0.3em;opacity:0.55;margin-top:6px}}
+.ok{{color:var(--acid)}}.hot{{color:var(--hot)}}.amber{{color:var(--amber)}}.cool{{color:var(--cool)}}
+.two{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}
+.section{{margin-bottom:24px}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}
+th{{text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.25em;opacity:0.6;border-bottom:1px solid var(--line);font-weight:400}}
+td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--bone)}}
+.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.mono{{font-family:'JetBrains Mono',monospace}}
+a{{color:var(--acid)}}
+.kv{{display:grid;grid-template-columns:180px 1fr;gap:8px;font-size:11px}}
+.kv dt{{opacity:0.55}}
+@media(max-width:700px){{.grid{{grid-template-columns:1fr 1fr}}.two{{grid-template-columns:1fr}}}}
+</style></head><body>
+{PRECOG_NAV}
+<h1>Whitelist Leak Experiment</h1>
+<div class="sub">Status: <span class="{enabled_color}">{enabled_label}</span> · Leak {data.get('leak_rate',0)*100:.0f}% · Size {data.get('size_mult',0)*100:.0f}% · Kill at {data.get('kill_r_threshold')}R</div>
+
+{kill_banner}
+
+<div class="grid">
+    <div class="stat"><div class="stat-val">{data.get('total_promoted', 0)}</div><div class="stat-lbl">Promoted</div></div>
+    <div class="stat"><div class="stat-val">{data.get('total_resolved', 0)}</div><div class="stat-lbl">Resolved</div></div>
+    <div class="stat"><div class="stat-val">{data.get('wins', 0)}/{data.get('losses', 0)}</div><div class="stat-lbl">W / L</div></div>
+    <div class="stat"><div class="stat-val {('ok' if (data.get('bucket_r') or 0)>=0 else 'hot')}">{_fmt_r(data.get('bucket_r'))}</div><div class="stat-lbl">Bucket R</div></div>
+    <div class="stat"><div class="stat-val {('ok' if (data.get('bucket_pnl_usd') or 0)>=0 else 'hot')}">${data.get('bucket_pnl_usd', 0):+.2f}</div><div class="stat-lbl">Bucket USD</div></div>
+    <div class="stat"><div class="stat-val">{_fmt_r(data.get('avg_r_per_trade'))}</div><div class="stat-lbl">Avg R</div></div>
+    <div class="stat"><div class="stat-val">{data.get('concurrent', 0)}/{data.get('max_concurrent', 1)}</div><div class="stat-lbl">Concurrent</div></div>
+    <div class="stat"><div class="stat-val">{(data.get('win_rate') or 0)*100:.0f}%</div><div class="stat-lbl">Win Rate</div></div>
+</div>
+
+<div class="two">
+    <div class="section">
+        <h2>Active Experimental Positions</h2>
+        <table><thead><tr><th>COIN</th><th>SIDE</th><th class="num">HELD</th></tr></thead>
+        <tbody>{active_rows}</tbody></table>
+    </div>
+    <div class="section">
+        <h2>Recent Resolutions (last 12)</h2>
+        <table><thead><tr><th>COIN</th><th>SIDE</th><th class="num">USD</th><th class="num">R</th><th class="num">HELD</th></tr></thead>
+        <tbody>{recent_rows}</tbody></table>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Parameters</h2>
+    <dl class="kv">
+    <dt>Equity floor</dt><dd>${data.get('equity_floor')}</dd>
+    <dt>Per-coin cooldown</dt><dd>{data.get('per_coin_cooldown_sec')}s</dd>
+    <dt>Kill pause</dt><dd>24h (after threshold breach)</dd>
+    </dl>
+</div>
+
+<div style="margin-top:40px;padding-top:12px;border-top:1px solid var(--line);font-size:9px;opacity:0.5;letter-spacing:0.2em;text-transform:uppercase">
+Auto-refreshes every 30s · <a href="?format=json">json</a>
+</div>
+<script>setTimeout(function(){{location.reload()}},30000);</script>
+</body></html>"""
+        resp = Response(html, mimetype='text/html')
+        resp.headers['Cache-Control'] = 'no-cache'
+        return resp
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

@@ -253,11 +253,35 @@ body::after {
         <div class="status-item"><span class="pulse-dot"></span>SYS ONLINE</div>
         <div class="status-item">SESSION · <strong id="session-name">LONDON</strong></div>
         <div class="status-item">UTC · <strong id="utc-clock">—</strong></div>
-        <a href="/violations" class="audit-btn">AUDIT</a>
-        <a href="/audit/deep?format=html" class="audit-btn" style="border-color: var(--oxide); color: var(--oxide);">DEEP AUDIT</a>
-        <a href="/audit/elasticity?format=html" class="audit-btn" style="border-color: var(--blood); color: var(--blood);">ELASTICITY</a>
     </div>
 </div>
+
+<!-- UNIFIED NAV (shared across all pages) -->
+<style>
+.precog-nav{position:sticky;top:0;z-index:1000;background:rgba(7,8,10,0.92);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid rgba(200,204,212,0.08);padding:10px 16px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-family:'JetBrains Mono',monospace;margin:0 0 20px 0}
+.precog-nav .nav-brand{font-family:'Cormorant Garamond',serif;font-size:15px;color:#d9d6cd;padding-right:12px;margin-right:4px;letter-spacing:0.15em;text-transform:uppercase;font-weight:300;opacity:0.85;border-right:1px solid rgba(200,204,212,0.1);text-decoration:none}
+.precog-nav a{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;font-size:10px;letter-spacing:0.2em;text-transform:uppercase;color:#c8ccd4;text-decoration:none;border:1px solid rgba(200,204,212,0.12);background:transparent;transition:all 0.12s ease;white-space:nowrap;font-weight:500}
+.precog-nav a:hover{border-color:#b8ff2f;color:#b8ff2f;background:rgba(184,255,47,0.06)}
+.precog-nav a.current{border-color:#b8ff2f;color:#b8ff2f;background:rgba(184,255,47,0.1)}
+.precog-nav a .nav-ico{font-size:11px;opacity:0.7}
+.precog-nav a:hover .nav-ico{opacity:1}
+.precog-nav .nav-sep{flex:1}
+.precog-nav .nav-tag{font-size:9px;color:#64748b;letter-spacing:0.25em;opacity:0.6;padding-left:6px}
+@media(max-width:700px){.precog-nav{padding:8px 10px;gap:4px}.precog-nav .nav-brand{font-size:13px;width:100%;padding:0 0 6px 0;margin:0 0 4px 0;border-right:none;border-bottom:1px solid rgba(200,204,212,0.1)}.precog-nav a{padding:5px 7px;font-size:9px;letter-spacing:0.15em}.precog-nav .nav-tag{width:100%;padding:6px 0 0 0;text-align:center}}
+</style>
+<nav class="precog-nav">
+<a href="/" class="nav-brand">PRECOG</a>
+<a href="/" data-page="dashboard">Dash</a>
+<a href="/violations" data-page="violations">Audit</a>
+<a href="/audit/deep?format=html" data-page="deep">Deep</a>
+<a href="/audit/elasticity?format=html" data-page="elasticity">Elasticity</a>
+<a href="/shadow/compare?format=html" data-page="shadow">Shadow</a>
+<a href="/enforce" data-page="enforce">Enforce</a>
+<a href="/experiment" data-page="experiment">Experiment</a>
+<div class="nav-sep"></div>
+<span class="nav-tag">v8.28 · phase 1</span>
+</nav>
+<script>(function(){var p=location.pathname,c="";if(p==="/"||p==="")c="dashboard";else if(p.indexOf("/violations")===0||p==="/audit")c="violations";else if(p.indexOf("/audit/deep")===0)c="deep";else if(p.indexOf("/audit/elasticity")===0)c="elasticity";else if(p.indexOf("/shadow")===0)c="shadow";else if(p.indexOf("/enforce")===0)c="enforce";else if(p.indexOf("/experiment")===0)c="experiment";document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.getAttribute("data-page")===c)a.classList.add("current")})})();</script>
 
 <!-- HERO -->
 <div class="hero">
