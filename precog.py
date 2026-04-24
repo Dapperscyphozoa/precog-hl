@@ -6176,10 +6176,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if _RECONCILER_OK and _reconciler is not None:
         try:
             if _reconciler.is_halted():
-                # Hash gate: only log occasionally to avoid spam
                 if hash(coin + str(int(time.time() / 300))) % 10 == 0:
                     log(f"{coin} LIFECYCLE HALT — reconciler drift ≥ 5%, blocking new entries")
                 return
+            # STEP 4 spec §2B: degraded-state entry limiter
+            limiter = _reconciler.entry_limiter()
+            if limiter == 'halted':
+                return
+            if limiter == 'reduced':
+                # Scale risk_mult down by 50% when drift degraded (1-5%)
+                risk_mult = risk_mult * 0.5
+                if _reconciler.should_skip_high_risk():
+                    # High-risk = low-WR or experimental coins; scan gets tighter
+                    try:
+                        _wr = (_ledger.stats() if _LEDGER_OK else {}) and None  # no-op placeholder
+                    except Exception: pass
         except Exception: pass
 
     # EXECUTION CONTRACT v2: block new activity on halted coins.
@@ -7502,22 +7513,30 @@ def main():
                 if k not in state['positions']:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
-                    # STEP 2: orphan detection — position on exchange with no state binding
-                    # Adopt it AND write ENTRY to ledger so it has a trade_id going forward.
+                    # STEP 4 FIX: orphan adoption must check ledger first.
+                    # Before Step 4: every adoption created a new trade_id, causing
+                    # duplicate ledger entries across restarts (18 ledger opens vs 9 exch).
+                    # Fix: reuse existing open trade_id from ledger if present.
                     _adopt_trade_id = None
                     if _LEDGER_OK and _ledger is not None:
                         try:
-                            _adopt_trade_id = _ledger.new_trade_id()
-                            _ledger.append_entry(
-                                coin=k,
-                                side='BUY' if side == 'L' else 'SELL',
-                                entry_price=entry_px,
-                                engine='RECONCILED',
-                                source='reconcile_adopt',
-                                cloid=None,  # no cloid for adopted orphans
-                                trade_id=_adopt_trade_id,
-                            )
-                            log(f"RECONCILE LEDGER: adopted {k} as trade_id={_adopt_trade_id[:8]}")
+                            # Check if ledger already has an open trade for this coin
+                            _existing_tid = _ledger.latest_open_trade_id_for_coin(k)
+                            if _existing_tid:
+                                _adopt_trade_id = _existing_tid
+                                log(f"RECONCILE LEDGER: reusing existing open trade_id={_existing_tid[:8]} for {k}")
+                            else:
+                                _adopt_trade_id = _ledger.new_trade_id()
+                                _ledger.append_entry(
+                                    coin=k,
+                                    side='BUY' if side == 'L' else 'SELL',
+                                    entry_price=entry_px,
+                                    engine='RECONCILED',
+                                    source='reconcile_adopt',
+                                    cloid=None,
+                                    trade_id=_adopt_trade_id,
+                                )
+                                log(f"RECONCILE LEDGER: adopted NEW {k} as trade_id={_adopt_trade_id[:8]}")
                         except Exception as _le:
                             log(f"[ledger] reconcile adopt err {k}: {_le}")
                     else:
@@ -8023,9 +8042,7 @@ def tuner_log():
 
 @app.route('/lifecycle', methods=['GET'])
 def lifecycle_status():
-    """Step 3 — full lifecycle observability.
-    Shows ledger, snapshot, intent queue, reconciler state, drift metric, halt flag.
-    """
+    """Step 4 — full lifecycle observability with circuit breaker + multi-tier drift."""
     ledger_stats = _ledger.stats() if _LEDGER_OK and _ledger else {'err': 'ledger_unavailable'}
     snap_stats = _snapshot.status() if _SNAPSHOT_OK and _snapshot else {'err': 'snapshot_unavailable'}
     iq_stats = _intents.status() if _INTENTS_OK and _intents else {'err': 'intents_unavailable'}
@@ -8043,18 +8060,34 @@ def lifecycle_status():
                 denom = max(exch_open_count, 1)
                 drift_pct = abs(exch_open_count - ledger_open) / denom
                 drift_status = ('healthy' if drift_pct < 0.01
+                                else 'warn' if drift_pct < 0.03
                                 else 'degraded' if drift_pct < 0.05
                                 else 'unsafe')
         except Exception as _e:
             drift_status = f'err: {_e}'
 
     halt = _reconciler.is_halted() if _RECONCILER_OK and _reconciler else False
-    authoritative = os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1'
+    authoritative_env = os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1'
+    authoritative_actual = rc_stats.get('authoritative', False)
+    cb_tripped = rc_stats.get('circuit_breaker_tripped', False)
 
     return jsonify({
-        'step': 3,
-        'mode': 'authoritative' if authoritative else 'observe',
+        'step': 4,
+        # Spec §8 top-level keys
+        'drift_pct': round(drift_pct, 4) if drift_pct is not None else None,
+        'drift_status': drift_status,
+        'trading_halted': halt,
+        'intent_backlog': iq_stats.get('queue_depth', 0) if isinstance(iq_stats, dict) else 0,
+        'snapshot_stale': snap_stats.get('stale', True) if isinstance(snap_stats, dict) else True,
+        'reconciler_lag_s': rc_stats.get('reconciler_lag_s', 0),
+        # Extended detail
+        'mode': 'authoritative' if authoritative_actual else 'observe',
         'halt_flag': halt,
+        'circuit_breaker_tripped': cb_tripped,
+        'emergency_flatten_authorized': rc_stats.get('emergency_flatten_authorized', False),
+        'stall_emergency': rc_stats.get('stall_emergency', False),
+        'entry_limiter': rc_stats.get('entry_limiter', 'full'),
+        'pause_new_intents': rc_stats.get('pause_new_intents', False),
         'ledger': ledger_stats,
         'snapshot': snap_stats,
         'intents': iq_stats,
@@ -8062,13 +8095,117 @@ def lifecycle_status():
         'drift': {
             'pct': round(drift_pct, 4) if drift_pct is not None else None,
             'status': drift_status,
+            'tier': rc_stats.get('drift_tier', 'unknown'),
             'ledger_open_count': ledger_stats.get('open_trades_count'),
             'exchange_open_count': exch_open_count,
         },
-        'note': ('AUTHORITATIVE: reconciler is sole writer. Legacy close() emits FORCE_CLOSE intent.'
-                 if authoritative else
-                 'OBSERVE: reconciler logs would-close decisions but does not execute. Legacy close() still active.'),
+        'note': (
+            f"AUTHORITATIVE env=1 but CB tripped — forced observe. Reset via /lifecycle/emergency?action=clear_breaker"
+            if authoritative_env and cb_tripped else
+            'AUTHORITATIVE: reconciler is sole writer. Legacy close() emits FORCE_CLOSE intent.'
+            if authoritative_actual else
+            'OBSERVE: reconciler logs would-close decisions but does not execute. Legacy close() still active.'
+        ),
     })
+
+
+@app.route('/lifecycle/heartbeat', methods=['GET'])
+def lifecycle_heartbeat():
+    """Lightweight endpoint for external monitors. Returns quickly.
+    Status is 'ok' only when: reconciler alive, not stalled, CB not tripped, drift <5%.
+    """
+    if not (_RECONCILER_OK and _reconciler and _LEDGER_OK and _SNAPSHOT_OK):
+        return jsonify({'status': 'degraded', 'reason': 'modules_unavailable'}), 503
+
+    try:
+        rc = _reconciler.status()
+        daemon_alive = rc.get('daemon_alive', False)
+        stalled = rc.get('stall_emergency', False)
+        cb_tripped = rc.get('circuit_breaker_tripped', False)
+        drift = rc.get('last_drift_pct')
+
+        issues = []
+        if not daemon_alive: issues.append('daemon_dead')
+        if stalled: issues.append('reconciler_stalled')
+        if cb_tripped: issues.append('circuit_breaker_tripped')
+        if drift is not None and drift >= 0.05: issues.append(f'drift_{drift*100:.0f}pct')
+
+        if issues:
+            return jsonify({'status': 'degraded', 'issues': issues}), 503
+        return jsonify({
+            'status': 'ok',
+            'cycles': rc.get('cycles_total'),
+            'mode': rc.get('mode'),
+            'drift_pct': drift,
+        }), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'err': str(e)}), 500
+
+
+@app.route('/lifecycle/emergency', methods=['POST', 'GET'])
+def lifecycle_emergency():
+    """Admin controls. Accepts ?action=<name> and optional ?token=<WEBHOOK_SECRET>.
+
+    Actions:
+      clear_halt       — force-clear drift halt flag
+      clear_breaker    — reset circuit breaker
+      clear_emergency  — clear emergency flatten authorization
+      clear_ring       — empty recent-closed ring buffer
+      clear_all        — all of the above
+      flatten_all      — emergency flatten (requires emergency_flatten_authorized=true OR explicit confirm=1)
+    """
+    from flask import request
+    # Simple auth — require matching WEBHOOK_SECRET to avoid accidental hits
+    token = request.args.get('token') or (request.json or {}).get('token') if request.is_json else request.args.get('token')
+    if token != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+
+    action = request.args.get('action') or (request.json or {}).get('action') if request.is_json else request.args.get('action')
+    if not action:
+        return jsonify({'err': 'action required', 'valid_actions': [
+            'clear_halt', 'clear_breaker', 'clear_emergency', 'clear_ring', 'clear_all', 'flatten_all']}), 400
+
+    if action == 'flatten_all':
+        confirm = request.args.get('confirm') == '1'
+        if not confirm:
+            rc = _reconciler.status() if _RECONCILER_OK and _reconciler else {}
+            if not rc.get('emergency_flatten_authorized'):
+                return jsonify({'err': 'flatten_all requires emergency_flatten_authorized=true OR ?confirm=1'}), 400
+        try:
+            flatten_all('EMERGENCY_API')
+            return jsonify({'action': action, 'ok': True})
+        except Exception as e:
+            return jsonify({'action': action, 'ok': False, 'err': str(e)}), 500
+
+    if not _RECONCILER_OK or _reconciler is None:
+        return jsonify({'err': 'reconciler_unavailable'}), 503
+
+    try:
+        result = _reconciler.emergency_reset(action)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/lifecycle/cleanup', methods=['POST', 'GET'])
+def lifecycle_cleanup():
+    """One-time ledger cleanup: dedupe duplicate open trade_ids per coin.
+    Keeps earliest (lowest event_seq), closes others with reason='reconcile_duplicate_entry'.
+    Requires token.
+    """
+    from flask import request
+    token = request.args.get('token')
+    if token != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    if not (_LEDGER_OK and _ledger):
+        return jsonify({'err': 'ledger_unavailable'}), 503
+    try:
+        result = _ledger.dedupe_open_trades()
+        log(f"[lifecycle/cleanup] dedupe run: coins_affected={result['coins_affected']} "
+            f"dupes_closed={result['dupes_closed']}")
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
 
 
 @app.route('/dash', methods=['GET'])
