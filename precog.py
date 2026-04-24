@@ -1503,17 +1503,35 @@ if _POSTMORTEM_OK and _postmortem is not None:
 
 _LANDING_HTML = None
 def _load_landing():
-    # Always re-read so deploys pick up immediately
+    """Load landing.html from disk."""
     try:
         with open(os.path.join(os.path.dirname(__file__), 'landing.html'), 'r') as f:
             return f.read()
     except Exception as e:
         return f"<h1>landing load err: {e}</h1>"
 
+def _load_violations_page():
+    """Load violations.html from disk."""
+    try:
+        with open(os.path.join(os.path.dirname(__file__), 'violations.html'), 'r') as f:
+            return f.read()
+    except Exception as e:
+        return f"<h1>violations page load err: {e}</h1>"
+
 @app.route('/', methods=['GET'])
 @app.route('/landing', methods=['GET'])
 def landing():
     resp = Response(_load_landing(), mimetype='text/html')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
+
+@app.route('/violations', methods=['GET'])
+@app.route('/audit', methods=['GET'])
+def violations_audit():
+    """Execution violations audit dashboard — integrity monitoring."""
+    resp = Response(_load_violations_page(), mimetype='text/html')
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     resp.headers['Pragma'] = 'no-cache'
     resp.headers['Expires'] = '0'

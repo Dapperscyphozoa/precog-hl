@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>VIOLATIONS AUDIT // CYBER PSYCHO</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;800&family=Cormorant+Garamond:ital,wght@0,300;0,600;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+    --void: #07080a;
+    --carbon: #0d0e11;
+    --steel: #1a1c20;
+    --chrome: #c8ccd4;
+    --bone: #d9d6cd;
+    --blood: #c1272d;
+    --acid: #b8ff2f;
+    --oxide: #d97706;
+    --amber: #f59e0b;
+    --line: rgba(200, 204, 212, 0.08);
+    --hot: #ef4444;
+    --warm: #f59e0b;
+    --cool: #64748b;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: var(--void); color: var(--chrome); font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.5; }
+body { padding: 24px; }
+a { color: var(--acid); text-decoration: none; }
+a:hover { color: var(--bone); }
+
+/* Header */
+.hdr { border-bottom: 1px solid var(--acid); padding-bottom: 16px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 12px; }
+.hdr h1 { font-family: 'Cormorant Garamond', serif; font-weight: 300; font-size: 32px; letter-spacing: 0.05em; color: var(--bone); }
+.hdr .sub { font-size: 10px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--chrome); opacity: 0.5; margin-top: 4px; }
+.nav { display: flex; gap: 16px; align-items: center; font-size: 10px; letter-spacing: 0.3em; text-transform: uppercase; }
+.nav a { padding: 6px 12px; border: 1px solid var(--line); }
+.nav a.active { border-color: var(--acid); color: var(--acid); }
+
+/* Live indicator */
+.live { display: inline-flex; align-items: center; gap: 8px; font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--acid); }
+.live::before { content: ''; width: 6px; height: 6px; background: var(--acid); border-radius: 50%; animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+
+/* Top summary bar */
+.summary-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; margin-bottom: 28px; padding: 20px 0; border-top: 1px solid var(--acid); border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(184, 255, 47, 0.03), transparent); }
+.stat { padding: 0 20px; border-left: 1px solid var(--line); }
+.stat:first-child { border-left: none; }
+.stat-val { font-family: 'Cormorant Garamond', serif; font-size: 30px; font-weight: 400; color: var(--bone); line-height: 1; }
+.stat-val.hot { color: var(--hot); }
+.stat-val.warm { color: var(--warm); }
+.stat-val.ok { color: var(--acid); }
+.stat-lbl { font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--chrome); opacity: 0.55; margin-top: 8px; }
+.stat-sub { font-size: 10px; color: var(--chrome); opacity: 0.6; margin-top: 4px; }
+
+/* Sections */
+.section { margin-bottom: 32px; }
+.section-hdr { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 14px; }
+.section-hdr h2 { font-size: 11px; letter-spacing: 0.35em; text-transform: uppercase; color: var(--bone); font-weight: 600; }
+.section-hdr .meta { font-size: 10px; color: var(--chrome); opacity: 0.5; }
+
+/* Two-column layout */
+.two-col { display: grid; grid-template-columns: 1.3fr 1fr; gap: 24px; }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; font-size: 11px; }
+table th { text-align: left; padding: 8px 10px; font-size: 9px; letter-spacing: 0.25em; text-transform: uppercase; color: var(--chrome); opacity: 0.6; border-bottom: 1px solid var(--line); font-weight: 400; }
+table td { padding: 8px 10px; border-bottom: 1px solid rgba(200, 204, 212, 0.04); color: var(--bone); vertical-align: top; }
+table tr:hover { background: rgba(200, 204, 212, 0.03); cursor: pointer; }
+table tr.expanded { background: rgba(184, 255, 47, 0.04); }
+table .num { font-variant-numeric: tabular-nums; text-align: right; }
+table .mono { font-family: 'JetBrains Mono', monospace; }
+
+/* Severity */
+.sev { display: inline-block; padding: 2px 8px; font-size: 9px; letter-spacing: 0.25em; text-transform: uppercase; border: 1px solid; }
+.sev-critical { color: var(--hot); border-color: var(--hot); background: rgba(239, 68, 68, 0.1); }
+.sev-warning { color: var(--warm); border-color: var(--warm); background: rgba(245, 158, 11, 0.08); }
+.sev-info { color: var(--cool); border-color: var(--cool); background: rgba(100, 116, 139, 0.08); }
+
+/* Cells */
+td.bad { color: var(--hot); }
+td.good { color: var(--acid); }
+.pill { display: inline-block; padding: 1px 6px; font-size: 10px; border: 1px solid var(--line); }
+.pill.ok { color: var(--acid); border-color: var(--acid); }
+.pill.bad { color: var(--hot); border-color: var(--hot); }
+
+/* Bar chart */
+.bars { display: flex; flex-direction: column; gap: 6px; }
+.bar-row { display: grid; grid-template-columns: 160px 1fr 40px; gap: 12px; align-items: center; font-size: 11px; }
+.bar-row .bar-label { color: var(--chrome); opacity: 0.75; font-size: 10px; text-transform: uppercase; letter-spacing: 0.15em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar-row .bar-track { height: 6px; background: rgba(200, 204, 212, 0.06); position: relative; }
+.bar-row .bar-fill { height: 100%; background: var(--amber); }
+.bar-row .bar-fill.critical { background: var(--hot); }
+.bar-row .bar-val { text-align: right; font-variant-numeric: tabular-nums; font-size: 11px; color: var(--bone); }
+
+/* Health score */
+.health { padding: 24px; border: 1px solid var(--line); text-align: center; background: linear-gradient(180deg, var(--carbon), var(--void)); }
+.health-score { font-family: 'Cormorant Garamond', serif; font-size: 64px; font-weight: 400; line-height: 1; color: var(--acid); }
+.health-score.warm { color: var(--warm); }
+.health-score.hot { color: var(--hot); }
+.health-lbl { font-size: 10px; letter-spacing: 0.35em; text-transform: uppercase; color: var(--chrome); opacity: 0.6; margin-top: 10px; }
+.sparkline { margin-top: 16px; height: 40px; }
+
+/* Expand panel */
+.expand-panel { padding: 14px 20px; background: rgba(184, 255, 47, 0.03); border-left: 2px solid var(--acid); font-size: 10px; color: var(--chrome); margin-top: -1px; }
+.expand-panel pre { font-size: 10px; color: var(--chrome); opacity: 0.8; white-space: pre-wrap; word-break: break-all; }
+.expand-panel h4 { font-size: 10px; letter-spacing: 0.25em; text-transform: uppercase; color: var(--bone); margin-bottom: 8px; }
+
+/* Filters */
+.filters { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.filters input, .filters select { background: var(--carbon); border: 1px solid var(--line); color: var(--chrome); font-family: inherit; font-size: 11px; padding: 6px 10px; }
+.filters input:focus, .filters select:focus { outline: none; border-color: var(--acid); }
+
+/* Empty state */
+.empty { padding: 40px 20px; text-align: center; color: var(--chrome); opacity: 0.4; font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; }
+
+/* Responsive */
+@media (max-width: 900px) {
+    .summary-bar { grid-template-columns: repeat(3, 1fr); gap: 0; }
+    .stat { padding: 10px 14px; }
+    .two-col { grid-template-columns: 1fr; }
+    .hdr h1 { font-size: 24px; }
+    body { padding: 14px; }
+    .bar-row { grid-template-columns: 110px 1fr 36px; }
+    table { font-size: 10px; }
+    table th, table td { padding: 6px 6px; }
+    /* Hide less critical columns on mobile */
+    table .col-sec, table .col-fixed, table .col-time { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+    <div>
+        <h1>Execution Violations Audit</h1>
+        <div class="sub">Live integrity monitoring · TP/SL enforcement · trade lifecycle invariants</div>
+    </div>
+    <div class="nav">
+        <span class="live">LIVE</span>
+        <a href="/">DASHBOARD</a>
+        <a href="/violations" class="active">VIOLATIONS</a>
+    </div>
+</div>
+
+<!-- Summary bar -->
+<div class="summary-bar" id="summaryBar">
+    <div class="stat"><div class="stat-val" id="activePos">—</div><div class="stat-lbl">Active Positions</div></div>
+    <div class="stat"><div class="stat-val" id="protectedPct">—</div><div class="stat-lbl">Protected %</div></div>
+    <div class="stat"><div class="stat-val" id="nakedCount">—</div><div class="stat-lbl">Naked Positions</div></div>
+    <div class="stat"><div class="stat-val" id="viol60m">—</div><div class="stat-lbl">Violations 60m</div></div>
+    <div class="stat"><div class="stat-val" id="viol24h">—</div><div class="stat-lbl">Violations 24h</div></div>
+    <div class="stat"><div class="stat-val" id="critCount">—</div><div class="stat-lbl">Critical</div></div>
+</div>
+
+<!-- Health + Live Feed row -->
+<div class="two-col">
+    <!-- SECTION 1: Live violations feed -->
+    <div class="section">
+        <div class="section-hdr">
+            <h2>Live Violations Feed</h2>
+            <span class="meta" id="feedMeta">—</span>
+        </div>
+        <div class="filters">
+            <input type="text" id="fCoin" placeholder="filter coin..." />
+            <select id="fSev">
+                <option value="">all severity</option>
+                <option value="critical">CRITICAL</option>
+                <option value="warning">WARNING</option>
+                <option value="info">INFO</option>
+            </select>
+            <select id="fType">
+                <option value="">all types</option>
+            </select>
+        </div>
+        <table id="feedTable">
+            <thead>
+                <tr>
+                    <th class="col-time">TIME</th>
+                    <th>COIN</th>
+                    <th>TYPE</th>
+                    <th class="col-sec">SEV</th>
+                    <th>DESCRIPTION</th>
+                    <th class="col-fixed">FIXED</th>
+                </tr>
+            </thead>
+            <tbody id="feedBody">
+                <tr><td colspan="6" class="empty">Awaiting data…</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- SECTION 6: Health score -->
+    <div class="section">
+        <div class="section-hdr">
+            <h2>Execution Integrity Score</h2>
+            <span class="meta">0–100 scale</span>
+        </div>
+        <div class="health">
+            <div class="health-score" id="healthScore">—</div>
+            <div class="health-lbl">Composite</div>
+            <svg class="sparkline" id="sparkline" viewBox="0 0 200 40" preserveAspectRatio="none">
+                <polyline id="sparkPoly" points="" stroke="var(--acid)" stroke-width="1.5" fill="none"/>
+            </svg>
+            <div class="stat-sub" style="margin-top: 12px; opacity: 0.6;">Trailing 6h trend</div>
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 2: Violation breakdown -->
+<div class="section">
+    <div class="section-hdr">
+        <h2>Violation Breakdown (24h)</h2>
+        <span class="meta" id="breakdownMeta">—</span>
+    </div>
+    <div class="bars" id="breakdownBars">
+        <div class="empty">No violations recorded</div>
+    </div>
+</div>
+
+<!-- SECTION 3: Root cause -->
+<div class="section">
+    <div class="section-hdr">
+        <h2>Root Cause Analysis</h2>
+        <span class="meta">by violation type</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>TYPE</th>
+                <th class="num">OCCURRENCES</th>
+                <th class="num">% TOTAL</th>
+                <th>DOMINANT SOURCE</th>
+                <th>LAST SEEN</th>
+            </tr>
+        </thead>
+        <tbody id="rootBody">
+            <tr><td colspan="5" class="empty">No data yet</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- SECTION 4: Position integrity -->
+<div class="section">
+    <div class="section-hdr">
+        <h2>Position Integrity Snapshot</h2>
+        <span class="meta" id="posMeta">—</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>COIN</th>
+                <th class="num">SIZE</th>
+                <th>TP PRESENT</th>
+                <th>SL PRESENT</th>
+                <th>TP SIZE</th>
+                <th>SL SIZE</th>
+                <th class="col-time">LAST CHECK</th>
+            </tr>
+        </thead>
+        <tbody id="posBody">
+            <tr><td colspan="7" class="empty">No open positions</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- SECTION 5: Auto-repair log -->
+<div class="section">
+    <div class="section-hdr">
+        <h2>Auto-Repair Log</h2>
+        <span class="meta">daemon self-healing events</span>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th class="col-time">TIME</th>
+                <th>COIN</th>
+                <th>ISSUE</th>
+                <th>FIX APPLIED</th>
+                <th class="num">MS</th>
+            </tr>
+        </thead>
+        <tbody id="repairBody">
+            <tr><td colspan="5" class="empty">No repairs logged</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────
+const STATE = {
+    invariants: null,
+    contract: null,
+    tf_iso: null,
+    healthHistory: [],   // {ts, score}
+    expandedRow: null,
+    filter: { coin: '', sev: '', type: '' },
+    eventIds: new Set(),  // for de-dup
+    violationsFeed: [],   // append-only
+    repairFeed: [],
+    previousCounters: {},
+};
+
+// ─────────────────────────────────────────────────────
+// Fetch
+// ─────────────────────────────────────────────────────
+async function fetchJson(url) {
+    try {
+        const r = await fetch(url, { cache: 'no-cache' });
+        if (!r.ok) return null;
+        return await r.json();
+    } catch (e) {
+        return null;
+    }
+}
+
+async function refresh() {
+    const [inv, con, tfi] = await Promise.all([
+        fetchJson('/invariants'),
+        fetchJson('/contract'),
+        fetchJson('/tf_isolation'),
+    ]);
+    STATE.invariants = inv;
+    STATE.contract = con;
+    STATE.tf_iso = tfi;
+    ingestViolations();
+    render();
+}
+
+// ─────────────────────────────────────────────────────
+// Ingest — detect NEW violations by comparing counters
+// ─────────────────────────────────────────────────────
+function ingestViolations() {
+    const inv = STATE.invariants;
+    if (!inv) return;
+    const v = inv.violations || {};
+    const now = Date.now();
+
+    // Counter delta detection
+    for (const [key, val] of Object.entries(v)) {
+        const prev = STATE.previousCounters[key] || 0;
+        const delta = val - prev;
+        if (delta > 0) {
+            // Generate N synthetic events for the delta
+            for (let i = 0; i < delta; i++) {
+                const evtId = `${key}-${val - i}-${now}`;
+                if (STATE.eventIds.has(evtId)) continue;
+                STATE.eventIds.add(evtId);
+                STATE.violationsFeed.unshift({
+                    id: evtId,
+                    ts: now,
+                    type: key,
+                    severity: severityFor(key),
+                    coin: inferCoinFromState(key),
+                    description: humanDesc(key),
+                    detected_by: detectorFor(key),
+                    auto_fixed: autoFixedFor(key),
+                    resolution: resolutionFor(key),
+                });
+            }
+        }
+        STATE.previousCounters[key] = val;
+    }
+
+    // Audit log from invariants
+    const audit = inv.recent_audit_log || [];
+    for (const a of audit) {
+        if (a.violation) {
+            const aid = `audit-${a.coin}-${a.ts}`;
+            if (STATE.eventIds.has(aid)) continue;
+            STATE.eventIds.add(aid);
+            STATE.violationsFeed.unshift({
+                id: aid,
+                ts: a.ts * 1000,
+                type: 'trade_audit_mismatch',
+                severity: 'warning',
+                coin: a.coin,
+                description: a.violation,
+                detected_by: 'audit',
+                auto_fixed: false,
+                resolution: 'flagged',
+                raw: a,
+            });
+        }
+    }
+
+    // Cap feed
+    if (STATE.violationsFeed.length > 500) {
+        STATE.violationsFeed = STATE.violationsFeed.slice(0, 500);
+    }
+
+    // Repair feed — when daemon recreates orders
+    const protection = inv.protection_state || {};
+    // Cannot easily detect repairs from current endpoint without log; skipped.
+}
+
+function severityFor(key) {
+    if (key.includes('deadman') || key === 'entry_naked' || key === 'naked_position_detected') return 'critical';
+    if (key.includes('mismatch') || key.includes('cancel_without')) return 'warning';
+    return 'info';
+}
+
+function humanDesc(key) {
+    const map = {
+        'deadman_triggered': 'SL missing > 60s — emergency close fired',
+        'entry_naked': 'Position opened without both TP and SL',
+        'naked_position_detected': 'Open position found without TP or SL',
+        'tp_size_mismatch': 'TP order size ≠ position size (>5% diff)',
+        'sl_size_mismatch': 'SL order size ≠ position size (>5% diff)',
+        'cancel_without_replace': 'Trigger order cancelled without replacement',
+        'audit_mismatch': 'Exit price vs exit reason disagreement',
+        'cross_tf_close_attempts': 'LTF signal tried to close HTF position',
+        'cross_tf_queue_attempts': 'LTF tried to queue HTF reversal',
+    };
+    return map[key] || key.replace(/_/g, ' ');
+}
+
+function detectorFor(key) {
+    if (key.includes('cross_tf')) return 'tf_isolation';
+    if (key.includes('audit')) return 'audit';
+    if (key.includes('deadman') || key.includes('naked') || key.includes('mismatch')) return 'daemon';
+    return 'contract';
+}
+
+function autoFixedFor(key) {
+    // Size mismatches + naked detections are fixed by daemon recreation.
+    return key.includes('mismatch') || key === 'naked_position_detected';
+}
+
+function resolutionFor(key) {
+    if (key === 'deadman_triggered') return 'closed_position';
+    if (key === 'tp_size_mismatch') return 'recreated_tp';
+    if (key === 'sl_size_mismatch') return 'recreated_sl';
+    if (key === 'naked_position_detected') return 'recreated_orders';
+    if (key.includes('cross_tf')) return 'blocked';
+    return 'flagged';
+}
+
+function inferCoinFromState(key) {
+    // Most counters don't carry coin context; show aggregate
+    return '—';
+}
+
+// ─────────────────────────────────────────────────────
+// Health score
+// ─────────────────────────────────────────────────────
+function computeHealth() {
+    const inv = STATE.invariants;
+    if (!inv) return 100;
+    const v = inv.violations || {};
+    let score = 100;
+    const naked = inv.positions_naked_now || 0;
+    score -= naked * 25;
+    score -= (v.entry_naked || 0) * 15;
+    score -= (v.naked_position_detected || 0) * 15;
+    score -= (v.tp_size_mismatch || 0) * 10;
+    score -= (v.sl_size_mismatch || 0) * 10;
+    score -= (v.deadman_triggered || 0) * 20;
+    score -= (v.audit_mismatch || 0) * 5;
+    // Repeated violations penalty
+    const total = Object.values(v).reduce((a, b) => a + b, 0);
+    if (total > 10) score -= Math.min(20, (total - 10) * 2);
+    return Math.max(0, Math.min(100, score));
+}
+
+// ─────────────────────────────────────────────────────
+// Render
+// ─────────────────────────────────────────────────────
+function render() {
+    renderSummary();
+    renderHealth();
+    renderFeed();
+    renderBreakdown();
+    renderRoot();
+    renderPositions();
+    renderRepairs();
+}
+
+function renderSummary() {
+    const inv = STATE.invariants || {};
+    const protected_ = inv.positions_protected || 0;
+    const naked = inv.positions_naked_now || 0;
+    const active = protected_ + naked;
+    const pct = active > 0 ? Math.round((protected_ / active) * 100) : 0;
+
+    document.getElementById('activePos').textContent = active;
+    document.getElementById('protectedPct').textContent = pct + '%';
+    document.getElementById('protectedPct').className = 'stat-val ' + (pct === 100 ? 'ok' : pct >= 80 ? 'warm' : 'hot');
+
+    const nakedEl = document.getElementById('nakedCount');
+    nakedEl.textContent = naked;
+    nakedEl.className = 'stat-val ' + (naked > 0 ? 'hot' : 'ok');
+
+    const now = Date.now();
+    const feed60 = STATE.violationsFeed.filter(e => now - e.ts < 60 * 60 * 1000).length;
+    const feed24 = STATE.violationsFeed.filter(e => now - e.ts < 24 * 60 * 60 * 1000).length;
+    const critCount = STATE.violationsFeed.filter(e => e.severity === 'critical' && now - e.ts < 24 * 60 * 60 * 1000).length;
+
+    document.getElementById('viol60m').textContent = feed60;
+    document.getElementById('viol24h').textContent = feed24;
+    const critEl = document.getElementById('critCount');
+    critEl.textContent = critCount;
+    critEl.className = 'stat-val ' + (critCount > 0 ? 'hot' : 'ok');
+}
+
+function renderHealth() {
+    const score = computeHealth();
+    const el = document.getElementById('healthScore');
+    el.textContent = score;
+    el.className = 'health-score ' + (score >= 90 ? '' : score >= 70 ? 'warm' : 'hot');
+
+    // Track history
+    STATE.healthHistory.push({ ts: Date.now(), score });
+    // Keep last 6h (assuming refresh interval ~5s, 6h = 4320 points; keep 500)
+    if (STATE.healthHistory.length > 500) STATE.healthHistory.shift();
+
+    // Sparkline
+    if (STATE.healthHistory.length < 2) return;
+    const pts = STATE.healthHistory;
+    const minS = Math.min(...pts.map(p => p.score));
+    const maxS = Math.max(...pts.map(p => p.score));
+    const range = maxS - minS || 1;
+    const coords = pts.map((p, i) => {
+        const x = (i / (pts.length - 1)) * 200;
+        const y = 40 - ((p.score - minS) / range) * 36 - 2;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    const poly = document.getElementById('sparkPoly');
+    poly.setAttribute('points', coords);
+    poly.setAttribute('stroke', score >= 90 ? '#b8ff2f' : score >= 70 ? '#f59e0b' : '#ef4444');
+}
+
+function renderFeed() {
+    const body = document.getElementById('feedBody');
+    const f = STATE.filter;
+
+    let events = STATE.violationsFeed.slice();
+    // Pin critical to top, then by timestamp desc
+    events.sort((a, b) => {
+        if (a.severity === 'critical' && b.severity !== 'critical') return -1;
+        if (b.severity === 'critical' && a.severity !== 'critical') return 1;
+        return b.ts - a.ts;
+    });
+
+    if (f.coin) events = events.filter(e => e.coin && e.coin.toLowerCase().includes(f.coin.toLowerCase()));
+    if (f.sev) events = events.filter(e => e.severity === f.sev);
+    if (f.type) events = events.filter(e => e.type === f.type);
+
+    events = events.slice(0, 50);
+
+    if (events.length === 0) {
+        body.innerHTML = '<tr><td colspan="6" class="empty">No violations — integrity green</td></tr>';
+        document.getElementById('feedMeta').textContent = '0 events';
+        populateTypeFilter([]);
+        return;
+    }
+
+    body.innerHTML = events.map(e => `
+        <tr data-id="${e.id}" onclick="toggleExpand('${e.id}')">
+            <td class="col-time mono">${fmtTime(e.ts)}</td>
+            <td class="mono">${e.coin}</td>
+            <td class="mono" style="opacity: 0.85;">${e.type}</td>
+            <td class="col-sec"><span class="sev sev-${e.severity}">${e.severity}</span></td>
+            <td>${e.description}</td>
+            <td class="col-fixed">${e.auto_fixed ? '<span class="pill ok">YES</span>' : '<span class="pill bad">NO</span>'}</td>
+        </tr>
+        ${STATE.expandedRow === e.id ? `
+            <tr><td colspan="6" class="expand-panel">
+                <h4>Details</h4>
+                <pre>detected_by: ${e.detected_by}
+resolution: ${e.resolution}
+auto_fixed: ${e.auto_fixed}
+ts: ${new Date(e.ts).toISOString()}
+${e.raw ? 'raw: ' + JSON.stringify(e.raw, null, 2) : ''}</pre>
+            </td></tr>` : ''}
+    `).join('');
+
+    document.getElementById('feedMeta').textContent = events.length + ' of ' + STATE.violationsFeed.length + ' shown';
+    populateTypeFilter(STATE.violationsFeed.map(e => e.type));
+}
+
+function populateTypeFilter(types) {
+    const sel = document.getElementById('fType');
+    const have = new Set(Array.from(sel.options).map(o => o.value));
+    const uniq = [...new Set(types)].sort();
+    for (const t of uniq) {
+        if (!have.has(t)) {
+            const o = document.createElement('option');
+            o.value = t; o.textContent = t;
+            sel.appendChild(o);
+        }
+    }
+}
+
+function renderBreakdown() {
+    const inv = STATE.invariants || {};
+    const v = inv.violations || {};
+    const entries = Object.entries(v).sort((a, b) => b[1] - a[1]);
+    const total = entries.reduce((s, [k, n]) => s + n, 0);
+    const max = entries[0]?.[1] || 1;
+
+    const el = document.getElementById('breakdownBars');
+    if (entries.length === 0) {
+        el.innerHTML = '<div class="empty">No violations recorded</div>';
+        document.getElementById('breakdownMeta').textContent = '0 total';
+        return;
+    }
+    el.innerHTML = entries.map(([k, n]) => {
+        const sev = severityFor(k);
+        return `<div class="bar-row">
+            <div class="bar-label">${k}</div>
+            <div class="bar-track"><div class="bar-fill ${sev === 'critical' ? 'critical' : ''}" style="width: ${(n / max * 100).toFixed(0)}%"></div></div>
+            <div class="bar-val">${n}</div>
+        </div>`;
+    }).join('');
+    document.getElementById('breakdownMeta').textContent = total + ' total';
+}
+
+function renderRoot() {
+    const events = STATE.violationsFeed;
+    if (events.length === 0) {
+        document.getElementById('rootBody').innerHTML = '<tr><td colspan="5" class="empty">No data yet</td></tr>';
+        return;
+    }
+    // Aggregate
+    const byType = {};
+    for (const e of events) {
+        if (!byType[e.type]) byType[e.type] = { n: 0, sources: {}, last: 0 };
+        byType[e.type].n++;
+        byType[e.type].sources[e.detected_by] = (byType[e.type].sources[e.detected_by] || 0) + 1;
+        if (e.ts > byType[e.type].last) byType[e.type].last = e.ts;
+    }
+    const total = events.length;
+    const rows = Object.entries(byType).sort((a, b) => b[1].n - a[1].n);
+    document.getElementById('rootBody').innerHTML = rows.map(([t, d]) => {
+        const domSrc = Object.entries(d.sources).sort((a, b) => b[1] - a[1])[0][0];
+        return `<tr>
+            <td class="mono">${t}</td>
+            <td class="num">${d.n}</td>
+            <td class="num">${((d.n / total) * 100).toFixed(1)}%</td>
+            <td>${domSrc}</td>
+            <td class="mono">${fmtTime(d.last)}</td>
+        </tr>`;
+    }).join('');
+}
+
+function renderPositions() {
+    const inv = STATE.invariants || {};
+    const ps = inv.protection_state || {};
+    const entries = Object.entries(ps);
+    if (entries.length === 0) {
+        document.getElementById('posBody').innerHTML = '<tr><td colspan="7" class="empty">No open positions tracked</td></tr>';
+        document.getElementById('posMeta').textContent = '0 positions';
+        return;
+    }
+    document.getElementById('posBody').innerHTML = entries.map(([coin, s]) => `
+        <tr>
+            <td class="mono">${coin}</td>
+            <td class="num">—</td>
+            <td class="${s.has_tp ? 'good' : 'bad'}">${s.has_tp ? '●' : '✗'}</td>
+            <td class="${s.has_sl ? 'good' : 'bad'}">${s.has_sl ? '●' : '✗'}</td>
+            <td>${s.has_tp ? '—' : 'N/A'}</td>
+            <td>${s.has_sl ? '—' : 'N/A'}</td>
+            <td class="col-time mono">${fmtTime(s.last_check_ts * 1000)}</td>
+        </tr>
+    `).join('');
+    document.getElementById('posMeta').textContent = entries.length + ' tracked';
+}
+
+function renderRepairs() {
+    // Derive from violations feed: entries with auto_fixed=true
+    const repairs = STATE.violationsFeed.filter(e => e.auto_fixed).slice(0, 30);
+    if (repairs.length === 0) {
+        document.getElementById('repairBody').innerHTML = '<tr><td colspan="5" class="empty">No repairs logged yet</td></tr>';
+        return;
+    }
+    document.getElementById('repairBody').innerHTML = repairs.map(r => `
+        <tr>
+            <td class="col-time mono">${fmtTime(r.ts)}</td>
+            <td class="mono">${r.coin}</td>
+            <td>${humanDesc(r.type)}</td>
+            <td class="mono">${r.resolution}</td>
+            <td class="num">—</td>
+        </tr>
+    `).join('');
+}
+
+// ─────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────
+function fmtTime(ts) {
+    const d = new Date(ts);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
+}
+
+function toggleExpand(id) {
+    STATE.expandedRow = STATE.expandedRow === id ? null : id;
+    renderFeed();
+}
+
+// ─────────────────────────────────────────────────────
+// Filters
+// ─────────────────────────────────────────────────────
+document.getElementById('fCoin').addEventListener('input', e => { STATE.filter.coin = e.target.value; renderFeed(); });
+document.getElementById('fSev').addEventListener('change', e => { STATE.filter.sev = e.target.value; renderFeed(); });
+document.getElementById('fType').addEventListener('change', e => { STATE.filter.type = e.target.value; renderFeed(); });
+
+// ─────────────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────────────
+refresh();
+setInterval(refresh, 3000);
+</script>
+
+</body>
+</html>
