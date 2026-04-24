@@ -363,6 +363,16 @@ def _process_intent(intent, snap, authoritative):
         _log(f"EXECUTE ERR {coin}: {e}")
         return 'execute_err'
 
+    # If execute_close_fn returned None, the exchange close FAILED.
+    # Do NOT mark ledger closed — that's what caused the orphan re-adoption loop.
+    # Ledger stays open, position stays on exchange, next cycle retries.
+    if fill_px is None:
+        with _LOCK:
+            _METRICS['errors_total'] += 1
+            _METRICS['last_error'] = f"execute_close returned None {coin}"
+        _log(f"EXECUTE FAILED {coin} trade_id={tid[:8]} — skipping ledger write (retry next cycle)")
+        return 'execute_failed_no_ledger_write'
+
     # Brief settle delay before reading fill
     time.sleep(0.3)
     # Refresh snapshot for fresh fills
@@ -371,6 +381,19 @@ def _process_intent(intent, snap, authoritative):
     except Exception:
         pass
     fresh = _deps['snapshot'].get()
+
+    # CRITICAL VERIFICATION: confirm exchange position is actually gone.
+    # If still present, do NOT mark ledger closed. Retry next cycle.
+    # This is the backstop against the HMSTR-12-closes-in-4-min loop.
+    still_on_exchange = fresh.get('positions', {}).get(coin)
+    if still_on_exchange:
+        with _LOCK:
+            _METRICS['errors_total'] += 1
+            _METRICS['last_error'] = f"post-close verify failed {coin}"
+        _log(f"VERIFY FAILED {coin} trade_id={tid[:8]} — position still on exchange after close attempt "
+             f"(size={still_on_exchange.get('size')}) — NOT writing ledger close")
+        return 'post_close_verify_failed'
+
     fill = _find_recent_fill(coin, fresh.get('fills', []), since_ts=time.time() - 10)
 
     ok = close_trade_fn(
