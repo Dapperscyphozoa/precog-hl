@@ -65,10 +65,10 @@ body::after {
 .logo-text { font-family: 'Cormorant Garamond', serif; font-size: 28px; font-weight: 600; letter-spacing: 0.3em; color: var(--bone); }
 .logo-sub { font-size: 9px; letter-spacing: 0.4em; opacity: 0.5; margin-top: 2px; color: var(--acid); }
 
-.status-cluster { display: flex; gap: 32px; align-items: center; }
-.status-item { font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--chrome); opacity: 0.7; }
+.status-cluster { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.status-item { font-size: 10px; letter-spacing: 0.2em; text-transform: uppercase; color: var(--chrome); opacity: 0.7; white-space: nowrap; }
 .status-item strong { color: var(--acid); font-weight: 600; letter-spacing: 0.1em; }
-.audit-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--acid); text-decoration: none; border: 1px solid var(--acid); background: rgba(184, 255, 47, 0.05); font-weight: 600; transition: all 0.15s ease; }
+.audit-btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--acid); text-decoration: none; border: 1px solid var(--acid); background: rgba(184, 255, 47, 0.05); font-weight: 600; transition: all 0.15s ease; white-space: nowrap; }
 .audit-btn:hover { background: var(--acid); color: var(--void); }
 .audit-btn::after { content: '→'; font-size: 13px; }
 .pulse-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--acid); margin-right: 8px; box-shadow: 0 0 12px var(--glow); animation: pulse 1.5s ease-in-out infinite; vertical-align: middle; }
@@ -210,6 +210,14 @@ body::after {
     .hero { grid-template-columns: 1fr; }
     .grid { grid-template-columns: 1fr; }
     .metrics-bar { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 720px) {
+    .container { padding: 20px 16px; }
+    .header { flex-direction: column; align-items: stretch; gap: 16px; }
+    .status-cluster { justify-content: flex-start; gap: 14px; }
+    .audit-btn { align-self: flex-start; }
+    .logo-text { font-size: 22px; letter-spacing: 0.2em; }
+    .logo-mark { width: 36px; height: 36px; }
 }
 </style>
 </head>
