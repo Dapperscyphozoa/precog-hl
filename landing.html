@@ -929,27 +929,46 @@ async function loadOrderbook() {
 
 async function loadHeatmap() {
     try {
-        const r = await fetch('/dash');
+        // Use /audit/deep which pulls HL fills (persistent across restarts)
+        // Default to 24h window for per-coin WR
+        const r = await fetch('/audit/deep?hours=24&format=json');
         const d = await r.json();
-        const cw = d.coin_wr || {};
-        const entries = Object.entries(cw)
-            .filter(([c,s]) => (s.wins||0)+(s.losses||0) >= 1)
-            .sort((a,b) => (b[1].wr||0)-(a[1].wr||0));
-        document.getElementById('heatmap').innerHTML = entries.map(([c,s]) => {
-            const n = (s.wins||0)+(s.losses||0);
-            const wr = (s.wr||0)*100;
+        const perCoin = d.per_coin || [];
+        if (perCoin.length === 0) {
+            document.getElementById('heatmap').innerHTML = '<div style="opacity:0.5;padding:20px">// no closed trades in last 24h</div>';
+            document.getElementById('heat-meta').textContent = '0 coins · 0 trades';
+            return;
+        }
+        // Sort by WR desc (wins/(wins+losses)), then by n desc
+        const rows = perCoin.map(c => {
+            const n = c.n || 0;
+            const w = c.w || 0;
+            const l = c.l || 0;
+            const concluded = w + l;
+            const wr = concluded > 0 ? (w / concluded) * 100 : 0;
+            return { coin: c.coin, n, w, l, wr, pnl: c.pnl || 0 };
+        })
+        .filter(r => r.n >= 1)
+        .sort((a, b) => b.wr - a.wr || b.n - a.n);
+
+        document.getElementById('heatmap').innerHTML = rows.map(s => {
             let bg;
-            if (wr >= 70) bg = 'rgba(184,255,47,0.4)';
-            else if (wr >= 55) bg = 'rgba(184,255,47,0.15)';
-            else if (wr >= 40) bg = 'rgba(217,118,6,0.2)';
+            if (s.wr >= 70) bg = 'rgba(184,255,47,0.4)';
+            else if (s.wr >= 55) bg = 'rgba(184,255,47,0.15)';
+            else if (s.wr >= 40) bg = 'rgba(217,118,6,0.2)';
             else bg = 'rgba(193,39,45,0.3)';
+            const pnlColor = s.pnl >= 0 ? 'var(--acid)' : 'var(--hot)';
             return `<div style="padding:8px 6px;background:${bg};border:1px solid var(--line);text-align:center">
-                <div style="font-weight:600;font-size:11px">${c}</div>
-                <div style="font-size:9px;opacity:0.7">${wr.toFixed(0)}% · ${n}</div>
+                <div style="font-weight:600;font-size:11px">${s.coin}</div>
+                <div style="font-size:9px;opacity:0.7">${s.wr.toFixed(0)}% · ${s.n}</div>
+                <div style="font-size:9px;color:${pnlColor};margin-top:2px">${s.pnl >= 0 ? '+' : ''}${s.pnl.toFixed(2)}</div>
             </div>`;
-        }).join('') || '<div style="opacity:0.5;padding:20px">// no closed trades yet</div>';
-        document.getElementById('heat-meta').textContent = entries.length + ' coins · ' + entries.reduce((sum,[c,s]) => sum + (s.wins||0)+(s.losses||0), 0) + ' trades';
-    } catch (e) {}
+        }).join('');
+        const totalTrades = rows.reduce((sum, s) => sum + s.n, 0);
+        document.getElementById('heat-meta').textContent = rows.length + ' coins · ' + totalTrades + ' trades · 24h';
+    } catch (e) {
+        document.getElementById('heatmap').innerHTML = `<div style="opacity:0.5;padding:20px">// data unavailable: ${e.message || e}</div>`;
+    }
 }
 
 async function loadEngines() {
