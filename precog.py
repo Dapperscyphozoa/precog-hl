@@ -2726,6 +2726,201 @@ def enforce_status():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/shadow/compare', methods=['GET'])
+def shadow_compare():
+    """Live vs Shadow expectancy comparison — the scientific validation endpoint.
+
+    Pulls live trades from past N hours (default 48), computes R-multiples,
+    then invokes compare_live_vs_shadow with shadow resolved trades.
+
+    Returns EV delta + per-reason breakdown.
+    Query: ?hours=N&format=html|json
+    """
+    try:
+        try: hours = float(flask_request.args.get('hours', '48'))
+        except: hours = 48.0
+        fmt = flask_request.args.get('format', 'json').lower()
+        if not _SR_OK or _shadow_rej is None:
+            return jsonify({'error': 'shadow_trades not loaded'}), 503
+
+        # Fetch live fills, compute R-multiples using DEFAULT SL 2.5% (matches shadow friction model)
+        fills, _ = _fetch_user_fills_cached()
+        now_ms = int(time.time() * 1000)
+        cutoff = now_ms - int(hours * 3600 * 1000)
+        DEFAULT_SL_PCT = 2.5  # percent
+        live_rmults = []
+        for f in fills:
+            if f.get('time', 0) < cutoff: continue
+            pnl_usd = float(f.get('closedPnl', 0) or 0)
+            if pnl_usd == 0: continue
+            try:
+                entry_px = float(f.get('px', 0) or 0)
+                sz = abs(float(f.get('sz', 0) or 0))
+                notional = entry_px * sz
+                if notional <= 0: continue
+                pnl_pct_pct = (pnl_usd / notional) * 100.0  # percent
+                r_mult = pnl_pct_pct / DEFAULT_SL_PCT
+                live_rmults.append(r_mult)
+            except Exception:
+                continue
+
+        cmp_result = _shadow_rej.compare_live_vs_shadow(live_rmults)
+        cmp_result['as_of_utc'] = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())
+        cmp_result['window_hours'] = hours
+        cmp_result['live_sample_note'] = 'R-mult assumes DEFAULT_SL=2.5%; shadow uses exact sl_pct'
+
+        if fmt != 'html':
+            return jsonify(cmp_result)
+
+        # HTML rendering
+        live = cmp_result.get('live', {})
+        shadow = cmp_result.get('shadow', {})
+        ev_delta = cmp_result.get('ev_delta')
+        confidence = cmp_result.get('confidence', 'insufficient')
+
+        def _c(v):
+            if v is None: return 'cool'
+            if v > 0.05: return 'ok'
+            if v < -0.05: return 'hot'
+            return 'amber'
+
+        def _fmt_r(v):
+            return f"{v:+.2f}R" if v is not None else "—"
+
+        def _fmt_wr(v):
+            return f"{v*100:.0f}%" if v is not None else "—"
+
+        # Interpretation
+        if ev_delta is None or confidence == 'insufficient':
+            verdict_label = 'INSUFFICIENT DATA'
+            verdict_color = 'cool'
+            verdict_desc = f'Need min 30 samples (live={live.get("n",0)}, shadow={shadow.get("n",0)}).'
+        elif ev_delta > 0.1:
+            verdict_label = 'FILTERS CREATING EDGE'
+            verdict_color = 'ok'
+            verdict_desc = f'Live EV is {ev_delta:+.2f}R better than rejected trades. Keep filters.'
+        elif ev_delta < -0.1:
+            verdict_label = 'FILTERS DESTROYING EDGE'
+            verdict_color = 'hot'
+            verdict_desc = f'Live EV is {ev_delta:.2f}R WORSE than rejected trades. Loosen filters.'
+        else:
+            verdict_label = 'FILTERS NEUTRAL'
+            verdict_color = 'amber'
+            verdict_desc = f'EV delta {ev_delta:+.2f}R within noise. Simpler = better; consider removing weakest filters.'
+
+        reason_rows = ''
+        for reason, s in sorted(cmp_result.get('by_reason', {}).items(), key=lambda x: -(x[1].get('fvs_r') or -999)):
+            reason_rows += (
+                f'<tr>'
+                f'<td class="mono">{reason}</td>'
+                f'<td style="font-size:9px;letter-spacing:0.2em">{s.get("class", "—")}</td>'
+                f'<td class="num">{s.get("n")}</td>'
+                f'<td class="num">{_fmt_wr(s.get("wr"))}</td>'
+                f'<td class="num {_c(s.get("avg_r"))}">{_fmt_r(s.get("avg_r"))}</td>'
+                f'<td class="num {_c(s.get("fvs_r"))}" style="font-weight:600">{_fmt_r(s.get("fvs_r"))}</td>'
+                f'</tr>'
+            )
+
+        class_cards = ''
+        for cls, s in cmp_result.get('by_class', {}).items():
+            avg_r = s.get('avg_r')
+            color = _c(avg_r)
+            class_cards += (
+                f'<div style="padding:14px;border:1px solid var(--{color})">'
+                f'<div style="font-size:10px;letter-spacing:0.3em;color:var(--{color})">{cls}</div>'
+                f'<div style="font-family:\'Cormorant Garamond\',serif;font-size:22px;color:var(--bone);margin-top:6px">{_fmt_r(avg_r)}</div>'
+                f'<div style="font-size:10px;opacity:0.5;margin-top:4px">n={s.get("n")} · WR={_fmt_wr(s.get("wr"))}</div>'
+                f'</div>'
+            )
+
+        html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shadow vs Live · Expectancy</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Cormorant+Garamond:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root{{--void:#07080a;--carbon:#0d0e11;--chrome:#c8ccd4;--bone:#d9d6cd;--acid:#b8ff2f;--hot:#ef4444;--amber:#f59e0b;--cool:#64748b;--line:rgba(200,204,212,0.08)}}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--void);color:var(--chrome);font-family:'JetBrains Mono',monospace;font-size:12px;padding:20px;line-height:1.5}}
+h1{{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:28px;color:var(--bone)}}
+h2{{font-size:11px;letter-spacing:0.35em;text-transform:uppercase;color:var(--bone);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:12px}}
+.sub{{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;opacity:0.5;margin-bottom:20px}}
+.verdict{{padding:20px;border:1px solid var(--{verdict_color});margin-bottom:24px}}
+.verdict .lbl{{font-size:11px;letter-spacing:0.3em;color:var(--{verdict_color});font-weight:600}}
+.verdict .v{{font-family:'Cormorant Garamond',serif;font-size:32px;color:var(--bone);margin:6px 0}}
+.verdict .desc{{font-size:12px;opacity:0.8}}
+.pair{{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;padding:18px 0;border-top:1px solid var(--acid);border-bottom:1px solid var(--line);margin-bottom:24px}}
+.col{{padding:0 18px;border-left:1px solid var(--line)}}
+.col:first-child{{border:none}}
+.col-lbl{{font-size:9px;letter-spacing:0.3em;color:var(--chrome);opacity:0.5;margin-bottom:8px;text-transform:uppercase}}
+.col-val{{font-family:'Cormorant Garamond',serif;font-size:28px;color:var(--bone)}}
+.col-sub{{font-size:10px;opacity:0.55;margin-top:4px}}
+.ok{{color:var(--acid)}}.hot{{color:var(--hot)}}.amber{{color:var(--amber)}}.cool{{color:var(--cool)}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}
+th{{text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.25em;opacity:0.6;border-bottom:1px solid var(--line);font-weight:400}}
+td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--bone)}}
+.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.mono{{font-family:'JetBrains Mono',monospace}}
+.classes{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:24px}}
+.section{{margin-bottom:24px}}
+a{{color:var(--acid)}}
+@media(max-width:700px){{.pair{{grid-template-columns:1fr}}.classes{{grid-template-columns:1fr}}}}
+</style></head><body>
+
+<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+<h1>Shadow vs Live · Expectancy Validation</h1>
+<a href="/violations" style="font-size:10px;letter-spacing:0.3em">AUDIT →</a>
+</div>
+<div class="sub">{cmp_result.get('as_of_utc')} UTC · live {hours}h · shadow all-time · confidence: {confidence}</div>
+
+<div class="verdict">
+    <div class="lbl">Verdict</div>
+    <div class="v">{verdict_label}</div>
+    <div class="desc">{verdict_desc}</div>
+</div>
+
+<div class="pair">
+    <div class="col">
+        <div class="col-lbl">LIVE</div>
+        <div class="col-val {_c(live.get('avg_r'))}">{_fmt_r(live.get('avg_r'))}</div>
+        <div class="col-sub">n={live.get('n',0)} · WR={_fmt_wr(live.get('wr'))} · σ={live.get('std_r',0):.2f}</div>
+    </div>
+    <div class="col">
+        <div class="col-lbl">SHADOW</div>
+        <div class="col-val {_c(shadow.get('avg_r'))}">{_fmt_r(shadow.get('avg_r'))}</div>
+        <div class="col-sub">n={shadow.get('n',0)} · WR={_fmt_wr(shadow.get('wr'))} · σ={shadow.get('std_r',0):.2f}</div>
+    </div>
+    <div class="col">
+        <div class="col-lbl">EV DELTA</div>
+        <div class="col-val {_c(ev_delta)}">{_fmt_r(ev_delta)}</div>
+        <div class="col-sub">live − shadow</div>
+    </div>
+</div>
+
+<h2>By Rejection Class</h2>
+<div class="classes">{class_cards or '<div style="opacity:0.5">no resolved shadow data yet</div>'}</div>
+
+<h2>By Reason (min 5 samples)</h2>
+<table>
+<thead><tr><th>REASON</th><th>CLASS</th><th class="num">N</th><th class="num">WR</th><th class="num">EV/trade</th><th class="num">FVS (vs live)</th></tr></thead>
+<tbody>{reason_rows or '<tr><td colspan=6 style="opacity:0.5;padding:20px">No reasons with enough samples yet</td></tr>'}</tbody>
+</table>
+<div style="margin-top:10px;font-size:10px;opacity:0.55">
+<strong class="hot">FVS &gt; 0</strong> = filter blocks winners (loosen) · <strong class="ok">FVS &lt; 0</strong> = filter blocks losers (keep)
+</div>
+
+<div style="margin-top:40px;padding-top:12px;border-top:1px solid var(--line);font-size:9px;opacity:0.5;letter-spacing:0.2em;text-transform:uppercase">
+Friction model: {cmp_result['friction']['fee_round_trip_pct']:.2f}% fees + {cmp_result['friction']['slippage_round_trip_pct']:.2f}% slip ·
+<a href="?hours=24&format=html">24h</a> · <a href="?hours=48&format=html">48h</a> · <a href="?hours=168&format=html">7d</a> · <a href="?format=json">json</a>
+</div>
+</body></html>"""
+        resp = Response(html, mimetype='text/html')
+        resp.headers['Cache-Control'] = 'no-cache'
+        return resp
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'tb': traceback.format_exc()[-500:]}), 500
+
+
 @app.route('/experiment', methods=['GET'])
 def experiment_status():
     """Promotion engine status — experimental bucket tracking, A/B test state."""
@@ -7217,10 +7412,24 @@ def main():
             save_state(state)
 
             # Shadow-trade resolution: advance pending rejected-trade records
-            # to TP/SL outcome as prices move. Non-blocking, best-effort.
+            # using DETERMINISTIC candle-based resolution (matches live spec).
+            # Uses 1m HL candles since rejection timestamp. Conservative SL-first
+            # on same-candle TP+SL hits. Friction applied: 0.07% fee + 0.16% slip.
             if _SR_OK and _shadow_rej is not None:
                 try:
-                    _shadow_rej.resolve_pending(get_mid)
+                    def _shadow_candle_fetcher(coin, since_ts_ms):
+                        """Fetch 1m candles from HL between since_ts_ms and now.
+                        Returns [] on any error (resolve_pending handles None)."""
+                        try:
+                            now_ms = int(time.time() * 1000)
+                            if now_ms - since_ts_ms < 60_000:
+                                return []  # less than 1 candle available
+                            cs = info.candles_snapshot(
+                                coin, '1m', since_ts_ms, now_ms)
+                            return cs or []
+                        except Exception:
+                            return []
+                    _shadow_rej.resolve_pending(_shadow_candle_fetcher)
                 except Exception as _sre:
                     log(f"shadow resolve err: {_sre}")
 
