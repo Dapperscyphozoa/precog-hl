@@ -1892,6 +1892,312 @@ def invariants_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/audit/deep', methods=['GET'])
+def audit_deep():
+    """One-click deep audit over the past N hours (default 5).
+    Pulls HL fills, breaks down trades/WR/PnL/fees/per-coin/per-hour,
+    plus contract/invariants/shadow state. Returns JSON by default,
+    or HTML if ?format=html."""
+    try:
+        hours = float(flask_request.args.get('hours', '5'))
+    except Exception:
+        hours = 5.0
+    fmt = flask_request.args.get('format', 'json').lower()
+
+    import urllib.request as _ureq
+    from collections import defaultdict as _dd
+
+    now_ms = int(time.time() * 1000)
+    cutoff = now_ms - int(hours * 3600 * 1000)
+
+    # 1. HL fills
+    fills = []
+    try:
+        body = json.dumps({'type': 'userFills', 'user': WALLET}).encode()
+        req = _ureq.Request('https://api.hyperliquid.xyz/info', method='POST',
+                            data=body, headers={'Content-Type': 'application/json'})
+        with _ureq.urlopen(req, timeout=10) as resp:
+            fills = json.loads(resp.read())
+    except Exception as e:
+        return jsonify({'error': f'HL fills fetch: {e}'}), 500
+
+    recent = [f for f in fills if f.get('time', 0) >= cutoff]
+    closes = [f for f in recent if float(f.get('closedPnl', 0)) != 0]
+    wins = [c for c in closes if float(c.get('closedPnl', 0)) > 0]
+    losses = [c for c in closes if float(c.get('closedPnl', 0)) < 0]
+    pnl = sum(float(c.get('closedPnl', 0)) for c in closes)
+    fees = sum(float(f.get('fee', 0)) for f in recent)
+    net = pnl - fees
+    n_concluded = len(wins) + len(losses)
+    wr = (len(wins) / n_concluded * 100) if n_concluded > 0 else 0
+    avg_win = (sum(float(c['closedPnl']) for c in wins) / len(wins)) if wins else 0
+    avg_loss = (sum(float(c['closedPnl']) for c in losses) / len(losses)) if losses else 0
+    rr = (avg_win / abs(avg_loss)) if avg_loss else 0
+    max_win = max((float(c['closedPnl']) for c in wins), default=0)
+    max_loss = min((float(c['closedPnl']) for c in losses), default=0)
+
+    # Per-coin
+    by_coin = _dd(lambda: {'n': 0, 'pnl': 0.0, 'w': 0, 'l': 0})
+    for c in closes:
+        k = c.get('coin', '?')
+        pnl_c = float(c.get('closedPnl', 0))
+        by_coin[k]['n'] += 1
+        by_coin[k]['pnl'] += pnl_c
+        if pnl_c > 0: by_coin[k]['w'] += 1
+        elif pnl_c < 0: by_coin[k]['l'] += 1
+    top_coins = sorted(by_coin.items(), key=lambda x: -x[1]['n'])[:15]
+
+    # Per-hour
+    by_hour = _dd(lambda: {'fills': 0, 'closes': 0, 'pnl': 0.0})
+    for f in recent:
+        h = int((now_ms - f.get('time', 0)) / 3600_000)
+        by_hour[h]['fills'] += 1
+        if float(f.get('closedPnl', 0)) != 0:
+            by_hour[h]['closes'] += 1
+            by_hour[h]['pnl'] += float(f.get('closedPnl', 0))
+    hourly = [(h, by_hour[h]) for h in sorted(by_hour)]
+
+    # 2. System state snapshots
+    equity = None
+    try: equity = get_balance()
+    except Exception: pass
+
+    contract_state = None
+    if _EC_OK and _contract is not None:
+        try: contract_state = _contract.status()
+        except Exception: pass
+
+    invariants_state = None
+    if _INV_OK and _invariants is not None:
+        try: invariants_state = _invariants.status()
+        except Exception: pass
+
+    tf_state = None
+    if _TFI_OK and _tf_iso is not None:
+        try: tf_state = _tf_iso.status()
+        except Exception: pass
+
+    shadow_state = None
+    if _SR_OK and _shadow_rej is not None:
+        try: shadow_state = _shadow_rej.status()
+        except Exception: pass
+
+    # 3. Verdict
+    if n_concluded < 10:
+        verdict = {
+            'label': 'SAMPLE TOO SMALL',
+            'desc': f'Only {n_concluded} concluded trades. Need 10+ to read signal.',
+            'color': 'cool',
+        }
+    elif wr >= 55 and net > 0:
+        verdict = {
+            'label': 'EDGE PRESENT',
+            'desc': f'WR {wr:.1f}%, NET +${net:.2f}. Keep running.',
+            'color': 'acid',
+        }
+    elif net > 0 and wr < 45:
+        verdict = {
+            'label': 'POSITIVE EXPECTANCY',
+            'desc': f'NET +${net:.2f} despite low WR {wr:.1f}% — R:R {rr:.2f}:1 carrying it.',
+            'color': 'amber',
+        }
+    elif net > 0:
+        verdict = {
+            'label': 'MILDLY POSITIVE',
+            'desc': f'WR {wr:.1f}%, NET +${net:.2f}. Early signal.',
+            'color': 'amber',
+        }
+    else:
+        verdict = {
+            'label': 'NEGATIVE',
+            'desc': f'WR {wr:.1f}%, NET ${net:+.2f}. Filter or signal issue.',
+            'color': 'hot',
+        }
+
+    audit = {
+        'window_hours': hours,
+        'as_of_utc': time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now_ms/1000)),
+        'trading': {
+            'fills': len(recent),
+            'closes': len(closes),
+            'wins': len(wins),
+            'losses': len(losses),
+            'win_rate_pct': round(wr, 2),
+            'pnl_realized': round(pnl, 2),
+            'fees': round(fees, 2),
+            'net': round(net, 2),
+            'avg_win': round(avg_win, 2),
+            'avg_loss': round(avg_loss, 2),
+            'risk_reward': round(rr, 2),
+            'max_win': round(max_win, 2),
+            'max_loss': round(max_loss, 2),
+            'closes_per_hour': round(len(closes) / hours, 2) if hours > 0 else 0,
+            'projected_daily_trades': round(len(closes) / hours * 24) if hours > 0 else 0,
+            'projected_daily_net': round(net / hours * 24, 2) if hours > 0 else 0,
+        },
+        'per_coin': [{'coin': c, **d} for c, d in top_coins],
+        'per_hour': [{'hrs_ago': h, **d} for h, d in hourly],
+        'live_state': {
+            'equity': equity,
+            'contract': {
+                'queue_size': len(contract_state.get('reversal_queue', {})) if contract_state else None,
+                'violations': contract_state.get('violations_counters') if contract_state else None,
+            } if contract_state else None,
+            'invariants': {
+                'daemon_running': invariants_state.get('daemon_running') if invariants_state else None,
+                'positions_protected': invariants_state.get('positions_protected') if invariants_state else None,
+                'positions_naked': invariants_state.get('positions_naked_now') if invariants_state else None,
+                'violations': invariants_state.get('violations') if invariants_state else None,
+            } if invariants_state else None,
+            'tf_isolation': tf_state.get('violations') if tf_state else None,
+            'shadow': {
+                'pending': shadow_state.get('pending_count') if shadow_state else None,
+                'resolved': shadow_state.get('resolved_total') if shadow_state else None,
+                'by_class': shadow_state.get('by_class') if shadow_state else None,
+            } if shadow_state else None,
+        },
+        'verdict': verdict,
+    }
+
+    if fmt != 'html':
+        return jsonify(audit)
+
+    # HTML rendering
+    def _c(v, pos='ok', neg='hot'):
+        if v is None: return ''
+        return pos if v >= 0 else neg
+
+    coin_rows = ''.join(
+        f'<tr><td class="mono">{c["coin"]}</td><td class="num">{c["n"]}</td>'
+        f'<td class="num">{c["w"]}/{c["l"]}</td>'
+        f'<td class="num {_c(c["pnl"])}">${c["pnl"]:+.2f}</td></tr>'
+        for c in audit['per_coin']
+    )
+    hour_rows = ''.join(
+        f'<tr><td>{h["hrs_ago"]}h</td><td class="num">{h["fills"]}</td>'
+        f'<td class="num">{h["closes"]}</td>'
+        f'<td class="num {_c(h["pnl"])}">${h["pnl"]:+.2f}</td></tr>'
+        for h in audit['per_hour']
+    )
+    shadow_rows = ''
+    if shadow_state:
+        by_cls = shadow_state.get('by_class', {})
+        for cls, d in by_cls.items():
+            wr_v = d.get('win_rate')
+            wr_s = f"{wr_v*100:.0f}%" if wr_v is not None else '—'
+            shadow_rows += (
+                f'<tr><td>{cls}</td>'
+                f'<td class="num">{d.get("pending", 0)}</td>'
+                f'<td class="num">{d.get("n_resolved", 0)}</td>'
+                f'<td class="num">{wr_s}</td>'
+                f'<td class="num {_c(d.get("expectancy_pct"))}">{d.get("expectancy_pct", 0):+.2f}%</td></tr>'
+            )
+
+    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUDIT · {hours}h · {verdict['label']}</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Cormorant+Garamond:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root {{ --void:#07080a;--carbon:#0d0e11;--chrome:#c8ccd4;--bone:#d9d6cd;--acid:#b8ff2f;--hot:#ef4444;--amber:#f59e0b;--cool:#64748b;--line:rgba(200,204,212,0.08); }}
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:var(--void);color:var(--chrome);font-family:'JetBrains Mono',monospace;font-size:12px;padding:20px;line-height:1.5}}
+h1{{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:28px;color:var(--bone);margin-bottom:4px}}
+.sub{{font-size:10px;letter-spacing:0.3em;text-transform:uppercase;color:var(--chrome);opacity:0.5;margin-bottom:20px}}
+.verdict{{padding:20px;border:1px solid var(--{verdict['color']});margin-bottom:24px;background:linear-gradient(180deg,rgba(184,255,47,0.04),transparent)}}
+.verdict .label{{font-size:11px;letter-spacing:0.3em;text-transform:uppercase;color:var(--{verdict['color']});font-weight:600}}
+.verdict .v{{font-family:'Cormorant Garamond',serif;font-size:34px;color:var(--bone);margin:6px 0}}
+.verdict .desc{{font-size:12px;color:var(--chrome);opacity:0.8}}
+.grid{{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin-bottom:28px;padding:18px 0;border-top:1px solid var(--acid);border-bottom:1px solid var(--line)}}
+.stat{{padding:0 18px;border-left:1px solid var(--line)}}
+.stat:first-child{{border-left:none}}
+.stat-val{{font-family:'Cormorant Garamond',serif;font-size:24px;color:var(--bone);line-height:1}}
+.stat-lbl{{font-size:9px;letter-spacing:0.3em;text-transform:uppercase;opacity:0.55;margin-top:6px}}
+.ok{{color:var(--acid)}}.hot{{color:var(--hot)}}.amber{{color:var(--amber)}}.cool{{color:var(--cool)}}
+.section{{margin-bottom:24px}}
+.section h2{{font-size:11px;letter-spacing:0.35em;text-transform:uppercase;color:var(--bone);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:12px}}
+table{{width:100%;border-collapse:collapse;font-size:11px}}
+th{{text-align:left;padding:6px 10px;font-size:9px;letter-spacing:0.25em;text-transform:uppercase;opacity:0.6;border-bottom:1px solid var(--line);font-weight:400}}
+td{{padding:6px 10px;border-bottom:1px solid rgba(200,204,212,0.04);color:var(--bone)}}
+.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.mono{{font-family:'JetBrains Mono',monospace}}
+.two{{display:grid;grid-template-columns:1fr 1fr;gap:20px}}
+.kv{{display:grid;grid-template-columns:160px 1fr;gap:8px;font-size:11px}}
+.kv dt{{color:var(--chrome);opacity:0.55}}.kv dd{{color:var(--bone)}}
+a{{color:var(--acid)}}
+@media(max-width:700px){{.grid{{grid-template-columns:repeat(3,1fr)}}.two{{grid-template-columns:1fr}}}}
+</style></head><body>
+
+<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px">
+<h1>Deep Audit · {hours}h</h1>
+<a href="/violations" style="font-size:10px;letter-spacing:0.3em">VIOLATIONS →</a>
+</div>
+<div class="sub">as of {audit['as_of_utc']} UTC · window: past {hours} hours</div>
+
+<div class="verdict">
+    <div class="label">Verdict</div>
+    <div class="v {verdict['color']}">{verdict['label']}</div>
+    <div class="desc">{verdict['desc']}</div>
+</div>
+
+<div class="grid">
+    <div class="stat"><div class="stat-val">{audit['trading']['closes']}</div><div class="stat-lbl">Closes</div></div>
+    <div class="stat"><div class="stat-val {('ok' if wr>=55 else 'amber' if wr>=45 else 'hot')}">{wr:.0f}%</div><div class="stat-lbl">Win Rate</div></div>
+    <div class="stat"><div class="stat-val {_c(net)}">${net:+.2f}</div><div class="stat-lbl">Net PnL</div></div>
+    <div class="stat"><div class="stat-val">{rr:.2f}</div><div class="stat-lbl">R:R</div></div>
+    <div class="stat"><div class="stat-val">{audit['trading']['closes_per_hour']:.1f}</div><div class="stat-lbl">Closes/Hr</div></div>
+    <div class="stat"><div class="stat-val">${equity:.2f if equity else 0}</div><div class="stat-lbl">Equity</div></div>
+</div>
+
+<div class="two">
+    <div class="section">
+        <h2>Per Coin</h2>
+        <table><thead><tr><th>Coin</th><th class="num">N</th><th class="num">W/L</th><th class="num">PnL</th></tr></thead>
+        <tbody>{coin_rows or '<tr><td colspan=4 style="opacity:0.5;padding:20px">no closes</td></tr>'}</tbody></table>
+    </div>
+    <div class="section">
+        <h2>Hourly</h2>
+        <table><thead><tr><th>Age</th><th class="num">Fills</th><th class="num">Closes</th><th class="num">PnL</th></tr></thead>
+        <tbody>{hour_rows or '<tr><td colspan=4 style="opacity:0.5;padding:20px">no activity</td></tr>'}</tbody></table>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Shadow Rejections · Edge vs Capacity</h2>
+    <table><thead><tr><th>Class</th><th class="num">Pending</th><th class="num">Resolved</th><th class="num">WR</th><th class="num">Exp</th></tr></thead>
+    <tbody>{shadow_rows or '<tr><td colspan=5 style="opacity:0.5;padding:20px">no shadow data</td></tr>'}</tbody></table>
+</div>
+
+<div class="section">
+    <h2>System State</h2>
+    <dl class="kv">
+    <dt>Contract queue</dt><dd>{len(contract_state.get('reversal_queue', {})) if contract_state else '—'} pending</dd>
+    <dt>Contract violations</dt><dd>{contract_state.get('violations_counters') if contract_state else '—'}</dd>
+    <dt>Invariants daemon</dt><dd>{invariants_state.get('daemon_running') if invariants_state else '—'}</dd>
+    <dt>Positions protected</dt><dd>{invariants_state.get('positions_protected') if invariants_state else '—'}</dd>
+    <dt>Positions naked</dt><dd>{invariants_state.get('positions_naked_now') if invariants_state else '—'}</dd>
+    <dt>Invariant violations</dt><dd>{invariants_state.get('violations') if invariants_state else '—'}</dd>
+    <dt>TF isolation</dt><dd>{tf_state.get('violations') if tf_state else '—'}</dd>
+    <dt>Shadow pending</dt><dd>{shadow_state.get('pending_count') if shadow_state else '—'}</dd>
+    <dt>Shadow resolved</dt><dd>{shadow_state.get('resolved_total') if shadow_state else '—'}</dd>
+    </dl>
+</div>
+
+<div style="margin-top:40px;padding-top:12px;border-top:1px solid var(--line);font-size:9px;opacity:0.5;letter-spacing:0.2em;text-transform:uppercase">
+    Projected daily at current pace: {audit['trading']['projected_daily_trades']} trades · ${audit['trading']['projected_daily_net']:+.2f} · 
+    <a href="?hours=1&format=html">1h</a> ·
+    <a href="?hours=5&format=html">5h</a> ·
+    <a href="?hours=12&format=html">12h</a> ·
+    <a href="?hours=24&format=html">24h</a> ·
+    <a href="?hours=48&format=html">48h</a> ·
+    <a href="?format=json">json</a>
+</div>
+
+</body></html>"""
+    resp = Response(html, mimetype='text/html')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
+
+
 @app.route('/shadow_trades', methods=['GET'])
 def shadow_trades_status():
     """Shadow trades — rejected-trade outcome tracking. Would-have-been
