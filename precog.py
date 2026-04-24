@@ -8221,7 +8221,32 @@ def lifecycle_emergency():
     action = request.args.get('action') or (request.json or {}).get('action') if request.is_json else request.args.get('action')
     if not action:
         return jsonify({'err': 'action required', 'valid_actions': [
-            'clear_halt', 'clear_breaker', 'clear_emergency', 'clear_ring', 'clear_all', 'flatten_all']}), 400
+            'clear_halt', 'clear_breaker', 'clear_emergency', 'clear_ring', 'clear_all',
+            'flatten_all', 'close_coin']}), 400
+
+    if action == 'close_coin':
+        coin = request.args.get('coin')
+        if not coin:
+            return jsonify({'err': 'close_coin requires ?coin=<SYMBOL>'}), 400
+        coin = coin.upper()
+        # Route through the same pipeline a legitimate close() would take.
+        # In authoritative mode: emits FORCE_CLOSE intent → reconciler drains →
+        # _close_direct fires with escalating slip → verify → ledger write.
+        try:
+            pos = state.get('positions', {}).get(coin)
+            tid = pos.get('trade_id') if pos else None
+            if not tid and _LEDGER_OK and _ledger:
+                tid = _ledger.latest_open_trade_id_for_coin(coin)
+            if _INTENTS_OK and _intents is not None:
+                _intents.emit('FORCE_CLOSE', coin, trade_id=tid, reason='admin_close')
+                log(f"[admin] FORCE_CLOSE emitted for {coin} trade_id={str(tid)[:8] if tid else 'N/A'}")
+                return jsonify({'action': 'close_coin', 'coin': coin,
+                                'trade_id': tid, 'ok': True,
+                                'note': 'intent emitted; reconciler will execute within 15s'})
+            else:
+                return jsonify({'err': 'intents module unavailable'}), 503
+        except Exception as e:
+            return jsonify({'err': str(e)}), 500
 
     if action == 'flatten_all':
         confirm = request.args.get('confirm') == '1'
