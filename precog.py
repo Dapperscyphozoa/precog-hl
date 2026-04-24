@@ -355,6 +355,161 @@ def regime_blocks_side(coin, side):
 # gating entries, trades now have time and structure to reach their natural
 # per-coin TPs (often 4-6% = matching the 1:3+ R:R the setups warrant).
 # If you need a cap, set env MAX_TP_PCT=0.02 etc.
+# ═══════════════════════════════════════════════════════
+# SURVIVAL GUARDS (2026-04-25)
+# ═══════════════════════════════════════════════════════
+# Three minimum-viable constraints to stop the system from giving back
+# winners and stacking bad trades. Per user spec, no overhaul — just
+# survival rails. Deploy as-is, observe 6-12h before any tuning.
+#
+# Guard 1: PROFIT LOCK (per-tick, all positions)
+#   raw_move >= 2%  -> force close (lock)
+#   raw_move >= 1%  -> move SL to breakeven
+#   Uses RAW PRICE move, not leveraged, not PnL%. Tier-agnostic.
+#
+# Guard 2: REGIME FILTER (entry-time, in process())
+#   bull regime + SHORT signal -> reject
+#   bear regime + BUY signal   -> reject
+#   Pure direction block, no funding cutoff. Stops the "8 shorts in calm-bull"
+#   leak observed today.
+#
+# Guard 3: WR FILTER WITH BOOTSTRAP (entry-time)
+#   On boot: load trades.csv, compute per-coin WR over last 20 closes.
+#   If trade_count >= 5 and coin_wr < 0.40  -> reject
+#   If trade_count <  5                      -> allow, log as 'unproven'
+#
+# Toggles via env (all default ON):
+#   PROFIT_LOCK=0           -> disable Guard 1
+#   REGIME_DIR_BLOCK=0      -> disable Guard 2
+#   COIN_WR_FILTER=0        -> disable Guard 3
+#
+# Constants exposed for tuning post-observation:
+PROFIT_LOCK_ENABLED   = os.environ.get('PROFIT_LOCK', '1') != '0'
+PROFIT_LOCK_CLOSE_PCT = float(os.environ.get('PROFIT_LOCK_CLOSE_PCT', '0.02'))  # 2% raw
+PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.01'))  # 1% raw
+
+REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
+
+COIN_WR_FILTER_ENABLED = os.environ.get('COIN_WR_FILTER', '1') != '0'
+COIN_WR_FILTER_THRESH  = float(os.environ.get('COIN_WR_FILTER_THRESH', '0.40'))
+COIN_WR_FILTER_MIN_N   = int(os.environ.get('COIN_WR_FILTER_MIN_N', '5'))
+COIN_WR_FILTER_WINDOW  = int(os.environ.get('COIN_WR_FILTER_WINDOW', '20'))
+
+# Bootstrap-loaded per-coin WR table. Populated once at startup from trades.csv.
+# Schema: { 'COIN': {'n': int, 'wins': int, 'wr': float} }
+_COIN_WR_BOOTSTRAP = {}
+_COIN_WR_BOOTSTRAP_LOADED = False
+
+def _bootstrap_coin_wr_from_ledger():
+    """Read trades.csv and compute per-coin WR over the last N closes.
+    Idempotent — safe to call multiple times. Best-effort: silently no-op
+    if ledger or csv not available."""
+    global _COIN_WR_BOOTSTRAP, _COIN_WR_BOOTSTRAP_LOADED
+    if _COIN_WR_BOOTSTRAP_LOADED:
+        return
+    try:
+        if not (_LEDGER_OK and _ledger):
+            _COIN_WR_BOOTSTRAP_LOADED = True
+            return
+        # ledger path is /var/data/trades.csv
+        csv_path = getattr(_ledger, 'LEDGER_PATH', '/var/data/trades.csv')
+        if not os.path.exists(csv_path):
+            _COIN_WR_BOOTSTRAP_LOADED = True
+            return
+        import csv as _csv
+        per_coin_closes = {}  # coin -> list of (ts, won_bool)
+        with open(csv_path, 'r') as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                if row.get('event_type') != 'CLOSE':
+                    continue
+                coin = (row.get('coin') or '').upper()
+                if not coin:
+                    continue
+                pnl_raw = row.get('pnl', '')
+                try:
+                    pnl = float(pnl_raw) if pnl_raw not in (None, '', 'None') else None
+                except Exception:
+                    pnl = None
+                if pnl is None:
+                    continue  # skip phantom closes / unknown pnl
+                won = pnl > 0
+                ts = row.get('timestamp') or row.get('event_seq') or ''
+                per_coin_closes.setdefault(coin, []).append((ts, won))
+        for coin, closes in per_coin_closes.items():
+            # Take last WINDOW closes (already in CSV order = chronological)
+            window = closes[-COIN_WR_FILTER_WINDOW:]
+            n = len(window)
+            wins = sum(1 for _, w in window if w)
+            wr = (wins / n) if n > 0 else 0.0
+            _COIN_WR_BOOTSTRAP[coin] = {'n': n, 'wins': wins, 'wr': wr}
+        _COIN_WR_BOOTSTRAP_LOADED = True
+        log(f"[survival] coin_wr bootstrap loaded: {len(_COIN_WR_BOOTSTRAP)} coins from {csv_path}")
+    except Exception as e:
+        try:
+            log(f"[survival] coin_wr bootstrap err: {e}")
+        except Exception: pass
+        _COIN_WR_BOOTSTRAP_LOADED = True  # don't retry forever
+
+def _coin_wr_blocks_entry(coin):
+    """Return (blocked, reason). Bootstrap-aware. Defaults to allow on any
+    error or missing data, with 'unproven' tag for visibility."""
+    if not COIN_WR_FILTER_ENABLED:
+        return False, ''
+    if not _COIN_WR_BOOTSTRAP_LOADED:
+        _bootstrap_coin_wr_from_ledger()
+    rec = _COIN_WR_BOOTSTRAP.get(coin.upper())
+    if not rec:
+        return False, 'unproven_no_data'
+    n = rec['n']; wr = rec['wr']
+    if n < COIN_WR_FILTER_MIN_N:
+        return False, f'unproven_n={n}'
+    if wr < COIN_WR_FILTER_THRESH:
+        return True, f'coin_wr={wr:.2%} below {COIN_WR_FILTER_THRESH:.0%} (n={n})'
+    return False, f'wr_ok={wr:.2%} (n={n})'
+
+def _regime_dir_blocks_entry(sig):
+    """Pure direction block. bull*+SHORT or bear*+BUY -> reject.
+    Returns (blocked, reason). Fail-open on any error."""
+    if not REGIME_DIR_BLOCK_ENABLED:
+        return False, ''
+    try:
+        import regime_detector
+        regime = regime_detector.get_regime()
+        if not regime:
+            return False, ''
+        # Normalize signal to BUY/SELL representation
+        side = sig.upper() if isinstance(sig, str) else ''
+        if regime.startswith('bull') and side in ('SELL', 'SHORT'):
+            return True, f'regime={regime} blocks {side}'
+        if regime.startswith('bear') and side in ('BUY', 'LONG'):
+            return True, f'regime={regime} blocks {side}'
+    except Exception:
+        return False, ''
+    return False, ''
+
+def _profit_lock_check(coin, live_pos, mark_px):
+    """Per-tick check on a single open position.
+    Returns one of: 'force_close' | 'move_be' | None.
+    raw_move = (mark - entry) / entry, signed by side.
+    Uses RAW price move, NOT leveraged PnL% — consistent across leverage tiers."""
+    if not PROFIT_LOCK_ENABLED:
+        return None
+    try:
+        entry = float(live_pos.get('entry') or 0)
+        if entry <= 0 or not mark_px:
+            return None
+        is_long = live_pos.get('size', 0) > 0
+        raw_move = ((mark_px - entry) / entry) if is_long else ((entry - mark_px) / entry)
+        if raw_move >= PROFIT_LOCK_CLOSE_PCT:
+            return 'force_close'
+        if raw_move >= PROFIT_LOCK_BE_PCT:
+            return 'move_be'
+    except Exception:
+        return None
+    return None
+
+# ═══════════════════════════════════════════════════════
 MAX_TP_PCT = float(os.environ.get('MAX_TP_PCT', '0') or 0)  # 0 = no cap
 
 # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
@@ -5654,7 +5809,21 @@ def close(coin, state_ref=None, reason=None):
     # STEP 3: shim routing
     if os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1':
         if _INTENTS_OK and _intents is not None:
-            tid = (state.get('positions', {}).get(coin) or {}).get('trade_id')
+            # CRITICAL: read trade_id from ledger, NOT state. The state dict
+            # can hold a stale trade_id from a prior closed ledger entry —
+            # in that case reconciler hits is_closed() and skips idempotently,
+            # leaving the exchange position bleeding indefinitely. Ledger is
+            # the single source of truth for "what trade_id is currently open
+            # for this coin." Mirrors the fix in admin close_coin (3c87643).
+            tid = None
+            if _LEDGER_OK and _ledger is not None:
+                try:
+                    tid = _ledger.latest_open_trade_id_for_coin(coin)
+                except Exception:
+                    tid = None
+            if not tid:
+                # Fall back to state if ledger has nothing (e.g. ledger module down)
+                tid = (state.get('positions', {}).get(coin) or {}).get('trade_id')
             _intents.emit('FORCE_CLOSE', coin, trade_id=tid,
                           reason=reason or 'legacy_close_shim')
         # DO NOT execute — reconciler handles it.
@@ -7170,6 +7339,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         # Old native TP / SL handle the time-based exit via normal TP-LOCK.
         return False, f"pnl=${pnl:.2f} profit floor not met"
 
+    # ─── SURVIVAL GUARDS: entry-time gates (2026-04-25) ───
+    # Run only when there's a valid sig AND no existing position to manage.
+    # Reversals (sig opposing existing pos) skip these gates — they go through
+    # _allow_reversal logic below and get handled via the existing queue.
+    if sig and not live:
+        # Guard 2: regime direction filter
+        rb_block, rb_reason = _regime_dir_blocks_entry(sig)
+        if rb_block:
+            log(f"{coin} {sig} BLOCKED — survival/regime: {rb_reason}")
+            return
+        # Guard 3: per-coin WR filter (with bootstrap fallback)
+        wr_block, wr_reason = _coin_wr_blocks_entry(coin)
+        if wr_block:
+            log(f"{coin} {sig} BLOCKED — survival/coin_wr: {wr_reason}")
+            return
+        elif wr_reason and 'unproven' in wr_reason:
+            # Allowed but log for visibility
+            log(f"{coin} {sig} survival/coin_wr: {wr_reason}")
+    # ─────────────────────────────────────────────────────
+
     if sig == 'SELL':
         state['cooldowns'][coin+'_sell'] = bar_ts
         if live and live['size']>0:
@@ -7387,6 +7576,12 @@ state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
 def main():
     global state
     log(f"PreCog v8.28 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
+
+    # SURVIVAL GUARDS bootstrap: load per-coin WR from trades.csv
+    try:
+        _bootstrap_coin_wr_from_ledger()
+    except Exception as _bs_e:
+        log(f"survival bootstrap err: {_bs_e}")
 
     # INVARIANT DEADMAN: scans every 30s for naked positions, recreates missing
     # TP/SL, emergency-closes if SL missing > 60s.
@@ -7620,6 +7815,54 @@ def main():
                             log(f"RECONCILE {k}: protection enforced (was naked or mis-sized)")
                     except Exception as _ee:
                         log(f"RECONCILE {k}: enforce_protection err: {_ee}")
+
+            # ─── SURVIVAL GUARD 1: PROFIT LOCK (2026-04-25) ───
+            # Per-tick check on every open position. RAW price move:
+            #   raw >= 2% in favor → emit FORCE_CLOSE intent (lock profit)
+            #   raw >= 1% in favor → move SL to breakeven if not already
+            # Tier-agnostic. Uses intent queue, not direct exchange calls.
+            try:
+                if PROFIT_LOCK_ENABLED:
+                    for _pl_coin, _pl_lp in list(live_positions.items()):
+                        try:
+                            _pl_mark = get_mid(_pl_coin)
+                            if not _pl_mark:
+                                continue
+                            _pl_action = _profit_lock_check(_pl_coin, _pl_lp, _pl_mark)
+                            if _pl_action == 'force_close':
+                                # Emit intent — reconciler resolves
+                                if _INTENTS_OK and _intents is not None:
+                                    _pl_tid = None
+                                    if _LEDGER_OK and _ledger is not None:
+                                        try:
+                                            _pl_tid = _ledger.latest_open_trade_id_for_coin(_pl_coin)
+                                        except Exception: pass
+                                    _intents.emit('FORCE_CLOSE', _pl_coin,
+                                                  trade_id=_pl_tid,
+                                                  reason='profit_lock_2pct')
+                                    log(f"{_pl_coin} PROFIT_LOCK fired: raw move ≥{PROFIT_LOCK_CLOSE_PCT*100:.1f}% — FORCE_CLOSE emitted")
+                            elif _pl_action == 'move_be':
+                                # Move SL to breakeven if not already there
+                                _pl_state = state.get('positions', {}).get(_pl_coin, {})
+                                if not _pl_state.get('sl_at_be'):
+                                    try:
+                                        _pl_entry = float(_pl_lp.get('entry') or 0)
+                                        _pl_size = abs(_pl_lp.get('size', 0))
+                                        _pl_is_long = _pl_lp.get('size', 0) > 0
+                                        if _pl_entry > 0 and _pl_size > 0:
+                                            modify_sl_to_breakeven(_pl_coin, _pl_entry,
+                                                                   _pl_size, _pl_is_long,
+                                                                   buffer_pct=0.0)
+                                            _pl_state['sl_at_be'] = True
+                                            state.setdefault('positions', {})[_pl_coin] = _pl_state
+                                            log(f"{_pl_coin} PROFIT_LOCK BE: raw move ≥{PROFIT_LOCK_BE_PCT*100:.1f}% — SL moved to entry")
+                                    except Exception as _be_e:
+                                        log(f"{_pl_coin} profit_lock BE err: {_be_e}")
+                        except Exception as _pl_inner:
+                            log(f"profit_lock {_pl_coin} err: {_pl_inner}")
+            except Exception as _pl_outer:
+                log(f"profit_lock loop err: {_pl_outer}")
+            # ──────────────────────────────────────────────────
 
             # PROFIT MANAGEMENT: check every open 15m position for TP1 partial
             # exit or TP extension. Runs each tick. Uses exchange-side order
