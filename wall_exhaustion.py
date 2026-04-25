@@ -227,7 +227,9 @@ def check(coin, current_px):
             bucket = w.get('distance_pct')
             if bucket is None:
                 continue
-            key = (coin.upper(), side, bucket)
+            # CRITICAL: orderbook_ws stores history keys with the ORIGINAL coin
+            # casing (kBONK, kPEPE, kSHIB etc). Don't .upper() — it won't match.
+            key = (coin, side, bucket)
             hist = history_dict.get(key)
             if not hist:
                 continue
