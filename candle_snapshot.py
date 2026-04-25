@@ -47,7 +47,16 @@ _BUILD_LOCK = {
 }
 
 SNAPSHOT_TTL_SEC = 60.0
-COVERAGE_THRESHOLD = 0.90
+# Three-tier commit gate (2026-04-25):
+#   v3 used hard 0.90 — too strict, caused snapshot starvation when 84-87%
+#   coverage was operationally healthy. Replaced with monotonic-improvement
+#   model: accept if soft target met OR not-worse-than-previous OR above hard
+#   floor when stale. Bounded degradation, never regresses hard.
+COVERAGE_SOFT_TARGET = 0.85    # always commit at or above this
+COVERAGE_HARD_FLOOR  = 0.75    # absolute minimum (only when stale)
+COVERAGE_THRESHOLD   = COVERAGE_SOFT_TARGET   # legacy alias for /health field
+
+_PREV_COVERAGE_RATIO = {}  # {tf: float} — for monotonic-improvement rule
 
 _STATS = {
     'snapshots_built': 0,
@@ -61,6 +70,10 @@ _STATS = {
     'last_coverage_ratio': 0.0,
     'last_build_coins_ok': 0,
     'last_build_coins_total': 0,
+    'last_missing_coins': [],   # observability
+    'commit_reason_soft':     0,  # ratio >= 0.85
+    'commit_reason_monotonic':0,  # ratio >= prev
+    'commit_reason_stale':    0,  # ratio >= 0.75 AND snapshot stale
 }
 
 
@@ -73,10 +86,12 @@ def snapshot_age_sec():
 def snapshot_status():
     return {
         'active': True,
-        'mode': 'atomic_with_coverage_gate',
+        'mode': 'three_tier_commit_gate',
         'age_sec': round(snapshot_age_sec(), 1),
         'is_fresh': snapshot_age_sec() < SNAPSHOT_TTL_SEC,
         'coverage_threshold': COVERAGE_THRESHOLD,
+        'coverage_soft_target': COVERAGE_SOFT_TARGET,
+        'coverage_hard_floor': COVERAGE_HARD_FLOOR,
         'tfs_loaded': list(_GLOBAL_SNAPSHOT['tf'].keys()),
         'coins_per_tf': {tf: len(coins) for tf, coins in _GLOBAL_SNAPSHOT['tf'].items()},
         'lkg_size': sum(len(c) for c in _LAST_KNOWN_GOOD.values()),
@@ -125,6 +140,7 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
         new_snap = {}
         ok_count = 0
         fail_count = 0
+        missing_coins = []
 
         for coin in coins_list:
             coin_u = coin.upper()
@@ -137,9 +153,11 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
                     ok_count += 1
                 else:
                     fail_count += 1
+                    missing_coins.append(coin_u)
             except Exception as e:
                 _STATS['fetch_errors'] += 1
                 fail_count += 1
+                missing_coins.append(coin_u)
                 if log_fn:
                     log_fn(f"[snapshot] fetch err {coin_u} {tf}: {e}")
 
@@ -150,19 +168,50 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
         _STATS['last_coverage_ratio'] = round(coverage, 3)
         _STATS['last_build_coins_ok'] = ok_count
         _STATS['last_build_coins_total'] = n_total
+        # Cap missing list for /health (avoid bloat with degenerate cases)
+        _STATS['last_missing_coins'] = missing_coins[:25]
+
+        # ─── THREE-TIER COMMIT GATE ──────────────────────────────────────
+        # Rule 1: soft target — always commit at or above 0.85
+        # Rule 2: monotonic — accept if not worse than previous snapshot
+        # Rule 3: stale rescue — accept if above hard floor AND snapshot stale
+        # Else: reject (kept previous, LKG expanded with what we got)
+        prev_ratio = _PREV_COVERAGE_RATIO.get(tf, 0.0)
+        is_stale = snapshot_age_sec() >= SNAPSHOT_TTL_SEC
+        commit = False
+        commit_reason = None
+
+        if coverage >= COVERAGE_SOFT_TARGET:
+            commit = True
+            commit_reason = 'soft'
+        elif coverage >= prev_ratio and prev_ratio > 0:
+            # Not worse than previous → safe forward step
+            commit = True
+            commit_reason = 'monotonic'
+        elif coverage >= COVERAGE_HARD_FLOOR and is_stale:
+            # Hard floor + stale rescue → better than starvation
+            commit = True
+            commit_reason = 'stale'
+        # else: reject
 
         committed = False
-        if coverage >= COVERAGE_THRESHOLD:
+        if commit:
             with _SNAPSHOT_LOCK:
                 _GLOBAL_SNAPSHOT['tf'][tf] = new_snap
                 _GLOBAL_SNAPSHOT['ts'] = time.time()
                 for c, candles in new_snap.items():
                     _LAST_KNOWN_GOOD[tf][c] = candles
             _STATS['snapshots_committed'] += 1
+            _STATS[f'commit_reason_{commit_reason}'] += 1
+            _PREV_COVERAGE_RATIO[tf] = coverage
             committed = True
             if log_fn:
+                miss_n = len(missing_coins)
+                miss_preview = (',' .join(missing_coins[:6]) +
+                                (f',+{miss_n-6}' if miss_n > 6 else '')) if miss_n else ''
                 log_fn(f"[snapshot] COMMIT tf={tf} coverage={coverage:.1%} "
-                       f"ok={ok_count}/{n_total} dur={duration:.1f}s")
+                       f"reason={commit_reason} ok={ok_count}/{n_total} "
+                       f"missing={miss_n}({miss_preview}) dur={duration:.1f}s")
         else:
             _STATS['snapshots_rejected'] += 1
             with _SNAPSHOT_LOCK:
@@ -170,11 +219,15 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
                     _LAST_KNOWN_GOOD[tf][c] = candles
             if log_fn:
                 log_fn(f"[snapshot] REJECT tf={tf} coverage={coverage:.1%} "
-                       f"< {COVERAGE_THRESHOLD:.0%} — kept previous snapshot, LKG expanded")
+                       f"prev={prev_ratio:.1%} hard_floor={COVERAGE_HARD_FLOOR:.0%} "
+                       f"stale={is_stale} — kept previous, LKG expanded "
+                       f"({len(missing_coins)} coins missing)")
 
         return {
             'ok': ok_count, 'total': n_total,
             'coverage': coverage, 'committed': committed,
+            'commit_reason': commit_reason,
+            'missing_coins': missing_coins,
             'duration_s': duration,
         }
 
