@@ -12,7 +12,8 @@ The 'binance' name in code paths is a historical label, not a source guarantee.
 """
 import threading, time, urllib.request, json
 
-_CACHE = {'hl': {}, 'binance': {}, 'bybit': {}, 'ts': 0, 'sources': {'binance': False, 'bybit': False}}
+_CACHE = {'hl': {}, 'binance': {}, 'bybit': {}, 'okx': {}, 'ts': 0,
+          'sources': {'binance': False, 'bybit': False, 'okx': False}}
 _LOCK = threading.Lock()
 REFRESH_SEC = 900  # 15min
 
@@ -58,7 +59,9 @@ def _refresh_bybit():
         r = json.loads(urllib.request.urlopen(
             'https://api.bybit.com/v5/market/tickers?category=linear', timeout=20).read())
         items = r.get('result', {}).get('list', []) if r.get('retCode') == 0 else []
-        if not items: return
+        if not items:
+            with _LOCK: _CACHE['sources']['bybit'] = False
+            return
         bybit_funding = {}
         for it in items:
             sym = it.get('symbol', '')
@@ -73,16 +76,65 @@ def _refresh_bybit():
             _CACHE['bybit'] = bybit_funding
             _CACHE['sources']['bybit'] = True
             # Mirror into 'binance' slot ONLY if Binance fetch failed.
-            # This keeps existing readers working without code changes.
             if not _CACHE['sources']['binance']:
                 _CACHE['binance'] = dict(bybit_funding)
     except Exception:
         with _LOCK: _CACHE['sources']['bybit'] = False
 
+def _fetch_okx_one(inst_id):
+    """Single OKX funding fetch. Returns (coin, rate) or (None, None).
+    NOTE: OKX returns HTTP 403 without a User-Agent header. Confirmed via
+    direct testing — same UA pattern as okx_fetch.py."""
+    try:
+        req = urllib.request.Request(
+            f'https://www.okx.com/api/v5/public/funding-rate?instId={inst_id}',
+            headers={'User-Agent': 'precog-hl/1.0'})
+        r = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        if r.get('code') != '0': return None, None
+        data = r.get('data', [])
+        if not data: return None, None
+        rate = data[0].get('fundingRate')
+        if rate in (None, ''): return None, None
+        # inst_id like 'BTC-USDT-SWAP' → 'BTC'
+        coin = inst_id.split('-')[0]
+        return coin, float(rate)
+    except Exception:
+        return None, None
+
+def _refresh_okx():
+    """OKX per-symbol funding via threaded fetch (~27 coins, 8 workers).
+    OKX is verified accessible from Render (already used for orderbook + candles).
+    Mirrors into 'binance' slot if Binance + Bybit both unavailable."""
+    try:
+        # Lazy import to avoid circular deps
+        from orderbook_ws import HL_TO_OKX
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        inst_ids = list(HL_TO_OKX.values())
+        okx_funding = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(_fetch_okx_one, iid): iid for iid in inst_ids}
+            for fut in as_completed(futures, timeout=30):
+                coin, rate = fut.result()
+                if coin and rate is not None:
+                    okx_funding[coin] = rate
+        if not okx_funding:
+            with _LOCK: _CACHE['sources']['okx'] = False
+            return
+        with _LOCK:
+            _CACHE['okx'] = okx_funding
+            _CACHE['sources']['okx'] = True
+            # Mirror into 'binance' slot if neither Binance nor Bybit working.
+            # OKX rate is per 8h, same convention as Binance/Bybit.
+            if not _CACHE['sources']['binance'] and not _CACHE['sources']['bybit']:
+                _CACHE['binance'] = dict(okx_funding)
+    except Exception:
+        with _LOCK: _CACHE['sources']['okx'] = False
+
 def refresh():
     _refresh_hl()
     _refresh_binance()
     _refresh_bybit()
+    _refresh_okx()
     with _LOCK: _CACHE['ts'] = time.time()
 
 def divergence(coin):
@@ -104,6 +156,7 @@ def status():
     with _LOCK:
         return {'hl_coins': len(_CACHE['hl']), 'binance_coins': len(_CACHE['binance']),
                 'bybit_coins': len(_CACHE.get('bybit', {})),
+                'okx_coins': len(_CACHE.get('okx', {})),
                 'sources': dict(_CACHE.get('sources', {})),
                 'last_refresh': int(time.time() - _CACHE['ts']) if _CACHE['ts'] else None}
 
