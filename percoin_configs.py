@@ -15,17 +15,17 @@ SEVENTY_79 (probationary):  10 coins - 10x lev, 0.5% risk  (RELAXED, monitor clo
 # ─── PURE_14: 7 coins ───
 PURE_14 = {
     'DYM'         : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.08, 'SL':0.035},
-    'POL'         : {'sigs':['BB'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.06, 'SL':0.03},
+    'POL'         : {'sigs':['BB','PV'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.06, 'SL':0.03},  # +multi-engine 2026-04-25
     'ZRO'         : {'sigs':['BB'], 'flt':'none', 'RH':72, 'RL':28, 'TP':0.1, 'SL':0.04},
     'UNI'         : {'sigs':['BB'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.04, 'SL':0.02},
     'LAYER'       : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.07, 'SL':0.025},
     'ETHFI'       : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
-    'CC'          : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
+    'CC'          : {'sigs':['BB','PV'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},  # +multi-engine 2026-04-25
 }
 
 # ─── NINETY_99: 20 coins ───
 NINETY_99 = {
-    'INJ'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},
+    'INJ'         : {'sigs':['BB','IB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},  # +multi-engine 2026-04-25
     'HBAR'        : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.1, 'SL':0.04},
     'MOVE'        : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.1, 'SL':0.04},
     'JTO'         : {'sigs':['TR'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.06, 'SL':0.03},
@@ -34,7 +34,7 @@ NINETY_99 = {
     'MEW'         : {'sigs':['MR'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.03},
     'NOT'         : {'sigs':['PV'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.05, 'SL':0.025},
     'W'           : {'sigs':['BB'], 'flt':'none', 'RH':72, 'RL':28, 'TP':0.1, 'SL':0.04},
-    'XRP'         : {'sigs':['BB'], 'flt':'none', 'RH':70, 'RL':30, 'TP':0.1, 'SL':0.04},
+    'XRP'         : {'sigs':['BB','PV'], 'flt':'none', 'RH':70, 'RL':30, 'TP':0.1, 'SL':0.04},  # +multi-engine 2026-04-25
     'kFLOKI'      : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.035},
     'ORDI'        : {'sigs':['VS'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.08, 'SL':0.035},
     'SKR'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.08, 'SL':0.035},
@@ -51,7 +51,7 @@ NINETY_99 = {
 EIGHTY_89 = {
     'SOL'         : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.07, 'SL':0.025},
     'WCT'         : {'sigs':['VS'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.1, 'SL':0.04},
-    'JUP'         : {'sigs':['BB'], 'flt':'none', 'RH':72, 'RL':28, 'TP':0.1, 'SL':0.04},
+    'JUP'         : {'sigs':['BB','PV'], 'flt':'none', 'RH':72, 'RL':28, 'TP':0.1, 'SL':0.04},  # +multi-engine 2026-04-25
     'ASTER'       : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.04, 'SL':0.02},
     'IP'          : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.1, 'SL':0.04},
     'MAV'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
@@ -68,7 +68,7 @@ EIGHTY_89 = {
     'TURBO'       : {'sigs':['BB'], 'flt':'none', 'RH':78, 'RL':22, 'TP':0.1, 'SL':0.04},
     'LINEA'       : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
     'TNSR'        : {'sigs':['PV'], 'flt':'none', 'RH':70, 'RL':30, 'TP':0.05, 'SL':0.02},
-    'CAKE'        : {'sigs':['TR'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
+    'CAKE'        : {'sigs':['TR','BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},  # +multi-engine 2026-04-25
     'ADA'         : {'sigs':['BB'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
     'OP'          : {'sigs':['VS'], 'flt':'none', 'RH':65, 'RL':35, 'TP':0.1, 'SL':0.04},
     'SNX'         : {'sigs':['BB'], 'flt':'none', 'RH':70, 'RL':30, 'TP':0.08, 'SL':0.03},
@@ -82,10 +82,19 @@ EIGHTY_89 = {
     # ─── Whitelist grid expansion 2026-04-25 (STRICT promotions) ───
     # Wilson_lb≥50%, PF≥1.3, n≥30 trades on 90d 15m BB-rejection backtest
     # Same standard as original whitelist promotions (2026-04-23).
-    'UMA'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 65.1% PF 2.25 n=63
+    'UMA'         : {'sigs':['BB','PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 65.1% PF 2.25 n=63  # +multi-engine 2026-04-25
     'MEGA'        : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.035},  # WR 65.4% PF 1.95 n=52
     'CRV'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 63.5% PF 2.32 n=63
     'VVV'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 64.0% PF 2.62 n=50
+    # ─── Multi-engine grid expansion 2026-04-25 (Lever 3 STRICT, PV engine) ───
+    # PV (pivot RSI) sweep STRICT: Wilson_lb≥50%, PF≥1.3, n≥30 on 90d 15m backtest.
+    'RSR'         : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.04},   # WR 65.5% PF 1.89 n=84
+    'BANANA'      : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.035},  # WR 70.0% PF 2.86 n=40
+    'STRK'        : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.04},   # WR 62.4% PF 1.53 n=85
+    'NEAR'        : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.035},  # WR 67.6% PF 2.09 n=37
+    'USTC'        : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.04},   # WR 63.0% PF 1.76 n=73
+    'ICP'         : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.04},   # WR 60.2% PF 1.91 n=108
+    'GRASS'       : {'sigs':['PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.04},   # WR 60.0% PF 1.63 n=100
 }
 
 # ─── SEVENTY_79: probationary tier (10x lev, 0.5% risk) ───
@@ -94,8 +103,8 @@ EIGHTY_89 = {
 # Yank if WR drops below 40% on >5 closed live trades (survival guard catches this).
 SEVENTY_79 = {
     'NEO'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.025},  # WR 66.7% PF 2.27 n=30
-    'TRX'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.04},   # WR 61.1% PF 2.08 n=54
-    'STABLE'      : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 59.4% PF 1.82 n=69
+    'TRX'         : {'sigs':['BB','PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.04},   # WR 61.1% PF 2.08 n=54  # +multi-engine 2026-04-25
+    'STABLE'      : {'sigs':['BB','PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 59.4% PF 1.82 n=69  # +multi-engine 2026-04-25
     'S'           : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 60.7% PF 1.72 n=56
     'APEX'        : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 58.6% PF 1.41 n=70
     'MANTA'       : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.035},  # WR 60.4% PF 1.60 n=48
