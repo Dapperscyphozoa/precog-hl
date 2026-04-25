@@ -394,6 +394,15 @@ COIN_WR_FILTER_ENABLED = os.environ.get('COIN_WR_FILTER', '1') != '0'
 COIN_WR_FILTER_THRESH  = float(os.environ.get('COIN_WR_FILTER_THRESH', '0.35'))   # was 0.40
 COIN_WR_FILTER_MIN_N   = int(os.environ.get('COIN_WR_FILTER_MIN_N', '10'))        # was 5
 COIN_WR_FILTER_WINDOW  = int(os.environ.get('COIN_WR_FILTER_WINDOW', '20'))
+# 2026-04-25: three-tier WR with time-decay forgiveness
+# Hard reject only true losers (<20% WR). Soft-allow marginal coins (20-35%) at
+# reduced size. Time-decay weights recent trades higher (7-day half-life), so
+# old performance doesn't dominate forever. Edges decay and reappear; static
+# bans become self-fulfilling. Per spec: "block only extreme losers; let
+# marginal coins prove themselves at reduced risk."
+COIN_WR_HARD_THRESH    = float(os.environ.get('COIN_WR_HARD_THRESH', '0.20'))    # <20% = hard reject
+COIN_WR_SOFT_SIZE_MULT = float(os.environ.get('COIN_WR_SOFT_SIZE_MULT', '0.3'))  # 20-35% = size×0.3
+COIN_WR_DECAY_DAYS     = float(os.environ.get('COIN_WR_DECAY_DAYS', '7.0'))      # 7d half-life
 
 # Deadlock valve: if no entries for N seconds, bypass WR + regime filters
 DEADLOCK_BYPASS_SEC = int(os.environ.get('DEADLOCK_BYPASS_SEC', '1800'))  # 30 min
@@ -453,7 +462,9 @@ def _bootstrap_coin_wr_from_ledger():
             n = len(window)
             wins = sum(1 for _, w in window if w)
             wr = (wins / n) if n > 0 else 0.0
-            _COIN_WR_BOOTSTRAP[coin] = {'n': n, 'wins': wins, 'wr': wr}
+            # 2026-04-25: store full window for time-decay computation
+            # Schema: closes = [(ts_str, won_bool), ...] in chronological order
+            _COIN_WR_BOOTSTRAP[coin] = {'n': n, 'wins': wins, 'wr': wr, 'closes': window}
         _COIN_WR_BOOTSTRAP_LOADED = True
         log(f"[survival] coin_wr bootstrap loaded: {len(_COIN_WR_BOOTSTRAP)} coins from {csv_path}")
     except Exception as e:
@@ -462,22 +473,82 @@ def _bootstrap_coin_wr_from_ledger():
         except Exception: pass
         _COIN_WR_BOOTSTRAP_LOADED = True  # don't retry forever
 
+def _compute_decayed_wr(closes):
+    """Time-weighted WR using exp(-age_days / DECAY_DAYS) decay.
+    Recent trades count more; old trades fade. Returns (weighted_wr, weighted_n).
+    closes = [(ts_str, won_bool), ...] in chronological order.
+    Falls back to flat WR if timestamps unparseable."""
+    import math as _math
+    import time as _time
+    if not closes:
+        return 0.0, 0
+    now_s = _time.time()
+    sum_w = 0.0
+    sum_wins = 0.0
+    parseable = 0
+    for ts_str, won in closes:
+        # ts_str may be ISO-8601 or epoch — try epoch first, then ISO
+        age_s = None
+        try:
+            age_s = now_s - float(ts_str)
+        except (TypeError, ValueError):
+            try:
+                from datetime import datetime as _dt
+                # Strip Z suffix if present
+                ts_clean = ts_str.replace('Z', '+00:00') if ts_str else ''
+                age_s = now_s - _dt.fromisoformat(ts_clean).timestamp()
+            except Exception:
+                pass
+        if age_s is None or age_s < 0:
+            continue
+        parseable += 1
+        age_days = age_s / 86400.0
+        decay = _math.exp(-age_days / max(COIN_WR_DECAY_DAYS, 0.1))
+        sum_w += decay
+        if won:
+            sum_wins += decay
+    if parseable == 0 or sum_w == 0:
+        # No parseable timestamps — fall back to flat WR
+        n = len(closes)
+        wins = sum(1 for _, w in closes if w)
+        return (wins / n) if n > 0 else 0.0, n
+    return sum_wins / sum_w, parseable
+
+
 def _coin_wr_blocks_entry(coin):
-    """Return (blocked, reason). Bootstrap-aware. Defaults to allow on any
-    error or missing data, with 'unproven' tag for visibility."""
+    """Three-tier WR filter with time-decay forgiveness.
+    Returns (blocked, size_mult, reason).
+      - blocked: True only for true losers (decayed WR < 20%)
+      - size_mult: 0.3 for marginal coins (20-35%), 1.0 otherwise
+      - reason: tagged for unified REJECT/ALLOW log
+    Defaults to allow on missing data ('unproven' tag).
+    Per spec: "block only extreme losers; let marginal coins prove themselves."
+    """
     if not COIN_WR_FILTER_ENABLED:
-        return False, ''
+        return False, 1.0, ''
     if not _COIN_WR_BOOTSTRAP_LOADED:
         _bootstrap_coin_wr_from_ledger()
     rec = _COIN_WR_BOOTSTRAP.get(coin.upper())
     if not rec:
-        return False, 'unproven_no_data'
-    n = rec['n']; wr = rec['wr']
+        return False, 1.0, 'unproven_no_data'
+    n = rec['n']
     if n < COIN_WR_FILTER_MIN_N:
-        return False, f'unproven_n={n}'
-    if wr < COIN_WR_FILTER_THRESH:
-        return True, f'coin_wr={wr:.2%} below {COIN_WR_FILTER_THRESH:.0%} (n={n})'
-    return False, f'wr_ok={wr:.2%} (n={n})'
+        return False, 1.0, f'unproven_n={n}'
+    # Compute time-decayed WR using stored close-tuples
+    closes = rec.get('closes', [])
+    if closes:
+        wr_dec, _ = _compute_decayed_wr(closes)
+    else:
+        # Pre-decay bootstrap data — fall back to flat WR
+        wr_dec = rec['wr']
+    # Tier 1: hard reject true losers
+    if wr_dec < COIN_WR_HARD_THRESH:
+        return True, 0.0, f'hard_loser/decayed_wr={wr_dec:.2%} < {COIN_WR_HARD_THRESH:.0%} (n={n})'
+    # Tier 2: soft allow marginal at reduced size
+    if wr_dec < COIN_WR_FILTER_THRESH:
+        return False, COIN_WR_SOFT_SIZE_MULT, f'soft_allow_marginal/decayed_wr={wr_dec:.2%} (n={n}) size×{COIN_WR_SOFT_SIZE_MULT}'
+    # Tier 3: full size
+    return False, 1.0, f'wr_ok/decayed_wr={wr_dec:.2%} (n={n})'
 
 def _regime_dir_blocks_entry(sig):
     """Pure direction block. bull*+SHORT or bear*+BUY -> reject.
@@ -7538,21 +7609,30 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     return
                 else:
                     log(f"ALLOW {coin} | regime={_regime} sig={sig} conf={_conf_pre} note=counter_trend_high_conf")
-        # Guard 3: per-coin WR filter (with bootstrap fallback)
+        # Guard 3: per-coin WR filter (three-tier with time-decay forgiveness)
         # ─── LEVER 1 PATCH 3: HIGH-CONF BYPASS ON DUPLICATE PENALTY ───
         # If conf already passed at high threshold (conf≥65), don't double-penalize
         # for low coin WR — conviction has already been validated by score stack.
+        # 2026-04-25: returns (blocked, size_mult, reason). Tiers:
+        #   - Tier 1: WR<20% → blocked (true loser)
+        #   - Tier 2: 20-35% → allowed at size×0.3 (marginal, prove yourself)
+        #   - Tier 3: ≥35%  → allowed at full size
         if not _bypass:
             _conf_for_wr = locals().get('conf_score', None)
-            wr_block, wr_reason = _coin_wr_blocks_entry(coin)
+            wr_block, wr_size_mult, wr_reason = _coin_wr_blocks_entry(coin)
             if wr_block:
                 if _conf_for_wr is not None and _conf_for_wr >= 65:
                     log(f"ALLOW {coin} | regime={_regime} sig={sig} conf={_conf_for_wr} wr={_coin_wr:.2f} note=high_conf_bypass_wr_filter")
                 else:
                     log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=coin_wr/{wr_reason}")
                     return
+            elif wr_size_mult < 1.0:
+                # Soft-allow: marginal coin, apply size penalty
+                _old_rm = risk_mult
+                risk_mult = risk_mult * wr_size_mult
+                log(f"ALLOW {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} note=coin_wr/{wr_reason} risk_mult {_old_rm:.2f}→{risk_mult:.2f}")
             elif wr_reason and 'unproven' in wr_reason:
-                # Allowed but log for visibility (non-blocking)
+                # Allowed at full size but log for visibility (non-blocking)
                 log(f"ALLOW {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} note=unproven/{wr_reason}")
     # ─────────────────────────────────────────────────────
 
