@@ -6500,8 +6500,17 @@ def _ep_fetch_size(coin):
     (15+ size fetches per enforcement during settlement loop).
     """
     # ─── PATH 0: ledger (event-sourced) ─────────────────────
+    # 2026-04-25: ledger fast path. Returns None ONLY when ledger has the
+    # row but state is not LIVE — but immediately after a fresh entry,
+    # the row may not yet exist (webData2 hasn't ticked) OR may still be
+    # PENDING_ENTRY. In those cases we MUST fall through to REST so the
+    # caller doesn't conclude "no position" on a freshly-opened trade.
+    # Only return early if ledger has authoritative non-None size.
     if USE_LEDGER_FOR_SIZE and position_ledger.ws_is_fresh(max_age_sec=30):
-        return position_ledger.get_size(coin)
+        _led_sz = position_ledger.get_size(coin)
+        if _led_sz is not None:
+            return _led_sz
+        # else: ledger doesn't have a LIVE row yet — fall through to REST
 
     try:
         # Prefer cached state if fresh — protects against retry-storm 429s
