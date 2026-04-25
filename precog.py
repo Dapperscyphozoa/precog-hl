@@ -7185,11 +7185,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _bars_list = [[b['t'], b['o'], b['h'], b['l'], b['c'], b['v']] for b in _c_4h]
                 _htf = _tfi.derive_htf_bias(_bars_list)
                 _mult, _action = _tfi.compute_alignment_multiplier(sig, _htf['bias'], _htf['strength'])
+                # ─── 2026-04-25: HTF opposing → soft penalty, not hard block ───
+                # Hard block was killing 4/14 signals. Replaced with -2 conf
+                # penalty applied to risk_mult. Strong signals still pass with
+                # reduced size; weak ones already filtered by floor upstream.
+                # Per spec: "softens HTF veto without removing it."
                 if _action == 'block':
-                    log(f"{coin} {sig} HTF BLOCK: 4h bias={_htf['bias']} strength={_htf['strength']:.2f} opposing signal")
-                    _shadow_record_rejection(coin, sig, 'htf_opposing_block',
+                    risk_mult = risk_mult * 0.5  # half size on opposing HTF
+                    log(f"{coin} {sig} HTF SOFT PENALTY: 4h bias={_htf['bias']} strength={_htf['strength']:.2f} opposing — size×0.5 (not blocked)")
+                    _shadow_record_rejection(coin, sig, 'htf_opposing_softened',
                                              {'htf_bias': _htf['bias'], 'strength': _htf['strength']})
-                    return
+                    # NO RETURN — let signal proceed at half size
                 if _mult != 1.0:
                     risk_mult = risk_mult * _mult
                     log(f"{coin} HTF {_action}: 4h bias={_htf['bias']} strength={_htf['strength']:.2f} mult={_mult:.2f}")
