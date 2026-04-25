@@ -26,6 +26,7 @@ import signal_persistence
 import profit_lock
 import leverage_map
 import wall_bounce
+import wall_exhaustion
 import liquidation_ws
 import bybit_lead
 import funding_filter
@@ -2029,6 +2030,7 @@ def engines_status():
             'PIVOT': True,  # always core
             'PULLBACK': True,
             'WALL_BNC': v_ok('by') or v_ok('bn'),
+            'WALL_EXH': v_ok('by') or v_ok('bn'),
             'LIQ_CSCD': True,
             'CVD_DIV': True,
         },
@@ -2160,6 +2162,7 @@ def health():
                         'tracked_coins': len(_LAST_ENFORCE),
                     },
                     'atomic_reconciler': atomic_reconciler.status(),
+                    'wall_exhaustion': wall_exhaustion.status(),
                     'use_atomic_exec': USE_ATOMIC_EXEC,
                     'use_ledger_for_size': USE_LEDGER_FOR_SIZE,
                     'recent_logs':LOG_BUFFER[-20:]})
@@ -7209,6 +7212,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 log(f"WALL-BOUNCE {coin} {wb_side} @ wall ${wb_wall['usd']/1000:.0f}k p={wb_wall['price']}")
         except Exception as e:
             log(f"wall_bounce err {coin}: {e}")
+    # 2026-04-25: WALL_EXHAUSTION engine — detect walls about to fail, trade
+    # the breakout direction. Asymmetric to wall_bounce (which trades the hold).
+    # Activates in any regime; especially valuable in chop where wall_bounce
+    # pullback threshold rarely fires.
+    if not sig:
+        try:
+            cur_px = get_mid(coin)
+            we_side, we_ctx = wall_exhaustion.check(coin, cur_px)
+            if we_side:
+                sig = we_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_EXH'
+                log(f"WALL-EXHAUSTION {coin} {we_side} wall_side={we_ctx['wall_side']} "
+                    f"decay={we_ctx['decay_pct']}% dist={we_ctx['distance_pct']}% "
+                    f"@ ${we_ctx['wall_usd']/1000:.0f}k")
+        except Exception as e:
+            log(f"wall_exhaustion err {coin}: {e}")
     # Quaternary: liquidation cascade fade
     if not sig:
         try:
