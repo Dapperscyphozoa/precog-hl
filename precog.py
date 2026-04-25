@@ -6399,6 +6399,7 @@ def place_native_tp(coin, is_long, entry, size):
         return None
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
+    global _LAST_OPEN_TS
     if coin_disabled(coin, state): return
 
     # STEP 3: reconciler halt flag — block new entries if drift is unsafe
@@ -7515,7 +7516,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                         except Exception as _pe:
                             print(f'[precog] promo record err: {_pe}', flush=True)
                     # Deadlock valve tracker — successful entry resets timer
-                    global _LAST_OPEN_TS
                     _LAST_OPEN_TS = time.time()
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
@@ -7617,7 +7617,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                         except Exception as _pe:
                             print(f'[precog] promo record err: {_pe}', flush=True)
                     # Deadlock valve tracker — successful entry resets timer
-                    global _LAST_OPEN_TS
                     _LAST_OPEN_TS = time.time()
 
 # ═══════════════════════════════════════════════════════
@@ -7627,7 +7626,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
 state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
 
 def main():
-    global state
+    global state, _LAST_OPEN_TS
     log(f"PreCog v8.28 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
 
     # SURVIVAL GUARDS bootstrap: load per-coin WR from trades.csv
@@ -8291,7 +8290,6 @@ def main():
                                         'cloid': _wh_cloid,
                                     }
                                     # Deadlock valve tracker — webhook entry counts
-                                    global _LAST_OPEN_TS
                                     _LAST_OPEN_TS = time.time()
                                     log(f"WEBHOOK OPEN {coin} {side_str} @ {fill} (px_src={'bybit_ws' if px==by_px else 'hl_mid'}, age={by_age}ms)")
                                     log_trade('HL', coin, side_str, fill, 0, 'webhook')
