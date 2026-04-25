@@ -2032,6 +2032,26 @@ def confluence_status():
     except Exception as e:
         return jsonify({'err': str(e)}), 500
 
+
+@app.route('/confluence/reset', methods=['POST', 'GET'])
+def confluence_reset():
+    """Reset System B state. Used after universe alignment.
+    Requires WEBHOOK_SECRET token.
+    Optional ?preserve=1 to snapshot pre-reset stats.
+    """
+    from flask import request
+    token = request.args.get('token') or (request.json or {}).get('token') if request.is_json else request.args.get('token')
+    if token != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    preserve = request.args.get('preserve') == '1'
+    try:
+        import confluence_worker as cw
+        ok = cw.reset(preserve_history=preserve)
+        return jsonify({'action': 'reset', 'preserve_history': preserve, 'ok': ok})
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/regime', methods=['GET'])
 def regime_status():
     """Return current regime detector state + per-coin coverage."""
