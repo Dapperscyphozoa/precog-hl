@@ -36,6 +36,11 @@ def _ema(vals, period):
 def _fetch_closes(interval, n=50):
     bar_ms = {'1h': 3600_000, '4h': 4*3600_000}[interval]
     now = int(time.time()*1000)
+    # Share precog's HL throttle to prevent burst 429s across modules
+    try:
+        import precog as _p
+        if hasattr(_p, '_hl_throttle'): _p._hl_throttle()
+    except Exception: pass
     body = json.dumps({'type':'candleSnapshot','req':{
         'coin':'BTC','interval':interval,
         'startTime': now - n*bar_ms, 'endTime': now}}).encode()

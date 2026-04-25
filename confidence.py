@@ -138,7 +138,12 @@ def size_multiplier(score_val, regime=None):
 
     Floor by regime:
       trending (bull-calm/bull-storm/bear-calm/bear-storm): 30  (full BTC/V3 bonus available)
-      chop or None                                        : 15  (BTC/V3 dropped ~35pts)
+      chop or None                                        : 10  (was 15 — observed signals
+                                                                  scoring ~10 in chop;
+                                                                  set floor=10 to admit
+                                                                  the lowest-quality signal
+                                                                  that still has structural
+                                                                  edge, not 8 to avoid noise)
 
     Multiplier tiers (regime-agnostic once above floor):
       <floor:  0.0x  (BLOCKED)
@@ -149,7 +154,7 @@ def size_multiplier(score_val, regime=None):
 
     Returning 0.0 signals process() to skip."""
     TRENDING = ('bull-calm', 'bull-storm', 'bear-calm', 'bear-storm')
-    floor = 30 if regime in TRENDING else 15
+    floor = 30 if regime in TRENDING else 10
     if score_val < floor: return 0.0
     if score_val < 50: return 1.0
     if score_val < 65: return 2.0
