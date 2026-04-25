@@ -178,9 +178,13 @@ def status():
     return out
 
 
-def get_top_funding_extremes(n=10):
+def get_top_funding_extremes(n=10, universe=None):
     """Diagnostics: return the N coins with most extreme HL funding right now.
-    Useful for /funding endpoint to see what would fire if enabled."""
+    If `universe` is provided (iterable of HL coin names), filter to that set —
+    this is what would actually fire if FUNDING_MR_ENABLED=1, since the engine
+    is only called from precog cascade for in-universe coins.
+    Returns the global view if universe is None.
+    """
     fa = _get_funding_arb()
     if fa is None:
         return []
@@ -190,8 +194,11 @@ def get_top_funding_extremes(n=10):
             bn = dict(fa._CACHE['binance'])
     except Exception:
         return []
+    universe_set = set(universe) if universe else None
     rows = []
     for coin, rate in hl.items():
+        if universe_set is not None and coin not in universe_set:
+            continue
         try:
             r = float(rate)
         except Exception:
