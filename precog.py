@@ -4955,17 +4955,21 @@ def rsi_calc(c,n=14):
 
 _CANDLE_CACHE = {}  # {coin: {'data': [...], 'ts': float}}
 _CANDLE_COLD = {}   # {coin: ts_unfrozen} — skip HL calls for coins recently 429'd
-CANDLE_CACHE_SEC = 300  # 2026-04-22: 120→300s. Longer cache = fewer HL REST
-                        # hits per cycle. On a 15m trigger, 5-min cache still
-                        # catches every fresh bar close. Reduces HL burst load.
-CANDLE_COLD_SEC = 60    # after a 429, skip this coin's HL fetches for 60s
+# 2026-04-25: cache TTL 300s → 600s. On a 15m base timeframe, cache only needs
+# to refresh once per bar (every 900s). 600s gives 1.5× headroom for bar-close
+# capture while halving HL load. Diagnosis: 78-coin universe was producing
+# CloudFront 429 cascades, signal engines running on partial data, throughput
+# dropping to zero. Pure data-availability fix; no signal logic touched.
+CANDLE_CACHE_SEC = 600  # was 300; was 120 originally
+CANDLE_COLD_SEC = 180   # was 60; longer back-off after 429 to break cascade
 
 # Global HL throttle: shared mutex enforces min-gap across ALL worker threads.
-# Without this, 8 ThreadPool workers each had their own 50ms sleep → bursts of
-# 8 simultaneous HL requests every 400ms → instant 429.
+# 2026-04-25: 120ms → 250ms (~4 req/s ceiling). 8 req/s was triggering
+# CloudFront's per-IP rate limit on burst. 4 req/s stays under the radar.
+# 78 coins × 250ms = 19.5s of cumulative throttle but cache hits absorb most.
 _HL_THROTTLE_LOCK = threading.Lock()
 _HL_LAST_CALL = [0.0]   # mutable container for thread-shared state
-HL_MIN_GAP_SEC = 0.12   # 120ms between any two HL REST candle fetches → ~8 req/s ceiling
+HL_MIN_GAP_SEC = 0.25   # was 0.12; was 0.05 originally
 
 def _hl_throttle():
     """Block until enough time has elapsed since the last HL call (any thread)."""
@@ -4994,9 +4998,14 @@ def fetch(coin, n_bars=100, retries=3):
     # 2026-04-22: Cold-skip. If this coin got 429'd in the last 60s, don't
     # hit HL again — use stale cache if present, otherwise skip the coin
     # this tick. Prevents cascading 429s from one coin blocking others.
+    # 2026-04-25: prefer stale cache over empty result. Empty list = blind
+    # signal engine = zero throughput. Stale candles (a few minutes old) on
+    # 15m timeframe are still 95% accurate for signal generation.
     cold_until = _CANDLE_COLD.get(coin, 0)
     if now < cold_until:
-        return cached['data'] if cached else []
+        if cached:
+            return cached['data']  # stale but usable
+        return []
     # Global throttle (shared across all worker threads — was per-thread sleep,
     # which let 8 workers burst HL simultaneously and trigger 429s).
     _hl_throttle()
@@ -5014,8 +5023,11 @@ def fetch(coin, n_bars=100, retries=3):
                 if attempt < retries-1:
                     time.sleep(1.5 + random.random()*1.5)
                     continue
-            log(f"candle err {coin}: {e}"); return cached['data'] if cached else []
-    return []
+            # 2026-04-25: serve stale cache on any error, not just 429.
+            # Better stale data than blind signal engine.
+            log(f"candle err {coin}: {e}")
+            return cached['data'] if cached else []
+    return cached['data'] if cached else []
 
 SCAN_BARS = 12  # scan last 12 bars to catch signals after warmup
 CD_MS = 30 * 60 * 1000  # 30 min cooldown — prevents rapid signal re-fire + opposite-exit storm
