@@ -7447,23 +7447,24 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # 15m = trigger (we're here because a 15m signal fired).
     #
     # 2026-04-25: hard MTF-BLOCK → conviction-gated soft penalty.
-    # Previous behavior: ANY HTF opposing = hard reject. In chop, MTF
-    # alignment is rare by definition; this was killing high-conviction
-    # signals (PUMP @ conf=24 — clearly not noise). New behavior:
-    #   - conf >= 20: soft penalty size×0.3, signal proceeds
-    #   - conf <  20: still hard block (weak counter-trend stays out)
-    # Per spec: "trade what might prove itself, safely."
+    # Floor: 20→15 after observing PUMP signal distribution clusters at 15-24
+    # in chop. A conf=15+ signal that reaches MTF check has already passed
+    # conviction/WR/R:R/HTF/chop filters — it's heavily screened, not weak.
+    # New behavior:
+    #   - conf >= 15: soft penalty size×0.3, signal proceeds
+    #   - conf <  15: still hard block (junk stays out)
+    # Per spec: aligning floor with actual signal distribution, not weakening.
     if _MTF_OK and _mtf is not None:
         try:
             _ok, _detail, _partial_mult = _mtf.aligned(coin, sig)
             if not _ok:
                 _conf_for_mtf = locals().get('conf_score', 0)
-                if _conf_for_mtf >= 20:
+                if _conf_for_mtf >= 15:
                     risk_mult = risk_mult * 0.3
                     log(f"{coin} {sig} MTF-PENALTY ×0.3 (conviction bypass conf={_conf_for_mtf}): {_detail}")
-                    # NO RETURN — let high-conviction signal proceed at reduced size
+                    # NO RETURN — let conviction-gated signal proceed at reduced size
                 else:
-                    log(f"{coin} {sig} MTF-BLOCK: {_detail} (conf={_conf_for_mtf} < 20 floor)")
+                    log(f"{coin} {sig} MTF-BLOCK: {_detail} (conf={_conf_for_mtf} < 15 floor)")
                     return
             else:
                 log(f"{coin} {sig} MTF-OK: {_detail}")
@@ -8438,18 +8439,18 @@ def main():
                                     wh_count += 1; continue
                                 # MTF CONFLUENCE (1h + 4h alignment).
                                 # 2026-04-25: hard MTF-BLOCK → conviction-gated soft penalty.
-                                # conf>=20 = soft penalty ×0.3, conf<20 = still block.
+                                # conf>=15 = soft penalty ×0.3, conf<15 = still block.
                                 _wh_mtf_mult = 1.0
                                 _wh_partial = 1.0
                                 if _MTF_OK and _mtf is not None:
                                     try:
                                         _wmo, _wmd, _wpm = _mtf.aligned(coin, side_str)
                                         if not _wmo:
-                                            if wh_conf >= 20:
+                                            if wh_conf >= 15:
                                                 _wh_partial = _wh_partial * 0.3
                                                 log(f"WEBHOOK {coin} {side_str} MTF-PENALTY ×0.3 (conviction bypass conf={wh_conf}): {_wmd}")
                                             else:
-                                                log(f"WEBHOOK {coin} {side_str} MTF-BLOCK: {_wmd} (conf={wh_conf} < 20 floor)")
+                                                log(f"WEBHOOK {coin} {side_str} MTF-BLOCK: {_wmd} (conf={wh_conf} < 15 floor)")
                                                 wh_count += 1; continue
                                         else:
                                             _wh_partial = _wpm
