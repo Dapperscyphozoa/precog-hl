@@ -48,6 +48,18 @@ import okx_fetch
 # both 429). order_state prevents duplicate lifecycle execution per trade_id.
 import flight_guard
 import order_state
+
+# 2026-04-25 (event-sourced execution model): position_ledger is the local
+# in-memory source of truth for position state, fed by hl_user_ws. Replaces
+# REST-driven _ep_fetch_size() / info.user_state() polling. atomic_entry
+# submits entry+SL+TP via bulk_orders (one atomic API call) eliminating the
+# fill-before-SL race. All passive by default. Activate per-flag.
+import position_ledger
+import hl_user_ws
+import atomic_entry
+
+USE_ATOMIC_EXEC = os.environ.get('USE_ATOMIC_EXEC', '0') == '1'
+USE_LEDGER_FOR_SIZE = os.environ.get('USE_LEDGER_FOR_SIZE', '0') == '1'
 # Single-snapshot candle pipeline (collapses 78× per-tick fan-out into one
 # controlled snapshot rebuild per cycle — eliminates CloudFront 429 cascades).
 try:
@@ -2139,6 +2151,15 @@ def health():
                     'order_finality': (_order_finality.status() if _ORDER_FINALITY_OK else {'enabled': False}),
                     'flight_guard': flight_guard.status(),
                     'order_state': order_state.status(),
+                    'ledger':       position_ledger.status(),
+                    'hl_user_ws':   hl_user_ws.status(),
+                    'enforce_throttle': {
+                        **_ENFORCE_STATS,
+                        'cooldown_sec': _ENFORCE_COOLDOWN_SEC,
+                        'tracked_coins': len(_LAST_ENFORCE),
+                    },
+                    'use_atomic_exec': USE_ATOMIC_EXEC,
+                    'use_ledger_for_size': USE_LEDGER_FOR_SIZE,
                     'recent_logs':LOG_BUFFER[-20:]})
 
 @app.route('/confluence', methods=['GET'])
@@ -4853,6 +4874,16 @@ info = _init_hl_with_retry()
 account = Account.from_key(PRIV_KEY)
 exchange = _init_exchange_with_retry(account)
 
+# 2026-04-25: start HL user-channel WebSocket subscriber. Feeds position_ledger
+# from webData2/userFills/orderUpdates. Always-on (passive observer until
+# USE_LEDGER_FOR_SIZE=1 is set, then becomes authoritative for size queries).
+# Wrapped to prevent any WS init bug from blocking startup.
+try:
+    hl_user_ws.init(info, WALLET)
+    print(f"[hl_user_ws] subscribed for wallet {WALLET[:10]}…", flush=True)
+except Exception as _wse:
+    print(f"[hl_user_ws] init failed (non-fatal, fallback to REST): {_wse}", flush=True)
+
 # ─── ORDER RATE GOVERNOR ───────────────────────────────────────────────
 # 2026-04-22: HL IP-throttles the order endpoint when we burst too many
 # exchange.order calls. Symptom this session: 2000 fills/hour, $57/hour
@@ -6298,13 +6329,22 @@ def flatten_all(reason='KILL'):
 # ═══════════════════════════════════════════════════════
 
 def _ep_fetch_size(coin):
-    """Fetch authoritative position size from HL.
+    """Fetch authoritative position size.
 
     2026-04-25: now uses cached state when fresh (≤2s) to avoid 429 cascade
     during rapid SL/TP placement retries. Direct user_state() call only when
     cache is genuinely stale or missing. Was: every call hits HL → DYM-style
     429 storm during retry loops.
+
+    2026-04-25 (event-sourced): when USE_LEDGER_FOR_SIZE=1 AND WS feed is
+    fresh (<30s), reads from position_ledger — zero REST cost. This kills
+    the residual 429 source on the enforce_protection size-fetch path
+    (15+ size fetches per enforcement during settlement loop).
     """
+    # ─── PATH 0: ledger (event-sourced) ─────────────────────
+    if USE_LEDGER_FOR_SIZE and position_ledger.ws_is_fresh(max_age_sec=30):
+        return position_ledger.get_size(coin)
+
     try:
         # Prefer cached state if fresh — protects against retry-storm 429s
         try:
@@ -6390,6 +6430,22 @@ def _ep_cancel_order(coin, oid):
         return False
 
 
+# 2026-04-25 (audit decoupling): the enforce_position_protection function fires
+# 20-25 REST calls per invocation (15 settlement polls + 3 order fetches +
+# 2 cancels + 2 places + 3 verify fetches). It's called after every entry AND
+# every 15s by lifecycle_reconciler. The audit→enforce→audit feedback loop
+# was the actual amplifier on CloudFront 429s.
+#
+# Surgical fix: per-coin cooldown. If we enforced this coin within the last
+# N seconds, return the cached result instead of re-running the full audit.
+# Reconciler hits cooldown → no-op. Real entries always run (different coin
+# OR cooldown expired). Loop dies. Latency unchanged on first enforcement.
+_ENFORCE_COOLDOWN_SEC = float(os.environ.get('ENFORCE_COOLDOWN_SEC', '8.0'))
+_LAST_ENFORCE = {}  # coin -> (ts, result_dict)
+_ENFORCE_TS_LOCK = threading.Lock()
+_ENFORCE_STATS = {'invocations': 0, 'cache_hits': 0, 'fresh_runs': 0}
+
+
 def enforce_position_protection(coin, is_long, entry_px, origin='unknown'):
     """Single call to protect a position: idempotent, atomic, authoritative.
 
@@ -6398,7 +6454,37 @@ def enforce_position_protection(coin, is_long, entry_px, origin='unknown'):
     - TP verified ≤ 15s or repair (no close)
     - Cloid idempotency
     - Coin halted 5min after critical execution failure
+
+    2026-04-25: per-coin cooldown wrapper. If enforced within last N sec,
+    return cached result. Breaks audit→enforce→audit→enforce feedback loop.
     """
+    _ENFORCE_STATS['invocations'] += 1
+
+    # ─── Per-coin cooldown gate ──────────────────────────────────────
+    with _ENFORCE_TS_LOCK:
+        last = _LAST_ENFORCE.get(coin)
+        if last is not None:
+            age = time.time() - last[0]
+            if age < _ENFORCE_COOLDOWN_SEC:
+                _ENFORCE_STATS['cache_hits'] += 1
+                # Return shallow copy with annotation so callers can detect
+                cached = dict(last[1])
+                cached['from_cache'] = True
+                cached['cache_age_sec'] = round(age, 2)
+                return cached
+
+    _ENFORCE_STATS['fresh_runs'] += 1
+    result = _enforce_position_protection_impl(coin, is_long, entry_px, origin)
+
+    # Cache only successful results — failures should be retried on next call
+    if result.get('success'):
+        with _ENFORCE_TS_LOCK:
+            _LAST_ENFORCE[coin] = (time.time(), dict(result))
+
+    return result
+
+
+def _enforce_position_protection_impl(coin, is_long, entry_px, origin='unknown'):
     if not _EP_OK or _ep is None:
         # Fallback: legacy pattern
         sl_pct = place_native_sl(coin, is_long, entry_px, _ep_fetch_size(coin) or 0)
