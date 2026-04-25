@@ -5015,11 +5015,10 @@ CANDLE_COLD_SEC = 180   # was 60; longer back-off after 429 to break cascade
 # 78 coins × 250ms = 19.5s of cumulative throttle but cache hits absorb most.
 _HL_THROTTLE_LOCK = threading.Lock()
 _HL_LAST_CALL = [0.0]   # mutable container for thread-shared state
-HL_MIN_GAP_SEC = 0.7    # 2026-04-25: 0.25→0.7. At 0.25s sustained 4 req/s
-                        # for 20s, CloudFront still 429'd (273 errors observed).
-                        # 0.7s = ~1.4 req/s = ~55s build time for 78 coins.
-                        # Snapshot TTL widened to 180s in candle_snapshot to
-                        # give breathing room.
+HL_MIN_GAP_SEC = 1.0    # 2026-04-25: 0.7→1.0. Even at 0.7s/1.4 req/s,
+                        # CloudFront PoP HIO52-P5 still rate-limited
+                        # specific coins. 1.0s = 1 req/s sustained,
+                        # ~80s build for 78 coins (within 180s TTL).
 
 def _hl_throttle():
     """Block until enough time has elapsed since the last HL call (any thread)."""
@@ -8491,6 +8490,12 @@ def main():
                         # retrying every tick. Skip until process restart.
                         if c in _UNKNOWN_COINS:
                             return []
+                        # Per-coin 429 cooldown. If this coin 429'd recently,
+                        # skip it — retrying inside the same window just adds
+                        # CloudFront pressure and gets us blacklisted harder.
+                        cold_until = _CANDLE_COLD.get(c, 0)
+                        if time.time() < cold_until:
+                            return []
                         end = int(time.time() * 1000)
                         # tf to seconds: 15m=900, 1h=3600, 4h=14400
                         tf_sec = {'15m': 900, '1h': 3600, '4h': 14400}.get(tf, 900)
@@ -8501,6 +8506,14 @@ def main():
                             _UNKNOWN_COINS.add(c)
                             log(f"[snapshot] AUTO-QUARANTINE {c}: not in HL universe (KeyError {_ke})")
                             return []
+                        except Exception as _e:
+                            es = str(_e)
+                            if '429' in es:
+                                # Cool this coin down for 90s — by then either
+                                # CloudFront limit window has reset or LKG is
+                                # already serving it from a previous successful build.
+                                _CANDLE_COLD[c] = time.time() + 90
+                            raise   # let candle_snapshot.build_snapshot count + log
                         return [(int(b['t']), float(b['o']), float(b['h']),
                                  float(b['l']), float(b['c']), float(b['v'])) for b in d]
                     _candle_snap.build_snapshot(COINS, '15m', _snap_fetch,
