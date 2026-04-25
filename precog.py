@@ -2102,11 +2102,16 @@ def orderbook_depth(coin):
 @app.route('/funding', methods=['GET'])
 def funding_diagnostics():
     """Funding mean-reversion engine diagnostics. Shows top extreme funding
-    rates across the universe and which would fire if FUNDING_MR_ENABLED=1."""
+    rates across the universe and which would fire if FUNDING_MR_ENABLED=1.
+
+    in_universe: coins in the trade universe — what would actually fire.
+    global:      all HL coins — broader market crowd signal.
+    """
     try:
         return jsonify({
             'engine_status': funding_engine.status(),
-            'top_extremes': funding_engine.get_top_funding_extremes(20),
+            'in_universe': funding_engine.get_top_funding_extremes(15, universe=COINS),
+            'global': funding_engine.get_top_funding_extremes(15),
             'funding_arb_status': funding_arb.status(),
         })
     except Exception as e:
