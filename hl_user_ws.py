@@ -114,10 +114,14 @@ class HLUserWS:
 
     # ─── Lifecycle ────────────────────────────────────────────────────
     def start(self):
-        """Subscribe to the three user channels. Idempotent."""
+        """Subscribe to the three user channels. Idempotent.
+
+        Sets _subs_active = True ONLY if at least one subscription succeeded.
+        Sets ledger.ws_connected only on actual subscription success."""
         with self._lock:
-            if self._subs_active:
+            if self._subs_active and self._sub_ids:
                 return
+            successes = 0
             try:
                 # webData2 — primary authoritative snapshot
                 sid = self.info.subscribe(
@@ -125,6 +129,7 @@ class HLUserWS:
                     self._on_webdata2,
                 )
                 self._sub_ids.append(('webData2', sid))
+                successes += 1
                 log.info(f"subscribed webData2 (user={self.wallet[:10]}…)")
             except Exception as e:
                 self._stats['subscribe_errors'] += 1
@@ -135,6 +140,7 @@ class HLUserWS:
                     self._on_user_fills,
                 )
                 self._sub_ids.append(('userFills', sid))
+                successes += 1
                 log.info("subscribed userFills")
             except Exception as e:
                 self._stats['subscribe_errors'] += 1
@@ -145,12 +151,16 @@ class HLUserWS:
                     self._on_order_updates,
                 )
                 self._sub_ids.append(('orderUpdates', sid))
+                successes += 1
                 log.info("subscribed orderUpdates")
             except Exception as e:
                 self._stats['subscribe_errors'] += 1
                 log.error(f"orderUpdates subscribe failed: {e}")
-            self._subs_active = True
-            position_ledger.mark_ws_connected(True)
+            # Only mark active if at least one subscription succeeded
+            self._subs_active = successes > 0
+            position_ledger.mark_ws_connected(successes > 0)
+            if successes == 0:
+                log.error("All WS subscriptions failed — ledger will not receive updates")
 
     def status(self):
         with self._lock:
@@ -164,12 +174,28 @@ class HLUserWS:
 _INSTANCE = None
 
 
-def init(info, wallet):
-    """Initialize singleton + start subscriptions. Idempotent."""
+def init(info_unused, wallet):
+    """Initialize singleton + start subscriptions. Idempotent.
+
+    Note on `info_unused`: the precog.py-shared Info instance is constructed
+    with skip_ws=True (REST-only). We can't subscribe through it. So we
+    create our OWN Info instance dedicated to WS subscriptions. Two
+    instances is fine — one TCP connection for REST, one for WS, no
+    cross-contamination.
+    """
     global _INSTANCE
-    if _INSTANCE is None:
-        _INSTANCE = HLUserWS(info, wallet)
-        _INSTANCE.start()
+    if _INSTANCE is not None:
+        return _INSTANCE
+    try:
+        from hyperliquid.info import Info
+        from hyperliquid.utils import constants
+        # Default skip_ws=False — this Info DOES open a WebSocket
+        ws_info = Info(constants.MAINNET_API_URL)
+    except Exception as e:
+        log.error(f"Failed to create dedicated WS Info: {e}")
+        return None
+    _INSTANCE = HLUserWS(ws_info, wallet)
+    _INSTANCE.start()
     return _INSTANCE
 
 
