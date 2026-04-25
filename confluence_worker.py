@@ -289,41 +289,100 @@ def _register_position(coin, signal, fill_result):
             # ─── STEP 3: tag every trade with source universe ───
             'universe': 'ELITE_71',
             'universe_aligned_ts': 1777076400,  # 2026-04-25 alignment anchor
+            # ─── LIFECYCLE STATE MACHINE ───
+            'state': 'OPEN',                 # OPEN → IN_PROFIT → LOCKED → CLOSED → TIMEOUT
+            'max_favourable_px': signal['entry'],  # tracks high-water for trailing logic
+            'sl_at_be': False,               # set True when BE shift fires
         }
         _state['total_fires'] += 1
         _state['last_fire_ts'][coin] = int(time.time())
     _save_state()
 
 def _monitor_exits():
-    """Walk open positions. Close on TP / SL / 72h timeout via precog's close path.
-    Called each scan cycle after new signals."""
+    """Walk open positions. LIFECYCLE ENGINE — every position must exit cleanly.
+    
+    Exit rules (in order of evaluation):
+      1. SL hit                  → close('sl')
+      2. TP hit                  → close('tp')
+      3. Profit lock raw≥1.5%    → close('tp_lock')
+      4. BE shift  raw≥0.8%      → SL → entry (sl_pct = 0)
+      5. No-progress age≥2h, |raw|<0.3% → close('no_progress')
+      6. Hard timeout age≥6h     → close('timeout')
+    
+    All raw_move = (mark - entry) / entry × direction. Tier-agnostic.
+    Replaces old passive 72h max_hold model.
+    """
+    HARD_TIMEOUT_S = 6 * 3600       # 6h non-negotiable
+    NO_PROGRESS_AGE_S = 2 * 3600    # 2h then check progress
+    NO_PROGRESS_THRESHOLD = 0.003   # |raw| < 0.3% = stuck
+    PROFIT_LOCK_PCT = 0.015          # raw ≥ 1.5% → close
+    PROFIT_LOCK_BE_PCT = 0.008       # raw ≥ 0.8% → move SL to entry
+
     now = int(time.time())
     with _state_lock:
         to_check = list(_state['open_positions'].items())
+    
+    # Single shared mid-price fetch (rate-limit safety)
+    try:
+        mids = _precog.info.all_mids() if hasattr(_precog.info, 'all_mids') else {}
+    except Exception as e:
+        _log(f"mids fetch err: {e}")
+        return
+    
     for coin, pos in to_check:
-        # Age check (72h timeout)
-        age = now - pos['ts']
-        if age >= pos['max_hold_s']:
-            _log(f"{coin} TIMEOUT {age/3600:.1f}h — flat")
-            _close_position(coin, 'timeout')
-            continue
-        # Let precog's native TP/SL orders do the work — we just monitor here
-        # (TP/SL were wired via register; this is a backup check via live price)
         try:
-            mids = _precog.info.all_mids() if hasattr(_precog.info, 'all_mids') else {}
-            px = float(mids.get(coin, 0))
-            if not px: continue
+            age = now - pos['ts']
             entry = pos['entry']
             is_buy = pos['side'] == 'BUY'
-            pnl = (px - entry) / entry if is_buy else (entry - px) / entry
-            if pnl >= pos['tp_pct']:
-                _log(f"{coin} TP hit pnl={pnl*100:.2f}% — flat")
-                _close_position(coin, 'tp', pnl)
-            elif pnl <= -pos['sl_pct']:
-                _log(f"{coin} SL hit pnl={pnl*100:.2f}% — flat")
-                _close_position(coin, 'sl', pnl)
+            px = float(mids.get(coin, 0))
+            if not px:
+                # No price — only age-based exits possible
+                if age >= HARD_TIMEOUT_S:
+                    _log(f"{coin} TIMEOUT {age/3600:.1f}h (no_price) — flat")
+                    _close_position(coin, 'timeout')
+                continue
+            raw_move = ((px - entry) / entry) if is_buy else ((entry - px) / entry)
+
+            # 1+2: traditional SL/TP
+            if raw_move <= -pos['sl_pct']:
+                _log(f"{coin} SL hit pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat")
+                _close_position(coin, 'sl', raw_move)
+                continue
+            if raw_move >= pos['tp_pct']:
+                _log(f"{coin} TP hit pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat")
+                _close_position(coin, 'tp', raw_move)
+                continue
+
+            # 3: profit lock (close at +1.5% raw)
+            if raw_move >= PROFIT_LOCK_PCT:
+                _log(f"{coin} PROFIT_LOCK pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat")
+                _close_position(coin, 'tp_lock', raw_move)
+                continue
+
+            # 4: BE shift (move SL to entry once raw ≥ 0.8%)
+            if raw_move >= PROFIT_LOCK_BE_PCT and not pos.get('sl_at_be'):
+                with _state_lock:
+                    if coin in _state['open_positions']:
+                        _state['open_positions'][coin]['sl_at_be'] = True
+                        _state['open_positions'][coin]['sl_pct'] = 0.0
+                _log(f"{coin} BE_SHIFT raw={raw_move*100:.2f}% — SL moved to entry")
+                # Don't continue — let next tick evaluate against new SL=0
+
+            # 5: no-progress kill (age ≥ 2h, |raw| < 0.3%)
+            if age >= NO_PROGRESS_AGE_S and abs(raw_move) < NO_PROGRESS_THRESHOLD:
+                _log(f"{coin} NO_PROGRESS {age/3600:.1f}h raw={raw_move*100:+.2f}% — flat")
+                _close_position(coin, 'no_progress', raw_move)
+                continue
+
+            # 6: hard timeout (age ≥ 6h)
+            if age >= HARD_TIMEOUT_S:
+                _log(f"{coin} TIMEOUT {age/3600:.1f}h raw={raw_move*100:+.2f}% — flat")
+                _close_position(coin, 'timeout', raw_move)
+                continue
+
         except Exception as e:
-            _log(f"{coin} exit monitor err: {e}")
+            _log(f"{coin} lifecycle err: {e}")
+
 
 def _close_position(coin, reason, pnl=None):
     with _state_lock:
@@ -579,6 +638,25 @@ def _loop():
             traceback.print_exc()
         time.sleep(SCAN_INTERVAL_S)
 
+
+def _lifecycle_loop():
+    """Lifecycle ticker — runs every 30s independently of signal scan.
+    Enforces timeouts, profit lock, BE shift, no-progress kill, SL/TP.
+    Decouples exit cadence from signal cadence (was 5min, way too slow)."""
+    LIFECYCLE_INTERVAL_S = 30
+    _log(f"lifecycle ticker started: interval={LIFECYCLE_INTERVAL_S}s")
+    while ENABLED:
+        try:
+            with _state_lock:
+                n_open = len(_state['open_positions'])
+            if n_open > 0:
+                _monitor_exits()
+        except Exception as e:
+            _log(f"lifecycle loop err: {e}")
+            traceback.print_exc()
+        time.sleep(LIFECYCLE_INTERVAL_S)
+
+
 def start(precog_module):
     """Called from precog.py after its init completes."""
     global _precog, _ce
@@ -590,7 +668,10 @@ def start(precog_module):
     _ce = ce
     t = threading.Thread(target=_loop, name='confluence-worker', daemon=True)
     t.start()
-    _log("thread launched")
+    # Separate lifecycle ticker — runs every 30s
+    t2 = threading.Thread(target=_lifecycle_loop, name='confluence-lifecycle', daemon=True)
+    t2.start()
+    _log("thread launched (signal scan + lifecycle ticker)")
     return t
 
 def status():
