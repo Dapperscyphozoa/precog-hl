@@ -2123,6 +2123,7 @@ def health():
                     'gates_loaded':len(TICKER_GATES),
                     'regime':cur_regime,
                     'snapshot': (_candle_snap.snapshot_status() if _SNAPSHOT_OK else {'enabled': False}),
+                    'unknown_coins': sorted(_UNKNOWN_COINS),
                     'sl_state': (_sl_state_tracker.status() if _SL_STATE_OK else {'enabled': False}),
                     'execution_state': (_exec_state.status() if _EXEC_STATE_OK else {'enabled': False}),
                     'order_finality': (_order_finality.status() if _ORDER_FINALITY_OK else {'enabled': False}),
@@ -4999,6 +5000,7 @@ def rsi_calc(c,n=14):
 _CANDLE_CACHE = {}  # {coin: {'data': [...], 'ts': float}}
 _CANDLE_COLD = {}   # {coin: ts_unfrozen} — skip HL calls for coins recently 429'd
 _LAST_CLOSE_FILL = {}  # {coin: {'fill_px', 'pnl_usd', 'pct', 'ts'}} — exchange-confirmed exit fill
+_UNKNOWN_COINS = set()  # coins that don't exist in HL universe — auto-quarantined
 # 2026-04-25: cache TTL 300s → 600s. On a 15m base timeframe, cache only needs
 # to refresh once per bar (every 900s). 600s gives 1.5× headroom for bar-close
 # capture while halving HL load. Diagnosis: 78-coin universe was producing
@@ -8484,11 +8486,21 @@ def main():
             if _SNAPSHOT_OK and _candle_snap is not None:
                 try:
                     def _snap_fetch(c, tf, nb):
+                        # 2026-04-25: auto-quarantine unknown coins. KeyError
+                        # from HL SDK = coin not in exchange universe; no point
+                        # retrying every tick. Skip until process restart.
+                        if c in _UNKNOWN_COINS:
+                            return []
                         end = int(time.time() * 1000)
                         # tf to seconds: 15m=900, 1h=3600, 4h=14400
                         tf_sec = {'15m': 900, '1h': 3600, '4h': 14400}.get(tf, 900)
                         start_ms = end - nb * tf_sec * 1000
-                        d = info.candles_snapshot(c, tf, start_ms, end)
+                        try:
+                            d = info.candles_snapshot(c, tf, start_ms, end)
+                        except KeyError as _ke:
+                            _UNKNOWN_COINS.add(c)
+                            log(f"[snapshot] AUTO-QUARANTINE {c}: not in HL universe (KeyError {_ke})")
+                            return []
                         return [(int(b['t']), float(b['o']), float(b['h']),
                                  float(b['l']), float(b['c']), float(b['v'])) for b in d]
                     _candle_snap.build_snapshot(COINS, '15m', _snap_fetch,
