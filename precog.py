@@ -5526,9 +5526,16 @@ def place(coin, is_buy, size, cloid=None):
     # garbage. Entry sizing that's too small to matter is still too small to
     # trade. Clean cutoff.
     notional_usd = size * px
-    MIN_NOTIONAL_USD = 50.0
+    # 2026-04-25: $50 floor → $10 floor.
+    # The original $50 was protective padding when dust-sweep at $0.10 was killing
+    # small positions in <0.2% moves. Dust-sweep was disabled 2026-04-22.
+    # $50 is now blocking small-account testing on low-priced coins (MAV, kFLOKI,
+    # HMSTR, BIGTIME, etc.) — at $560 equity × 0.5% risk × 10x lev = ~$28 notional
+    # max for some coins. We need every trade we can get for data, not protective
+    # filtering. $10 = HL's actual exchange minimum; below this orders bounce.
+    MIN_NOTIONAL_USD = 10.0
     if notional_usd < MIN_NOTIONAL_USD:
-        log(f"{coin} {'BUY' if is_buy else 'SELL'} SKIP: notional ${notional_usd:.2f} below ${MIN_NOTIONAL_USD:.0f} min (size={size}, px={px})")
+        log(f"{coin} {'BUY' if is_buy else 'SELL'} SKIP: notional ${notional_usd:.2f} below ${MIN_NOTIONAL_USD:.0f} HL min (size={size}, px={px})")
         return None
 
     # Bybit-lead limit: capture HL lag using Bybit's current price
