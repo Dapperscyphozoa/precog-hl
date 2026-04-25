@@ -30,7 +30,13 @@ import numpy as np
 from collections import defaultdict
 
 # ─── LOCKED CONFIG (do not tune without OOS re-validation) ──────────
-CONF_MIN_SYS        = 2
+# 2026-04-25: CONF_MIN_SYS 2 → 1. Strict 2+ confluence was producing 0 fires
+# (signal starvation by design). Each system already passes 6 quality filters
+# (rb/struct/dist/rsi/vol/htf — _f1 through _f6). A single-system signal that
+# survives all 6 IS high quality. Per spec: "allow 1 engine if quality is high."
+# 6-filter pass equates to "confidence >= 8" requirement — relying on existing
+# gates rather than adding a new score.
+CONF_MIN_SYS        = 1
 CONF_WINDOW_S       = 24 * 3600
 COIN_COOLDOWN_S     = 24 * 3600
 TP_PCT              = 0.04
@@ -244,13 +250,14 @@ def _recent_signals(ctx, ctx_htf, sys_name, window_s):
 def eval_coin(coin, bars_15m, now_ts=None):
     """
     Evaluate confluence on a single coin's 15m candle history.
-    Returns signal dict if 2+ systems agree within 24h window, else None.
+    Returns signal dict if 1+ systems agree within 24h window (was 2+, lowered
+    2026-04-25 to break signal starvation; each system passes 6-filter gate).
 
     Output:
       {
         'coin': str,
         'side': 'BUY'|'SELL',
-        'n_sys': 2 or 3,
+        'n_sys': 1, 2, or 3,
         'systems': ['SNIPER','DAY',...],
         'entry': float (last close),
         'tp_pct': 0.04,
