@@ -283,6 +283,25 @@ except Exception as _e:
     _SNAPSHOT_OK = False
     print(f'[snapshot] exchange_snapshot import failed: {_e}', flush=True)
 
+# Final-form architecture: position state machine + order finality tracker.
+# Both treat exchange events as the SOLE source of truth — no snapshot/LKG
+# data ever drives state transitions.
+try:
+    import execution_state as _exec_state
+    _EXEC_STATE_OK = True
+except Exception as _e:
+    _exec_state = None
+    _EXEC_STATE_OK = False
+    print(f'[exec_state] execution_state import failed: {_e}', flush=True)
+
+try:
+    import order_finality as _order_finality
+    _ORDER_FINALITY_OK = True
+except Exception as _e:
+    _order_finality = None
+    _ORDER_FINALITY_OK = False
+    print(f'[order_finality] order_finality import failed: {_e}', flush=True)
+
 # ─────────────────────────────────────────────────────────
 # STEP 3 — Intent queue + authoritative reconciler
 # Ships with RECONCILER_AUTHORITATIVE=0 default (observe mode).
@@ -2105,6 +2124,8 @@ def health():
                     'regime':cur_regime,
                     'snapshot': (_candle_snap.snapshot_status() if _SNAPSHOT_OK else {'enabled': False}),
                     'sl_state': (_sl_state_tracker.status() if _SL_STATE_OK else {'enabled': False}),
+                    'execution_state': (_exec_state.status() if _EXEC_STATE_OK else {'enabled': False}),
+                    'order_finality': (_order_finality.status() if _ORDER_FINALITY_OK else {'enabled': False}),
                     'recent_logs':LOG_BUFFER[-20:]})
 
 @app.route('/confluence', methods=['GET'])
@@ -4977,6 +4998,7 @@ def rsi_calc(c,n=14):
 
 _CANDLE_CACHE = {}  # {coin: {'data': [...], 'ts': float}}
 _CANDLE_COLD = {}   # {coin: ts_unfrozen} — skip HL calls for coins recently 429'd
+_LAST_CLOSE_FILL = {}  # {coin: {'fill_px', 'pnl_usd', 'pct', 'ts'}} — exchange-confirmed exit fill
 # 2026-04-25: cache TTL 300s → 600s. On a 15m base timeframe, cache only needs
 # to refresh once per bar (every 900s). 600s gives 1.5× headroom for bar-close
 # capture while halving HL load. Diagnosis: 78-coin universe was producing
@@ -6086,10 +6108,21 @@ def _close_direct(coin, state_ref=None):
 
             # Success
             fill_info = status['filled']
+            # 2026-04-25 (final): EXIT PRICE COMES FROM EXCHANGE FILL ONLY.
+            # Prior code: fill_px = float(fill_info.get('avgPx', px))  ← FALLED BACK to limit price.
+            # That caused fake exit prices (and worst case $0.01 closes) when
+            # the exchange ack arrived without avgPx populated.
+            # Now: if avgPx is missing/zero/invalid, DO NOT close the trade
+            # in the ledger — log the corruption and let the reconciler retry.
+            avg_raw = fill_info.get('avgPx')
             try:
-                fill_px = float(fill_info.get('avgPx', px))
-            except Exception:
-                fill_px = px
+                fill_px = float(avg_raw) if avg_raw is not None else 0.0
+            except (TypeError, ValueError):
+                fill_px = 0.0
+            if fill_px <= 0:
+                log(f"CLOSE {coin} attempt {attempt}/{len(SLIP_TIERS)} INVALID FILL PRICE "
+                    f"avgPx={avg_raw!r} — refusing to record fake exit, will retry tier")
+                continue  # do not return; try next slip tier
             pct = ((fill_px - entry) / entry * 100) if live['size'] > 0 \
                   else ((entry - fill_px) / entry * 100)
             pnl_usd = live['pnl']
@@ -6097,6 +6130,14 @@ def _close_direct(coin, state_ref=None):
                 f"size={size} px={fill_px} | entry={entry} | {pct:+.2f}% | ${pnl_usd:+.3f}")
             log_trade('HL', coin, 'CLOSE', fill_px, pnl_usd, 'close')
             cancel_trigger_orders(coin)
+            # Stash real fill for reconciler to read (no get_mid inference)
+            try:
+                _LAST_CLOSE_FILL[coin] = {
+                    'fill_px': fill_px, 'pnl_usd': pnl_usd, 'pct': pct,
+                    'ts': time.time(),
+                }
+            except Exception:
+                pass
             try:
                 import monitor
                 monitor.record_close(coin, pct/100, pnl_usd, 0, 'close')
@@ -8014,7 +8055,14 @@ def main():
         try:
             def _execute_close_on_exchange(coin):
                 """RAW exchange close via _close_direct.
-                Returns pct (real close) or None (failure — ledger write must be blocked).
+                Returns fill_px (real exchange fill) or None (failure).
+
+                2026-04-25 (final): exit price comes ONLY from the actual
+                exchange fill stored in _LAST_CLOSE_FILL. NEVER from get_mid
+                or any inferred/snapshot/LKG source. If _close_direct succeeded
+                but no fill was stashed within 3s, we treat it as a half-fail
+                and return None — better to retry next cycle than write a fake
+                exit price into the ledger.
 
                 CRITICAL: returning a non-None value when _close_direct failed caused the
                 HMSTR-12-closes-in-4-min loop (ledger marked closed, exchange still open,
@@ -8026,8 +8074,19 @@ def main():
                         log(f"[reconciler] _close_direct returned None for {coin} — "
                             f"will NOT write ledger close (reconciler retry next cycle)")
                         return None
-                    # _close_direct succeeded (returned pct). Return best-effort exit price.
-                    return get_mid(coin)
+                    # _close_direct succeeded. Read REAL fill from stash.
+                    fill = _LAST_CLOSE_FILL.get(coin)
+                    if not fill:
+                        log(f"[reconciler] {coin} no stashed fill — refusing inferred price, retry next cycle")
+                        return None
+                    if (time.time() - fill.get('ts', 0)) > 5:
+                        log(f"[reconciler] {coin} stashed fill stale ({time.time()-fill['ts']:.1f}s) — retry")
+                        return None
+                    fill_px = fill.get('fill_px') or 0
+                    if fill_px <= 0:
+                        log(f"[reconciler] {coin} stashed fill_px invalid ({fill_px}) — retry")
+                        return None
+                    return float(fill_px)
                 except Exception as e:
                     log(f"[reconciler] execute_close err {coin}: {e}")
                     return None
