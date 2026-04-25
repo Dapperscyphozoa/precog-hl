@@ -42,11 +42,23 @@ from collections import defaultdict
 _COIN_LOCKS = defaultdict(threading.Lock)
 
 # Tiered deadlines (PHASE 1 SPEC):
-# SL MUST exist within 5s → CRITICAL, emergency close on violation
+# SL MUST exist within deadline → CRITICAL, emergency close on violation
 # TP MUST exist within 15s → NON-CRITICAL, repair only
-SL_DEADLINE_SEC = 5.0
+#
+# 2026-04-25: SL_DEADLINE 5.0s → 15.0s, EMERGENCY requires 2 consecutive
+# verification failures (Option A + C combined). Diagnosis from RSR trade:
+# SL was placed successfully but verification check fired before exchange
+# state propagated → false-negative emergency close on a healthy position.
+#   - 5s was too tight for MAKER→TAKER fallback + async exchange latency
+#   - Single-shot timer can't distinguish "SL never placed" from "SL placed,
+#     state lag" — both look the same at t+5s
+# 15s window covers normal exchange latency (typically 2-8s for SL confirm).
+# Plus: emergency close now requires 2 consecutive failed verification cycles
+# (~30s total) before firing. Real failures persist; transient lags resolve.
+SL_DEADLINE_SEC = 15.0
+SL_EMERGENCY_CONFIRM_CYCLES = 2  # consecutive failed checks before emergency close
 TP_DEADLINE_SEC = 15.0
-FULL_PROTECTION_DEADLINE_SEC = 15.0
+FULL_PROTECTION_DEADLINE_SEC = 25.0  # was 15 — match new SL deadline + buffer
 
 # Coins currently halted due to critical execution failure
 # {coin: halt_until_ts}. Cleared on next successful entry cycle.
@@ -324,6 +336,26 @@ def enforce_protection(coin, is_long, entry_px,
             except Exception:
                 pass
             time.sleep(0.5)
+
+        # 2026-04-25: Option C — second confirmation pass before emergency close.
+        # If first window missed, wait for exchange state to propagate then check
+        # one more time. Distinguishes "SL never placed" (persists across cycles)
+        # from "SL placed, state lag" (resolves on second check). Only fires
+        # emergency close when SL is genuinely missing across both windows.
+        if not sl_verified:
+            _log(f'{coin} SL not visible in {SL_DEADLINE_SEC}s — second-pass check before emergency')
+            time.sleep(5.0)  # let exchange state propagate
+            for _retry in range(SL_EMERGENCY_CONFIRM_CYCLES):
+                try:
+                    verify_orders = fetch_orders_fn(coin)
+                    v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
+                    if len(v_sl) >= 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
+                        sl_verified = True
+                        _log(f'{coin} SL verified on second-pass (was state lag, not failure)')
+                        break
+                except Exception:
+                    pass
+                time.sleep(2.0)
 
         if not sl_verified:
             # CRITICAL: SL deadline breach → emergency close + halt coin
