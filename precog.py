@@ -7344,19 +7344,29 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # Reversals (sig opposing existing pos) skip these gates — they go through
     # _allow_reversal logic below and get handled via the existing queue.
     if sig and not live:
+        # Pull regime + WR snapshot up front for unified reject log
+        try:
+            import regime_detector as _rd
+            _regime = _rd.get_regime() or 'unknown'
+        except Exception:
+            _regime = 'unknown'
+        _wr_rec = _COIN_WR_BOOTSTRAP.get(coin.upper(), {})
+        _coin_wr = _wr_rec.get('wr', 0.0)
+        _wr_n = _wr_rec.get('n', 0)
+
         # Guard 2: regime direction filter
         rb_block, rb_reason = _regime_dir_blocks_entry(sig)
         if rb_block:
-            log(f"{coin} {sig} BLOCKED — survival/regime: {rb_reason}")
+            log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=regime/{rb_reason}")
             return
         # Guard 3: per-coin WR filter (with bootstrap fallback)
         wr_block, wr_reason = _coin_wr_blocks_entry(coin)
         if wr_block:
-            log(f"{coin} {sig} BLOCKED — survival/coin_wr: {wr_reason}")
+            log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=coin_wr/{wr_reason}")
             return
         elif wr_reason and 'unproven' in wr_reason:
-            # Allowed but log for visibility
-            log(f"{coin} {sig} survival/coin_wr: {wr_reason}")
+            # Allowed but log for visibility (non-blocking)
+            log(f"ALLOW {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} note=unproven/{wr_reason}")
     # ─────────────────────────────────────────────────────
 
     if sig == 'SELL':
