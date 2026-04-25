@@ -251,25 +251,59 @@ def enforce_protection(coin, is_long, entry_px,
         # clears sl_oid/tp_oid on cancellation events, so a removed trigger
         # is reflected within seconds — no risk of false "protected"
         # positives lingering.
+        #
+        # 2026-04-25 (v4): protection_state awareness:
+        #   PROVISIONAL    → atomic_reconciler is actively reconciling. Don't
+        #                    interfere; mark soft-success and let reconciler
+        #                    finish. Critical: enforce must NOT cancel/replace
+        #                    while reconciler holds the bracket.
+        #   CONFIRMED      → fully protected. Standard early-exit.
+        #   RESIZED        → reconciler corrected size mismatch. Same as CONFIRMED.
+        #   RECONCILE_FAIL → reconciler couldn't fix; emergency close already
+        #                    fired. Treat as no-op — position should be closing.
         try:
             import position_ledger as _pl_top
             if _pl_top.ws_is_fresh(max_age_sec=30):
                 _prot_top = _pl_top.get_protection(coin)
                 _sz_top = _pl_top.get_size(coin)
+                _ps_top = _pl_top.get_protection_state(coin)
+
+                # PROVISIONAL: reconciler is working — defer
+                if _ps_top == 'PROVISIONAL':
+                    result['success'] = True
+                    result['reason'] = 'reconciler_in_progress'
+                    result['duration_sec'] = time.time() - enforce_start
+                    _STATS['verified_ok'] += 1
+                    _log(f'{coin} PROVISIONAL — atomic_reconciler in progress, '
+                         f'enforce deferring (0 REST calls)')
+                    return result
+
+                # RECONCILE_FAIL: reconciler triggered emergency close — don't interfere
+                if _ps_top == 'RECONCILE_FAIL':
+                    result['success'] = False
+                    result['reason'] = 'reconcile_failed_no_op'
+                    result['duration_sec'] = time.time() - enforce_start
+                    _log(f'{coin} RECONCILE_FAIL state — enforce no-op '
+                         f'(emergency close already fired)')
+                    return result
+
+                # CONFIRMED or RESIZED with full bracket on book: fast skip
                 if (_prot_top
                         and _prot_top.get('sl_oid') is not None
                         and _prot_top.get('tp_oid') is not None
                         and _sz_top is not None
-                        and abs(_sz_top) > 1e-9):
+                        and abs(_sz_top) > 1e-9
+                        and _ps_top in ('CONFIRMED', 'RESIZED', None)):
                     result['success'] = True
                     result['actual_size'] = abs(_sz_top)
                     result['sl_oid'] = _prot_top.get('sl_oid')
                     result['tp_oid'] = _prot_top.get('tp_oid')
-                    result['reason'] = 'ledger_already_protected'
+                    result['reason'] = f'ledger_already_protected:{_ps_top or "legacy"}'
                     result['duration_sec'] = time.time() - enforce_start
                     _STATS['verified_ok'] += 1
                     clear_halt(coin)
-                    _log(f'{coin} ledger-protected: sl_oid={_prot_top["sl_oid"]} '
+                    _log(f'{coin} ledger-protected ({_ps_top or "legacy"}): '
+                         f'sl_oid={_prot_top["sl_oid"]} '
                          f'tp_oid={_prot_top["tp_oid"]} size={abs(_sz_top)} — '
                          f'skipping full enforcement (0 REST calls)')
                     return result
