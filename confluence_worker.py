@@ -118,27 +118,38 @@ def _load_state():
         _log(f"state load err: {e}")
 
 def _fetch_15m_bars(coin, n_bars=800):
-    """Use precog's info client to pull 15m candles. Returns list of
-    {t, o, h, l, c, v} with ONLY fully-closed bars aligned to 00/15/30/45.
-    Returns None on failure or if no new closed bar since last process."""
-    try:
-        # Current fully-closed 15m boundary (exclusive upper bound)
-        now_s = int(time.time())
-        BAR_S = 15 * 60
-        latest_closed_start = (now_s // BAR_S - 1) * BAR_S   # last fully-closed bar start (sec)
+    """Use OKX as candle source (drop-in for HL info.candles_snapshot).
+    Returns list of {t, o, h, l, c, v} with ONLY fully-closed bars aligned
+    to 00/15/30/45.  Returns None on failure or if no new closed bar since
+    last process.
 
-        end_ms = (latest_closed_start + BAR_S) * 1000  # request up to end of last closed bar
-        start_ms = end_ms - n_bars * BAR_S * 1000
-        raw = _precog.info.candles_snapshot(coin, '15m', start_ms, end_ms)
+    2026-04-25: migrated from HL info.candles_snapshot to okx_fetch.fetch_klines.
+    HL was rate-limiting confluence scans on 60+ coins. OKX is unmetered for
+    public candles. Same return shape, drop-in compatible.
+
+    OKX caps at 300 bars per call. eval_coin needs 100+ — 300 is sufficient
+    coverage (75h of 15m ≈ 3 days, ample for 24h CONF_WINDOW + HTF context).
+    """
+    try:
+        import okx_fetch
+        # OKX cap = 300; we still request up to n_bars but truncate
+        bars_to_request = min(int(n_bars), 300)
+        raw = okx_fetch.fetch_klines(coin, '15m', bars_to_request)
+        if not raw:
+            return None
+
+        BAR_S = 15 * 60
+        now_s = int(time.time())
+        latest_closed_start = (now_s // BAR_S - 1) * BAR_S
+
         bars = []
         for b in raw:
             t = int(b['t'])
             t_s = t // 1000 if t > 10**12 else t
-            # Drop any unaligned or not-yet-closed bar
             if t_s % BAR_S != 0:
                 continue
             if t_s > latest_closed_start:
-                continue  # still open bar — drop it
+                continue  # still-open bar — drop
             bars.append({
                 't': t_s,
                 'o': float(b['o']), 'h': float(b['h']),
