@@ -90,13 +90,16 @@ def hl_to_okx_inst(hl_coin):
 
 
 def fetch_klines(hl_coin, interval, n_bars):
-    """Drop-in replacement for HL's candles_snapshot.
+    """Drop-in replacement for HL's info.candles_snapshot().
 
-    Returns: list[(t_ms, open, high, low, close, volume)]
-    Same shape as precog.py's existing _snap_fetch return value (line ~8516).
+    Returns list of dicts in HL's exact shape:
+        [{'t': open_ms, 'o': open, 'h': high, 'l': low,
+          'c': close, 'v': volume}, ...]
+
+    Chronologically ordered (oldest first), matching HL's behavior.
 
     Returns [] on:
-        - Coin not on OKX (HL-native)
+        - Coin not on OKX (HL-native, delisted)
         - Network error
         - Empty/malformed response
     """
@@ -107,7 +110,6 @@ def fetch_klines(hl_coin, interval, n_bars):
     okx_bar = _TF_MAP.get(interval, interval)
 
     # OKX limit cap is 300 for /candles, 100 for /history-candles.
-    # For n_bars ≤ 300, /candles is fine.
     limit = max(1, min(int(n_bars), 300))
 
     params = urllib.parse.urlencode({
@@ -127,7 +129,6 @@ def fetch_klines(hl_coin, interval, n_bars):
     except Exception:
         return []
 
-    # OKX response shape: {"code":"0", "msg":"", "data":[[ts,o,h,l,c,v,...], ...]}
     if not isinstance(payload, dict) or payload.get('code') != '0':
         return []
     rows = payload.get('data') or []
@@ -137,19 +138,18 @@ def fetch_klines(hl_coin, interval, n_bars):
     out = []
     for k in rows:
         try:
-            out.append((
-                int(k[0]),       # ts_ms
-                float(k[1]),     # open
-                float(k[2]),     # high
-                float(k[3]),     # low
-                float(k[4]),     # close
-                float(k[5]),     # vol (in contracts)
-            ))
+            out.append({
+                't': int(k[0]),
+                'o': float(k[1]),
+                'h': float(k[2]),
+                'l': float(k[3]),
+                'c': float(k[4]),
+                'v': float(k[5]),
+            })
         except (IndexError, TypeError, ValueError):
             continue
 
-    # OKX returns newest-first; reverse for chronological order
-    # (matches HL's candles_snapshot ordering).
+    # OKX returns newest-first; reverse to chronological (matches HL).
     out.reverse()
     return out
 
@@ -181,5 +181,5 @@ if __name__ == '__main__':
     bars = fetch_klines(coin, tf, nb)
     print(f"Got {len(bars)} bars")
     for b in bars[-3:]:
-        ts = time.strftime('%Y-%m-%d %H:%M', time.gmtime(b[0]/1000))
-        print(f"  {ts}  o={b[1]:>10}  h={b[2]:>10}  l={b[3]:>10}  c={b[4]:>10}  v={b[5]:.1f}")
+        ts = time.strftime('%Y-%m-%d %H:%M', time.gmtime(b['t']/1000))
+        print(f"  {ts}  o={b['o']:>10}  h={b['h']:>10}  l={b['l']:>10}  c={b['c']:>10}  v={b['v']:.1f}")
