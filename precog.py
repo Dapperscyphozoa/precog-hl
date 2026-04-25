@@ -57,6 +57,7 @@ import order_state
 import position_ledger
 import hl_user_ws
 import atomic_entry
+import atomic_reconciler
 
 USE_ATOMIC_EXEC = os.environ.get('USE_ATOMIC_EXEC', '0') == '1'
 USE_LEDGER_FOR_SIZE = os.environ.get('USE_LEDGER_FOR_SIZE', '0') == '1'
@@ -2158,6 +2159,7 @@ def health():
                         'cooldown_sec': _ENFORCE_COOLDOWN_SEC,
                         'tracked_coins': len(_LAST_ENFORCE),
                     },
+                    'atomic_reconciler': atomic_reconciler.status(),
                     'use_atomic_exec': USE_ATOMIC_EXEC,
                     'use_ledger_for_size': USE_LEDGER_FOR_SIZE,
                     'recent_logs':LOG_BUFFER[-20:]})
@@ -9510,6 +9512,26 @@ if __name__ == '__main__':
     # Run precog signal loop in background thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
+
+    # 2026-04-25: atomic_reconciler daemon — wakes every 1s to check for
+    # PROVISIONAL ledger rows (atomic entries pending size confirmation).
+    # When actual fill differs from intent_size by >0.5%, cancels old SL/TP
+    # and places new at correct size. Only meaningful when USE_ATOMIC_EXEC=1;
+    # legacy entries are CONFIRMED at creation by enforce_protection's
+    # synchronous size verification.
+    try:
+        import atomic_reconciler
+        atomic_reconciler.init(
+            cancel_order_fn=lambda c, oid: exchange.cancel(c, oid),
+            place_sl_fn=place_native_sl,
+            place_tp_fn=place_native_tp,
+            emergency_close_fn=lambda c, r: close(c, reason=f'reconciler:{r}'),
+            log_fn=log,
+        )
+        atomic_reconciler.start()
+        log("[atomic_reconciler] daemon started")
+    except Exception as _re:
+        log(f"atomic_reconciler init failed (non-fatal): {_re}")
 
     # SYSTEM B — Confluence engine worker (optional, gated by env var)
     try:
