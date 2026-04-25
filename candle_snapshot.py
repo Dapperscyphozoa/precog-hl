@@ -46,7 +46,10 @@ _BUILD_LOCK = {
     'started_at': 0.0,
 }
 
-SNAPSHOT_TTL_SEC = 60.0
+SNAPSHOT_TTL_SEC = 180.0   # 2026-04-25: 60→180. With throttle raised to 0.7s
+                           # for CloudFront friendliness, build takes ~55s for
+                           # 78 coins. 60s TTL caused stale flips immediately
+                           # after each commit. 180s gives 3 builds of headroom.
 # Three-tier commit gate (2026-04-25):
 #   v3 used hard 0.90 — too strict, caused snapshot starvation when 84-87%
 #   coverage was operationally healthy. Replaced with monotonic-improvement
