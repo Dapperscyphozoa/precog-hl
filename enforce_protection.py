@@ -242,6 +242,41 @@ def enforce_protection(coin, is_long, entry_px,
         _STATS['enforced'] += 1
         _STATS['by_coin'][coin]['enforced'] += 1
 
+        # ─── LEDGER-FIRST EARLY EXIT (zero REST cost) ────────────────────
+        # 2026-04-25: if position_ledger reports the position has both
+        # sl_oid and tp_oid set, AND ws_is_fresh, skip the entire enforce
+        # sequence. This converts reconciler-driven enforcement (every 15s)
+        # from a 20+ REST call cycle into a single ledger lookup when
+        # protection is already in place. The on_order_update handler
+        # clears sl_oid/tp_oid on cancellation events, so a removed trigger
+        # is reflected within seconds — no risk of false "protected"
+        # positives lingering.
+        try:
+            import position_ledger as _pl_top
+            if _pl_top.ws_is_fresh(max_age_sec=30):
+                _prot_top = _pl_top.get_protection(coin)
+                _sz_top = _pl_top.get_size(coin)
+                if (_prot_top
+                        and _prot_top.get('sl_oid') is not None
+                        and _prot_top.get('tp_oid') is not None
+                        and _sz_top is not None
+                        and abs(_sz_top) > 1e-9):
+                    result['success'] = True
+                    result['actual_size'] = abs(_sz_top)
+                    result['sl_oid'] = _prot_top.get('sl_oid')
+                    result['tp_oid'] = _prot_top.get('tp_oid')
+                    result['reason'] = 'ledger_already_protected'
+                    result['duration_sec'] = time.time() - enforce_start
+                    _STATS['verified_ok'] += 1
+                    clear_halt(coin)
+                    _log(f'{coin} ledger-protected: sl_oid={_prot_top["sl_oid"]} '
+                         f'tp_oid={_prot_top["tp_oid"]} size={abs(_sz_top)} — '
+                         f'skipping full enforcement (0 REST calls)')
+                    return result
+        except Exception as _ple:
+            # Ledger check is opportunistic; failure falls through to legacy path
+            pass
+
         # 1. Authoritative size from exchange (with settlement wait)
         if wait_settle:
             actual_size = _wait_for_size_settlement(fetch_size_fn, coin, timeout=3.0)
@@ -491,31 +526,42 @@ def enforce_protection(coin, is_long, entry_px,
         final_sl_ok = sl_verified
         verify_start = time.time()
         while time.time() - verify_start < TP_DEADLINE_SEC:
-            # 2026-04-25: ledger-first SL check on every iteration. If WS
-            # ledger shows sl_oid is set, that's authoritative even if REST
-            # fetch_orders returns it briefly absent.
+            # 2026-04-25: ledger-first check for BOTH SL and TP. on_webdata2
+            # captures both trigger oids in the position_ledger row when WS
+            # ticks. If WS-fresh and both oids are set, no REST poll needed.
             try:
                 import position_ledger as _pl_v
                 if _pl_v.ws_is_fresh(max_age_sec=30):
                     _prot_v = _pl_v.get_protection(coin)
-                    if _prot_v and _prot_v.get('sl_oid'):
-                        final_sl_ok = True
+                    if _prot_v:
+                        if _prot_v.get('sl_oid'):
+                            final_sl_ok = True
+                        if _prot_v.get('tp_oid'):
+                            final_tp_ok = True
+                        if final_sl_ok and final_tp_ok:
+                            full_verified = True
+                            _log(f'{coin} TP+SL verified via ledger: '
+                                 f'sl_oid={_prot_v["sl_oid"]} tp_oid={_prot_v["tp_oid"]} '
+                                 f'(0 REST calls)')
+                            break
             except Exception:
                 pass
+            # Ledger didn't fully confirm — fall back to REST poll
             try:
                 verify_orders = fetch_orders_fn(coin)
                 v_tp = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'tp']
                 v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
-                final_tp_ok = (len(v_tp) == 1 and abs(float(v_tp[0].get('sz', 0)) - actual_size) < 1e-9)
-                # If REST shows SL valid, accept; if not but ledger says SL is set, keep final_sl_ok=True from above
-                if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
-                    final_sl_ok = True
+                if not final_tp_ok:
+                    final_tp_ok = (len(v_tp) == 1 and abs(float(v_tp[0].get('sz', 0)) - actual_size) < 1e-9)
+                if not final_sl_ok:
+                    if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
+                        final_sl_ok = True
                 if final_tp_ok and final_sl_ok:
                     full_verified = True
                     break
             except Exception:
                 pass
-            time.sleep(0.5)
+            time.sleep(1.0)  # was 0.5s — slower poll, ledger handles fresh updates anyway
 
         result['duration_sec'] = time.time() - enforce_start
 
