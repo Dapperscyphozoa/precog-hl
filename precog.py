@@ -4382,30 +4382,18 @@ def mt4_stats_summary():
     })
 
 
-COINS = [
-    'SOL','LINK','UNI','ENS','AAVE','POL','SAND','APT','MON','COMP',
-    'AERO','LIT','SPX','kPEPE','kBONK','kSHIB','MORPHO','JUP','XRP',
-    'SUSHI','ADA','WLD','PUMP','PENGU','FARTCOIN',
-    'AIXBT','AVAX','PENDLE','TAO','WIF',
-    'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
-    'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
-    'AR','GALA','VIRTUAL',
-    # Tuner-passed candidates (14d OOS with V3+ATR, WR>=65%, PnL>1%):
-    'RESOLV', 'HEMI', 'STABLE', 'BABY', 'TST', 'YZY', 'PROMPT', 'DOOD', 'FOGO', 'NXPC', 'INIT', 'APEX', 'WLFI',  # batch 2
-    'MAVIA', 'HMSTR', 'ZEREBRO', 'BLAST', 'BOME', 'MANTA', 'CHILLGUY', 'RSR', 'MELANIA', 'SCR', 'BIO', 'TNSR', 'MINA', 'NOT', 'BRETT', 'ME', 'IOTA', 'DYM', 'ORDI', 'POPCAT', 'SAGA', 'FIL', 'REZ', 'BANANA', 'kNEIRO', 'GMT', 'NEO', 'MAV',
-    # Tier 3 expansion (+50)
-    'RENDER','RUNE','STX','CAKE','ETC','MKR','ZEC','NEO','IMX',
-    'MINA','ICP','GMX',
-    'FXS','DYDX','SNX','CRV','COMP','ILV',
-    'TURBO','MEW','GOAT','PNUT','KAS','MEME','NEIROETH',
-    'HBAR','TRX','MANTA','HMSTR','SEI','ZK',
-    # Tier 4 expansion: high-volume HL perps missing from roster (24h volume > $500k)
-    # ETH added — previously absent despite $1.28B/day volume (second-largest crypto).
-    # HYPE = Hyperliquid native, $318M/day. DOGE/ARB/NEAR/BCH = major caps missing.
-    'ETH','HYPE','DOGE','ARB','NEAR','BCH','STRK','ENA','ZRO','TRUMP',
-    'ETHFI','ONDO','EIGEN','AVNT','PAXG','GRASS','FET','SKY','ASTER','CHIP'
-
-]
+# UNIVERSE: elite-tier coins only (71 = 7 PURE + 20 NINETY_99 + 34 EIGHTY_89 + 10 SEVENTY_79).
+# Sourced dynamically from percoin_configs — adding/removing a tier coin auto-updates the scan.
+# Reasoning: non-elite coins were getting -15 conf penalty + soft-gates → 95%+ never cleared
+# the conviction floor anyway. Scanning 142 coins wasted API calls (HL 429s on every tick),
+# slowed candle fetches, and added zero alpha. 50% smaller universe = no rate-limit hits,
+# faster ticks, identical trade decisions.
+COINS = sorted(set(
+    list(percoin_configs.PURE_14.keys()) +
+    list(percoin_configs.NINETY_99.keys()) +
+    list(percoin_configs.EIGHTY_89.keys()) +
+    list(percoin_configs.SEVENTY_79.keys())
+))
 
 CHASE_GATE_COINS = {'BTC','BNB','DOT','ATOM','SUI','LDO','INJ','UMA','ALGO',
                     'BLUR','VVV','APE','OP','TON','TIA','LTC','MOODENG',
