@@ -2052,6 +2052,53 @@ def confluence_reset():
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/confluence/trades', methods=['GET'])
+def confluence_trades():
+    """Per-trade telemetry: closed-trade ring buffer with summary breakdown.
+    Use ?n=<int> to limit (default 50, max 500).
+    Returns: items + summary by exit_reason + by confluence_score + by coin.
+    """
+    from flask import request
+    n = min(int(request.args.get('n', '50')), 500)
+    try:
+        import confluence_worker as cw
+        st = cw.status()
+        trades = st.get('closed_trades', [])
+        recent = trades[-n:] if trades else []
+        # Summary aggregations
+        from collections import Counter, defaultdict
+        by_reason = Counter(t.get('exit_reason', '?') for t in trades)
+        by_score = Counter(t.get('confluence_score', 0) for t in trades)
+        by_coin = defaultdict(lambda: {'n': 0, 'w': 0, 'l': 0, 'pnl': 0.0})
+        durations = []
+        wins = 0
+        for t in trades:
+            c = t.get('coin', '?')
+            pnl = t.get('pnl_pct', 0.0)
+            by_coin[c]['n'] += 1
+            if pnl > 0:
+                by_coin[c]['w'] += 1
+                wins += 1
+            else:
+                by_coin[c]['l'] += 1
+            by_coin[c]['pnl'] += pnl
+            durations.append(t.get('duration_min', 0))
+        n_total = len(trades)
+        avg_dur = (sum(durations) / len(durations)) if durations else 0
+        wr = (wins / n_total * 100) if n_total > 0 else 0
+        return jsonify({
+            'total_closed': n_total,
+            'wr_pct': round(wr, 1),
+            'avg_duration_min': round(avg_dur, 1),
+            'by_exit_reason': dict(by_reason),
+            'by_confluence_score': {str(k): v for k, v in by_score.items()},
+            'top_coins': dict(sorted(by_coin.items(), key=lambda kv: -kv[1]['n'])[:20]),
+            'recent_trades': recent,
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/regime', methods=['GET'])
 def regime_status():
     """Return current regime detector state + per-coin coverage."""
