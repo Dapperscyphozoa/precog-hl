@@ -6978,9 +6978,58 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             _total_penalty = 15 + _ticker_gate_penalty
             conf_score = max(0, conf_score - _total_penalty)
             log(f"{coin} {sig} non-elite conf {_orig_conf}→{conf_score} (-15 base, -{_ticker_gate_penalty} gate)")
+
+        # ─── LEVER 1 PATCH 1: MULTI-ENGINE CONFLUENCE BOOST (2026-04-25) ───
+        # Apply AFTER scoring, BEFORE floor check. Re-scan engines on the
+        # finalized sig+bar_ts (signal may have switched from PIVOT to BB/IB
+        # during cascade). True confluence = independent agreement.
+        _conf_engines = set()
+        try:
+            if sig and bar_ts:
+                _conf_engines.add(signal_engine or 'PIVOT')
+                try:
+                    _alt_pv, _alt_ts = signal(candles, 0, 0, coin=coin)
+                    if _alt_pv == sig and _alt_ts and abs(_alt_ts - bar_ts) <= 15*60*1000:
+                        _conf_engines.add('PIVOT')
+                except Exception: pass
+                try:
+                    _bb_sig, _bb_ts = bb_signal(candles, coin=coin, last_buy_ts=0, last_sell_ts=0)
+                    if _bb_sig == sig and _bb_ts and abs(_bb_ts - bar_ts) <= 15*60*1000:
+                        _conf_engines.add('BB_REJ')
+                except Exception: pass
+                try:
+                    _ib_sig, _ib_ts = ib_signal(candles, coin=coin, last_buy_ts=0, last_sell_ts=0)
+                    if _ib_sig == sig and _ib_ts and abs(_ib_ts - bar_ts) <= 15*60*1000:
+                        _conf_engines.add('INSIDE_BAR')
+                except Exception: pass
+        except Exception: pass
+        _conf_count = len(_conf_engines)
+        _multi_boost = 0
+        if _conf_count >= 3:
+            _multi_boost = 8
+        elif _conf_count >= 2:
+            _multi_boost = 5
+        if _multi_boost > 0:
+            _pre = conf_score
+            conf_score += _multi_boost
+            log(f"{coin} {sig} CONFLUENCE +{_multi_boost} ({_conf_count} engines: {sorted(_conf_engines)}) conf {_pre}→{conf_score}")
+
         # Pass current regime so floor adapts: 30 in trending, 15 in chop
         import regime_detector as _regdet
         cur_regime = _regdet.get_regime()
+
+        # ─── LEVER 1 PATCH 2: SELECTIVE CHOP SOFTENING (2026-04-25) ───
+        # Don't crush strong signals in chop. Lift conf+2 if already strong (≥12),
+        # additional -2 only if weak. Final: floor still applies.
+        if cur_regime == 'chop' or cur_regime is None:
+            if conf_score >= 12:
+                _pre = conf_score
+                conf_score += 2
+                log(f"{coin} {sig} CHOP-LIFT (strong): conf {_pre}→{conf_score}")
+            elif conf_score < 10:
+                # Already at/below floor — no further punish needed; floor handles it.
+                pass
+
         size_mult = confidence.size_multiplier(conf_score, cur_regime)
         if size_mult <= 0.0:
             log(f"{coin} {sig} SKIP: conf={conf_score} below conviction floor (regime={cur_regime}) {conf_breakdown}")
@@ -7404,11 +7453,18 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 else:
                     log(f"ALLOW {coin} | regime={_regime} sig={sig} conf={_conf_pre} note=counter_trend_high_conf")
         # Guard 3: per-coin WR filter (with bootstrap fallback)
+        # ─── LEVER 1 PATCH 3: HIGH-CONF BYPASS ON DUPLICATE PENALTY ───
+        # If conf already passed at high threshold (conf≥65), don't double-penalize
+        # for low coin WR — conviction has already been validated by score stack.
         if not _bypass:
+            _conf_for_wr = locals().get('conf_score', None)
             wr_block, wr_reason = _coin_wr_blocks_entry(coin)
             if wr_block:
-                log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=coin_wr/{wr_reason}")
-                return
+                if _conf_for_wr is not None and _conf_for_wr >= 65:
+                    log(f"ALLOW {coin} | regime={_regime} sig={sig} conf={_conf_for_wr} wr={_coin_wr:.2f} note=high_conf_bypass_wr_filter")
+                else:
+                    log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=coin_wr/{wr_reason}")
+                    return
             elif wr_reason and 'unproven' in wr_reason:
                 # Allowed but log for visibility (non-blocking)
                 log(f"ALLOW {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} note=unproven/{wr_reason}")
