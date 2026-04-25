@@ -5015,7 +5015,7 @@ CANDLE_COLD_SEC = 180   # was 60; longer back-off after 429 to break cascade
 # 78 coins × 250ms = 19.5s of cumulative throttle but cache hits absorb most.
 _HL_THROTTLE_LOCK = threading.Lock()
 _HL_LAST_CALL = [0.0]   # mutable container for thread-shared state
-HL_MIN_GAP_SEC = 1.0    # 2026-04-25: 0.7→1.0. Even at 0.7s/1.4 req/s,
+HL_MIN_GAP_SEC = 2.0    # bumped to 2s gap = 0.5 req/s sustained
                         # CloudFront PoP HIO52-P5 still rate-limited
                         # specific coins. 1.0s = 1 req/s sustained,
                         # ~80s build for 78 coins (within 180s TTL).
