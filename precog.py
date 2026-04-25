@@ -38,6 +38,9 @@ import cvd_ws
 import oi_tracker
 import funding_arb
 
+# 2026-04-25: OKX-based candle fetcher replaces HL REST (CloudFront 429 cascade
+# on shared cloud IPs). Same dict shape as info.candles_snapshot for drop-in.
+import okx_fetch
 # Single-snapshot candle pipeline (collapses 78× per-tick fan-out into one
 # controlled snapshot rebuild per cycle — eliminates CloudFront 429 cascades).
 try:
@@ -4621,7 +4624,7 @@ def fetch_htf(coin, interval='4h', bars=30):
     end = int(time.time()*1000)
     start = end - bars*sec*1000
     try:
-        d = info.candles_snapshot(coin, interval, start, end)
+        d = okx_fetch.fetch_klines(coin, interval, bars)
         result = [(int(x['t']), float(x['o']), float(x['h']), float(x['l']), float(x['c']), float(x['v'])) for x in d]
         _HTF_CACHE[k] = {'data': result, 'ts': now}
         return result
@@ -5963,30 +5966,14 @@ def run_profit_management(state, live_positions):
                 _c1h = _CANDLE_CACHE.get(f'htf_1h_{coin}')
                 if not _c1h or time.time() - _c1h['ts'] > 600:
                     _hl_throttle()
-                    _body = json.dumps({'type':'candleSnapshot',
-                        'req':{'coin':coin,'interval':'1h',
-                               'startTime': int(time.time()*1000) - 30*3600*1000,
-                               'endTime': int(time.time()*1000)}}).encode()
-                    _req = _ureq.Request('https://api.hyperliquid.xyz/info',
-                        method='POST', data=_body,
-                        headers={'Content-Type':'application/json'})
-                    with _ureq.urlopen(_req, timeout=3) as _resp:
-                        _data_1h = json.loads(_resp.read())
+                    _data_1h = okx_fetch.fetch_klines(coin, '1h', 30)
                     _CANDLE_CACHE[f'htf_1h_{coin}'] = {'data': _data_1h, 'ts': time.time()}
                     _c1h = _CANDLE_CACHE[f'htf_1h_{coin}']
                 # 4h bias
                 _c4h = _CANDLE_CACHE.get(f'htf_4h_{coin}')
                 if not _c4h or time.time() - _c4h['ts'] > 600:
                     _hl_throttle()
-                    _body = json.dumps({'type':'candleSnapshot',
-                        'req':{'coin':coin,'interval':'4h',
-                               'startTime': int(time.time()*1000) - 30*4*3600*1000,
-                               'endTime': int(time.time()*1000)}}).encode()
-                    _req = _ureq.Request('https://api.hyperliquid.xyz/info',
-                        method='POST', data=_body,
-                        headers={'Content-Type':'application/json'})
-                    with _ureq.urlopen(_req, timeout=3) as _resp:
-                        _data_4h = json.loads(_resp.read())
+                    _data_4h = okx_fetch.fetch_klines(coin, '4h', 30)
                     _CANDLE_CACHE[f'htf_4h_{coin}'] = {'data': _data_4h, 'ts': time.time()}
                     _c4h = _CANDLE_CACHE[f'htf_4h_{coin}']
             except Exception:
@@ -7373,15 +7360,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     _c_4h = _cached['data']
                 else:
                     _hl_throttle()
-                    _body = json.dumps({'type':'candleSnapshot',
-                        'req':{'coin':coin,'interval':'4h',
-                               'startTime': int(time.time()*1000) - 30*4*3600*1000,
-                               'endTime': int(time.time()*1000)}}).encode()
-                    _req = _ureq.Request('https://api.hyperliquid.xyz/info',
-                        method='POST', data=_body,
-                        headers={'Content-Type':'application/json'})
-                    with _ureq.urlopen(_req, timeout=4) as _resp:
-                        _c_4h = json.loads(_resp.read())
+                    _c_4h = okx_fetch.fetch_klines(coin, '4h', 30)
                     _CANDLE_CACHE[_cache_key] = {'data': _c_4h, 'ts': time.time()}
             except Exception:
                 pass
@@ -8501,17 +8480,23 @@ def main():
                         tf_sec = {'15m': 900, '1h': 3600, '4h': 14400}.get(tf, 900)
                         start_ms = end - nb * tf_sec * 1000
                         try:
-                            d = info.candles_snapshot(c, tf, start_ms, end)
+                            d = okx_fetch.fetch_klines(c, tf, nb)
+                            if not d:
+                                # OKX-side absence (HL-only coin or delisted) is
+                                # treated like KeyError from HL SDK — quarantine
+                                # so we stop trying this coin every tick.
+                                _UNKNOWN_COINS.add(c)
+                                log(f"[snapshot] AUTO-QUARANTINE {c}: not on OKX (returns empty)")
+                                return []
                         except KeyError as _ke:
                             _UNKNOWN_COINS.add(c)
-                            log(f"[snapshot] AUTO-QUARANTINE {c}: not in HL universe (KeyError {_ke})")
+                            log(f"[snapshot] AUTO-QUARANTINE {c}: not in OKX universe (KeyError {_ke})")
                             return []
                         except Exception as _e:
                             es = str(_e)
                             if '429' in es:
-                                # Cool this coin down for 90s — by then either
-                                # CloudFront limit window has reset or LKG is
-                                # already serving it from a previous successful build.
+                                # OKX shouldn't 429 us, but keep the cooldown
+                                # mechanism in place defensively.
                                 _CANDLE_COLD[c] = time.time() + 90
                             raise   # let candle_snapshot.build_snapshot count + log
                         return [(int(b['t']), float(b['o']), float(b['h']),
@@ -8773,8 +8758,11 @@ def main():
                             now_ms = int(time.time() * 1000)
                             if now_ms - since_ts_ms < 60_000:
                                 return []  # less than 1 candle available
-                            cs = info.candles_snapshot(
-                                coin, '1m', since_ts_ms, now_ms)
+                            # Approximate bar count from time range; OKX doesn't
+                            # accept arbitrary start/end so we ask for enough
+                            # 1m bars to cover and let downstream filter by ts.
+                            n_bars_needed = max(1, int((now_ms - since_ts_ms) / 60_000) + 5)
+                            cs = okx_fetch.fetch_klines(coin, '1m', min(n_bars_needed, 300))
                             return cs or []
                         except Exception:
                             return []
