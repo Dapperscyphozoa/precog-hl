@@ -77,6 +77,10 @@ _state = {
     'killed_coins': {},          # coin -> {reason, ts}
     # fix 5: per-coin live perf
     'coin_stats': {},            # coin -> {n, w, l, pnl_pct}
+    # ─── TELEMETRY 2026-04-25: per-trade close log ───
+    # Ring buffer of last N closed trades. Used for downstream eval:
+    # which scores actually work, which coins are dead weight, exit-reason mix.
+    'closed_trades': [],         # list of dicts (capped at 500), newest last
 }
 _state_lock = threading.Lock()
 
@@ -423,6 +427,34 @@ def _close_position(coin, reason, pnl=None):
     elif reason == 'timeout':
         with _state_lock:
             _state['timeouts'] += 1
+
+    # ─── TELEMETRY 2026-04-25: per-trade close log ───
+    # Schema (per spec): coin, side, confluence_score (n_sys), exit_reason,
+    # duration_min, pnl_pct, plus universe tag for audit and entry/exit prices.
+    try:
+        now = int(time.time())
+        duration_s = now - pos.get('ts', now)
+        trade_record = {
+            'coin': coin,
+            'side': pos.get('side'),
+            'confluence_score': pos.get('n_sys'),       # 2 or 3 systems agreed
+            'systems': pos.get('systems', []),
+            'entry': pos.get('entry'),
+            'exit_reason': reason,
+            'duration_min': round(duration_s / 60.0, 1),
+            'pnl_pct': round((pnl * 100) if pnl is not None else 0.0, 3),
+            'opened_ts': pos.get('ts'),
+            'closed_ts': now,
+            'universe': pos.get('universe', 'UNKNOWN'),
+            'sl_at_be': pos.get('sl_at_be', False),
+        }
+        with _state_lock:
+            _state['closed_trades'].append(trade_record)
+            # Cap at 500 — drop oldest
+            if len(_state['closed_trades']) > 500:
+                _state['closed_trades'] = _state['closed_trades'][-500:]
+    except Exception as e:
+        _log(f"{coin} telemetry record err: {e}")
 
     # ─── FIX 5: per-coin tracking + decay check ───
     _update_coin_stats(coin, pnl if pnl is not None else 0.0)
