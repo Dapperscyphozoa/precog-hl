@@ -524,11 +524,13 @@ def _profit_lock_check(coin, live_pos, mark_px):
 MAX_TP_PCT = float(os.environ.get('MAX_TP_PCT', '0') or 0)  # 0 = no cap
 
 # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
-# Per-coin configs mostly range 2.0-4.0 R:R (typical: 3% SL / 6% TP = 2.0).
-# Default 2.0 accepts normal configs, rejects actually-inverted setups
-# (where TP < SL). Env override: MIN_RR=2.0 (default), set MIN_RR=0 to disable.
-# (Was 3.0 originally — rejected half the coin universe, produced 0 trades.)
-MIN_RR = float(os.environ.get('MIN_RR', '2.0'))
+# 2026-04-25: 2.0 → 1.2. Global 2.0 was overriding empirical grid sweep configs.
+# Coins like STRK/TRX/POLYX/LTC/NEAR have grid-validated TP/SL ratios in the
+# 1.25-1.43 range (Wilson_lb≥50% AFTER fees+slippage at those exact ratios).
+# Forcing 2.0 was rejecting statistically valid setups. New default 1.2 admits
+# the data-validated band; per-coin can still override via percoin_configs key
+# 'min_rr'. 1.2 > 1.0 still blocks actually-inverted setups.
+MIN_RR = float(os.environ.get('MIN_RR', '1.2'))
 
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
@@ -7393,18 +7395,22 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # agreement), which is a different module. Revisit when we have that.
 
     # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
-    # Reads per-coin SL/TP from percoin_configs (OOS-tuned). Rejects setups
-    # where reward < MIN_RR × risk. Prevents the inverted-R:R trades that
-    # were bleeding the account before strategic layer got fixed.
+    # 2026-04-25: per-coin min_rr override added.
+    # Each coin's percoin_configs entry can specify its own 'min_rr' (defaults
+    # to global MIN_RR=1.2). Grid sweep validated each coin's TP/SL combo as
+    # profitable AT that specific R:R after fees+slippage — global rule should
+    # not override per-coin empirical reality. Falls through to global only
+    # when a coin doesn't specify its own min_rr.
     if MIN_RR > 0:
         try:
             _cfg = percoin_configs.get_config(coin) if percoin_configs.ELITE_MODE else None
             _sl_cfg = (_cfg or {}).get('SL')
             _tp_cfg = (_cfg or {}).get('TP')
+            _coin_min_rr = (_cfg or {}).get('min_rr', MIN_RR)
             if _sl_cfg and _tp_cfg and _sl_cfg > 0:
                 _rr = _tp_cfg / _sl_cfg
-                if _rr < MIN_RR:
-                    log(f"{coin} {sig} R:R REJECT: TP={_tp_cfg*100:.2f}% / SL={_sl_cfg*100:.2f}% = {_rr:.2f} < {MIN_RR}")
+                if _rr < _coin_min_rr:
+                    log(f"{coin} {sig} R:R REJECT: TP={_tp_cfg*100:.2f}% / SL={_sl_cfg*100:.2f}% = {_rr:.2f} < {_coin_min_rr} (per-coin)")
                     return
         except Exception as _rre:
             log(f"{coin} R:R check err (fail-open): {_rre}")
@@ -8347,10 +8353,11 @@ def main():
                                         _wcfg = percoin_configs.get_config(coin) if percoin_configs.ELITE_MODE else None
                                         _wsl = (_wcfg or {}).get('SL')
                                         _wtp = (_wcfg or {}).get('TP')
+                                        _wmin_rr = (_wcfg or {}).get('min_rr', MIN_RR)
                                         if _wsl and _wtp and _wsl > 0:
                                             _wrr = _wtp / _wsl
-                                            if _wrr < MIN_RR:
-                                                log(f"WEBHOOK {coin} {side_str} R:R REJECT: {_wrr:.2f} < {MIN_RR}")
+                                            if _wrr < _wmin_rr:
+                                                log(f"WEBHOOK {coin} {side_str} R:R REJECT: {_wrr:.2f} < {_wmin_rr} (per-coin)")
                                                 wh_count += 1; continue
                                     except Exception: pass
                                 wh_gate_mult = 1.0
