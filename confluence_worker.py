@@ -186,10 +186,20 @@ def _size_and_fire(coin, signal, equity):
     Fixed-risk sizing: (equity * risk_pct) / sl_pct => notional USD.
     Convert to coin units using signal entry price.
     Fire through precog's `exchange.order`.
+
+    2026-04-25: respects FORCE_NOTIONAL_USD env override (debug mode).
+    When set, all System B trades use fixed notional regardless of risk math.
     """
     sl_pct = signal['sl_pct']
     risk_usd = equity * RISK_PCT
     notional_usd = risk_usd / sl_pct
+    # ─── DEBUG MODE: force fixed notional if env set ───
+    try:
+        _force = float(os.environ.get('FORCE_NOTIONAL_USD', '11'))
+        if _force > 0:
+            notional_usd = _force
+    except Exception:
+        pass
     entry = signal['entry']
     size_coin = notional_usd / entry
 
