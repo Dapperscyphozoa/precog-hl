@@ -603,6 +603,14 @@ MAX_TP_PCT = float(os.environ.get('MAX_TP_PCT', '0') or 0)  # 0 = no cap
 # 'min_rr'. 1.2 > 1.0 still blocks actually-inverted setups.
 MIN_RR = float(os.environ.get('MIN_RR', '1.2'))
 
+# 2026-04-25: DEBUG MODE — force every trade to fixed $11 notional.
+# Set FORCE_NOTIONAL_USD=11 in env to override all sizing logic (risk_mult,
+# leverage, confluence, session scalers, etc.) and produce ~$11 trades
+# regardless of computed size. ($11 not $10 — buffer above HL's $10 minimum
+# for rounding + slippage so orders don't bounce.) Use for diagnostic phase
+# only. Set to 0 to disable and resume normal sizing.
+FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '11'))
+
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
     import mtf_context as _mtf
@@ -5454,6 +5462,11 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     try: tier_risk = risk_ladder.get_risk()
     except Exception: tier_risk = risk_pct
     raw = equity * tier_risk * risk_mult * news_mult * confluence * actual_lev / px
+    # 2026-04-25: DEBUG mode — force fixed notional regardless of sizing logic.
+    # Bypasses risk_mult, leverage, confluence, session, news, etc. Pure fixed
+    # USD per trade for clean data collection during bug-hunt phase.
+    if FORCE_NOTIONAL_USD > 0:
+        raw = FORCE_NOTIONAL_USD / px
     if raw>=100: return round(raw,0)
     if raw>=10:  return round(raw,1)
     if raw>=1:   return round(raw,2)
