@@ -13,6 +13,13 @@ an explicit state machine:
 Emergency close fires ONLY when state = MISSING (after grace_cycles confirmed
 absences). Single-shot timer never triggers close directly.
 
+2026-04-25: ledger-first confirmation. position_ledger consumes the HL
+webData2 WS stream and tracks live trigger oids per coin. check_state now
+queries the ledger BEFORE polling REST — if the ledger sees a trigger
+on this coin, that's a confirmation and we skip the REST round-trip.
+This eliminates the false-negative MISSING→emergency-close cascade where
+SL was placed successfully but REST visibility lagged 5–10s behind.
+
 Public API:
   mark_sent(coin, order_id, size, side, ts) — call after exchange.order returns
   confirm(coin) — call when fetch_orders shows SL exists
@@ -21,19 +28,21 @@ Public API:
   status() — dict for /health diagnostics
 
 Behavior:
-  - mark_sent: state=SENT, grace_cycles_remaining=2
+  - mark_sent: state=SENT, grace_cycles_remaining=4
   - confirm: state=CONFIRMED, idempotent
   - check_state called every reconciler cycle:
       if state==CONFIRMED → return CONFIRMED
+      if ledger fresh AND ledger.sl_oid set → CONFIRMED
       if state==SENT/PENDING:
-          if recently sent (<5s): return PENDING (always — let exchange propagate)
-          poll fetch_orders via callback
+          if recently sent (<12s): return PENDING (always — let exchange propagate)
+          poll fetch_orders via callback (REST fallback)
           if visible: state=CONFIRMED, return CONFIRMED
           else: grace_cycles_remaining -= 1
                 if remaining > 0: state=PENDING, return PENDING
                 else: state=MISSING, return MISSING (real failure)
 """
 
+import os
 import time
 import threading
 
@@ -44,9 +53,28 @@ PENDING = 'PENDING'
 CONFIRMED = 'CONFIRMED'
 MISSING = 'MISSING'
 
-# Configuration
-GRACE_CYCLES = 2          # tolerate 2 invisible polls before declaring MISSING
-PROPAGATION_GRACE_SEC = 5.0  # always treat as PENDING for first 5s after send
+# Configuration — env-overridable. Defaults raised 2026-04-25 to absorb HL
+# REST visibility lag (5-10s typical, 15s+ during congestion). Lower numbers
+# were producing false MISSING → false emergency close → killed valid trades.
+GRACE_CYCLES = int(os.environ.get('SL_GRACE_CYCLES', '4'))
+PROPAGATION_GRACE_SEC = float(os.environ.get('SL_PROPAGATION_GRACE_SEC', '12.0'))
+
+# Ledger integration — when True, query position_ledger first. Only falls
+# through to REST poll if ledger is stale or doesn't know about this coin.
+USE_LEDGER_FOR_SL_CONFIRM = os.environ.get('USE_LEDGER_FOR_SL_CONFIRM', '1') == '1'
+
+# Lazy import — position_ledger may not be available in older deploys
+_ledger_mod = None
+def _get_ledger():
+    global _ledger_mod
+    if _ledger_mod is None:
+        try:
+            import position_ledger as _pl
+            _ledger_mod = _pl
+        except Exception:
+            _ledger_mod = False  # sentinel — tried and failed
+    return _ledger_mod or None
+
 
 _TRACKER = {}             # {coin: {state, ts_sent, size, side, grace_remaining, last_poll_ts}}
 _LOCK = threading.Lock()
@@ -60,6 +88,8 @@ _STATS = {
     'pending_returns': 0,
     'confirmed_returns': 0,
     'missing_returns': 0,
+    'ledger_confirms': 0,
+    'rest_confirms': 0,
 }
 
 
@@ -126,6 +156,33 @@ def check_state(coin, fetch_orders_fn=None, expected_size=None, log_fn=None):
         _STATS['missing_returns'] += 1
         return MISSING, 'previously_marked_missing'
 
+    # ─── LEDGER-FIRST CHECK ──────────────────────────────────────────
+    # 2026-04-25: position_ledger is fed by HL webData2 WS stream which
+    # contains open trigger orders per coin. If the ledger sees an SL
+    # trigger on this coin, that's authoritative confirmation — no need
+    # for REST. This eliminates the 5-10s false-negative window where
+    # SL was placed but REST visibility lagged.
+    if USE_LEDGER_FOR_SL_CONFIRM:
+        led = _get_ledger()
+        if led is not None:
+            try:
+                if led.ws_is_fresh(max_age_sec=30):
+                    prot = led.get_protection(coin_u)
+                    if prot and prot.get('sl_oid'):
+                        with _LOCK:
+                            if coin_u in _TRACKER:
+                                _TRACKER[coin_u]['state'] = CONFIRMED
+                                _TRACKER[coin_u]['confirmed_ts'] = time.time()
+                        _STATS['confirmed'] += 1
+                        _STATS['confirmed_returns'] += 1
+                        _STATS['ledger_confirms'] += 1
+                        if log_fn:
+                            log_fn(f"[sl_state] {coin_u} CONFIRMED via ledger "
+                                   f"(sl_oid={prot['sl_oid']})")
+                        return CONFIRMED, 'confirmed_via_ledger'
+            except Exception:
+                pass  # Fall through to REST poll
+
     # Within propagation grace window — always pending, never poll
     elapsed = time.time() - ts_sent
     if elapsed < PROPAGATION_GRACE_SEC:
@@ -154,8 +211,9 @@ def check_state(coin, fetch_orders_fn=None, expected_size=None, log_fn=None):
                         _TRACKER[coin_u]['confirmed_ts'] = time.time()
                 _STATS['confirmed'] += 1
                 _STATS['confirmed_returns'] += 1
+                _STATS['rest_confirms'] += 1
                 if log_fn:
-                    log_fn(f"[sl_state] {coin_u} CONFIRMED on poll (was {state} after {elapsed:.1f}s)")
+                    log_fn(f"[sl_state] {coin_u} CONFIRMED on REST poll (was {state} after {elapsed:.1f}s)")
                 return CONFIRMED, f'confirmed_on_poll_after_{elapsed:.1f}s'
         except Exception as e:
             if log_fn:
