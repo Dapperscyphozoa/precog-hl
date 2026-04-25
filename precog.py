@@ -27,6 +27,7 @@ import profit_lock
 import leverage_map
 import wall_bounce
 import wall_exhaustion
+import funding_engine
 import liquidation_ws
 import bybit_lead
 import funding_filter
@@ -2031,6 +2032,7 @@ def engines_status():
             'PULLBACK': True,
             'WALL_BNC': v_ok('by') or v_ok('bn'),
             'WALL_EXH': v_ok('by') or v_ok('bn'),
+            'FUNDING_MR': funding_engine.status().get('enabled', False),
             'LIQ_CSCD': True,
             'CVD_DIV': True,
         },
@@ -2096,6 +2098,19 @@ def orderbook_depth(coin):
                         'venues':agg.get('venue_count',0)})
     except Exception as e:
         return jsonify({'err':str(e)})
+
+@app.route('/funding', methods=['GET'])
+def funding_diagnostics():
+    """Funding mean-reversion engine diagnostics. Shows top extreme funding
+    rates across the universe and which would fire if FUNDING_MR_ENABLED=1."""
+    try:
+        return jsonify({
+            'engine_status': funding_engine.status(),
+            'top_extremes': funding_engine.get_top_funding_extremes(20),
+            'funding_arb_status': funding_arb.status(),
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)})
 
 @app.route('/signals', methods=['GET'])
 def signals_feed():
@@ -2163,6 +2178,7 @@ def health():
                     },
                     'atomic_reconciler': atomic_reconciler.status(),
                     'wall_exhaustion': wall_exhaustion.status(),
+                    'funding_mr': funding_engine.status(),
                     'use_atomic_exec': USE_ATOMIC_EXEC,
                     'use_ledger_for_size': USE_LEDGER_FOR_SIZE,
                     'recent_logs':LOG_BUFFER[-20:]})
@@ -7227,6 +7243,23 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     f"@ ${we_ctx['wall_usd']/1000:.0f}k")
         except Exception as e:
             log(f"wall_exhaustion err {coin}: {e}")
+    # 2026-04-25: FUNDING_MR engine — counter-crowd fade in chop. When HL
+    # funding is extreme and Binance confirms, fade the over-positioned side.
+    # Default DISABLED via FUNDING_MR_ENABLED=0; flip env to enable. Only
+    # fires in chop regime by default (FUNDING_MR_CHOP_ONLY=1).
+    if not sig:
+        try:
+            _fmr_regime = 'unknown'
+            try:
+                _fmr_regime = regime_detector.get_regime() or 'unknown'
+            except Exception: pass
+            fmr_side, fmr_ctx = funding_engine.check(coin, _fmr_regime)
+            if fmr_side:
+                sig = fmr_side; bar_ts = int(time.time()*1000); signal_engine = 'FUNDING_MR'
+                log(f"FUNDING-MR {coin} {fmr_side} hl={fmr_ctx['hl_funding_daily_pct']}%/d "
+                    f"bn={fmr_ctx.get('bn_funding_hr_pct')} conf={fmr_ctx['confidence']}")
+        except Exception as e:
+            log(f"funding_mr err {coin}: {e}")
     # Quaternary: liquidation cascade fade
     if not sig:
         try:
