@@ -252,6 +252,10 @@ def submit_atomic(exchange, coin, is_buy, size, mark_px, sl_px, tp_px,
             entry_oid=out['entry_oid'],
             sl_oid=out['sl_oid'],
             tp_oid=out['tp_oid'],
+            # PROVISIONAL — atomic_reconciler will compare actual fill
+            # against intent_size and either CONFIRM or RESIZE the
+            # SL/TP brackets within ~1-2s of webData2 ticking.
+            protection_state='PROVISIONAL',
         )
         # If the entry already filled (IOC), simulate a fill event
         # locally — WS userFills will hit too, but this is idempotent
