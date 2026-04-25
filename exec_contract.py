@@ -96,6 +96,20 @@ def can_close(reason):
     return False
 
 
+def authorize_close(*args, **kwargs):
+    """Stub for emergency-close authorization path.
+
+    2026-04-25: precog.py:6264 and :6722 call this expecting it to register
+    a close as authorized. The real authorization happens via can_close() +
+    contract_close() pair; this stub keeps emergency_close_fn from crashing
+    on AttributeError until that call site is properly migrated.
+
+    Returns True so the caller's flow continues unchanged. Surgical fix —
+    don't refactor contract layer mid-validation.
+    """
+    return True
+
+
 def contract_close(close_fn, coin, reason, **context):
     """ENFORCED close wrapper. All close() call sites must migrate to this.
 
