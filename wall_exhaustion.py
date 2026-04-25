@@ -101,9 +101,16 @@ def _record_price(coin, px):
         _PRICE_HISTORY[coin] = [x for x in h if x[0] > cutoff]
 
 
-def _approach_velocity(coin, current_px, wall_px):
-    """Returns +1 if price approaching wall, -1 if receding, 0 if uncertain.
-    Approaching: |current - wall| < |earliest - wall| in lookback window."""
+def _approach_velocity(coin, current_px, wall_px, side):
+    """Returns +1 if price approaching wall FROM CORRECT SIDE, 0 otherwise.
+
+    Critical: side-aware. A 'bid' wall (support) can only be validly approached
+    from ABOVE — both start and current price must be > wall_px. A price that
+    crossed THROUGH the wall reads as 'approaching' if you use abs() distance,
+    but it's already past the wall — that case must return 0.
+
+    side: 'bid' or 'ask' (the side of the wall, not the trade direction)
+    """
     with _LOCK:
         hist = list(_PRICE_HISTORY.get(coin, []))
     if len(hist) < 3:
@@ -113,6 +120,19 @@ def _approach_velocity(coin, current_px, wall_px):
     if len(relevant) < 3:
         return 0
     earliest_px = relevant[0][1]
+
+    # SIDE-AWARENESS GUARD
+    # bid wall = support (below mid). Valid approach: price coming DOWN from above.
+    #   Both endpoints must be ABOVE wall_px. If current is below, price already broke through.
+    # ask wall = resistance (above mid). Valid approach: price going UP from below.
+    #   Both endpoints must be BELOW wall_px.
+    if side == 'bid':
+        if current_px <= wall_px or earliest_px <= wall_px:
+            return 0
+    else:  # 'ask'
+        if current_px >= wall_px or earliest_px >= wall_px:
+            return 0
+
     earliest_dist = abs(earliest_px - wall_px)
     current_dist = abs(current_px - wall_px)
     if current_dist < earliest_dist * 0.7:   # closed 30%+ of distance
@@ -228,8 +248,9 @@ def check(coin, current_px):
     candidates.sort(key=lambda x: x[0], reverse=True)
     decay, side, wall, dist_pct = candidates[0]
 
-    # Require approach: price must be moving TOWARD the wall
-    velocity = _approach_velocity(coin, current_px, wall['price'])
+    # Require approach: price must be moving TOWARD the wall FROM CORRECT SIDE.
+    # Side-aware velocity guards against price that already crossed through.
+    velocity = _approach_velocity(coin, current_px, wall['price'], side)
     if velocity != 1:
         _STATS['skipped_no_approach'] += 1
         return None, None
@@ -240,14 +261,6 @@ def check(coin, current_px):
     # ask wall (resistance) exhausting + price approaching from below
     #   = price rising toward broken resistance → BUY
     trade_side = 'SELL' if side == 'bid' else 'BUY'
-
-    # Sanity: price must be on the side that's about to break THROUGH the wall.
-    # For bid wall break-down, current_px should be slightly above wall (price falling INTO wall).
-    if side == 'bid' and current_px < wall['price']:
-        # Price already below bid wall — already broken. Don't fire.
-        return None, None
-    if side == 'ask' and current_px > wall['price']:
-        return None, None
 
     _LAST_FIRED[coin] = time.time()
     _STATS['fires'] += 1
