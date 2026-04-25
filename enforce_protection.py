@@ -147,7 +147,13 @@ def cloid_for(coin, side, purpose, size, precision=6):
 def _wait_for_size_settlement(fetch_size_fn, coin, timeout=3.0):
     """Block until position size reads the same value twice in a row, OR timeout.
     Prevents enforcing protection mid-fill where size flips as HL settles.
-    Returns the settled size (or last observed if timeout)."""
+    Returns the settled size (or last observed if timeout).
+
+    2026-04-25: poll interval 0.25s → 0.8s. With ledger-backed fetch_size_fn
+    (USE_LEDGER_FOR_SIZE=1) this is irrelevant (O(1) lookup), but the legacy
+    REST path was making 12+ calls in 3s. 0.8s gives 4 calls — still catches
+    flip patterns, 3x less burst pressure on CloudFront.
+    """
     start = time.time()
     last = None
     stable_count = 0
@@ -157,7 +163,7 @@ def _wait_for_size_settlement(fetch_size_fn, coin, timeout=3.0):
         except Exception:
             sz = None
         if sz is None:
-            time.sleep(0.25)
+            time.sleep(0.8)
             continue
         if last is not None and abs(sz - last) < 1e-9:
             stable_count += 1
@@ -166,7 +172,7 @@ def _wait_for_size_settlement(fetch_size_fn, coin, timeout=3.0):
         else:
             stable_count = 0
         last = sz
-        time.sleep(0.25)
+        time.sleep(0.8)
     # Timeout — return last observation (may still be valid)
     _STATS['timeouts'] += 1
     return last
