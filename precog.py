@@ -5013,7 +5013,11 @@ CANDLE_COLD_SEC = 180   # was 60; longer back-off after 429 to break cascade
 # 78 coins × 250ms = 19.5s of cumulative throttle but cache hits absorb most.
 _HL_THROTTLE_LOCK = threading.Lock()
 _HL_LAST_CALL = [0.0]   # mutable container for thread-shared state
-HL_MIN_GAP_SEC = 0.25   # was 0.12; was 0.05 originally
+HL_MIN_GAP_SEC = 0.7    # 2026-04-25: 0.25→0.7. At 0.25s sustained 4 req/s
+                        # for 20s, CloudFront still 429'd (273 errors observed).
+                        # 0.7s = ~1.4 req/s = ~55s build time for 78 coins.
+                        # Snapshot TTL widened to 180s in candle_snapshot to
+                        # give breathing room.
 
 def _hl_throttle():
     """Block until enough time has elapsed since the last HL call (any thread)."""
@@ -5021,7 +5025,9 @@ def _hl_throttle():
         now = time.time()
         gap = now - _HL_LAST_CALL[0]
         if gap < HL_MIN_GAP_SEC:
-            time.sleep(HL_MIN_GAP_SEC - gap + random.uniform(0, 0.02))
+            # 2026-04-25: jitter widened 0.02→0.20 to break burst-synchronous
+            # patterns. CloudFront seems to fingerprint regular intervals.
+            time.sleep(HL_MIN_GAP_SEC - gap + random.uniform(0, 0.20))
         _HL_LAST_CALL[0] = time.time()
 
 def fetch(coin, n_bars=100, retries=3):
@@ -8031,9 +8037,15 @@ def main():
     if _SNAPSHOT_OK and _snapshot is not None:
         try:
             def _user_state_wrapper(w):
+                # 2026-04-25: throttle alongside candle fetches to avoid
+                # exchange_snapshot flooding HL during snapshot build window.
+                try: _hl_throttle()
+                except Exception: pass
                 return info.user_state(w)
             def _user_fills_wrapper(w, start_ms, end_ms):
                 try:
+                    try: _hl_throttle()
+                    except Exception: pass
                     import urllib.request, json as _json
                     body = _json.dumps({'type':'userFillsByTime','user':w,
                                         'startTime':start_ms,'endTime':end_ms}).encode()
@@ -8046,7 +8058,7 @@ def main():
                 user_state_fn=_user_state_wrapper,
                 user_fills_fn=_user_fills_wrapper,
                 wallet=WALLET,
-                refresh_interval_sec=5,
+                refresh_interval_sec=10,
             )
         except Exception as e: log(f"snapshot start err: {e}")
 
