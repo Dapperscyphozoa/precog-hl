@@ -38,6 +38,16 @@ import cvd_ws
 import oi_tracker
 import funding_arb
 
+# Single-snapshot candle pipeline (collapses 78× per-tick fan-out into one
+# controlled snapshot rebuild per cycle — eliminates CloudFront 429 cascades).
+try:
+    import candle_snapshot as _candle_snap
+    _SNAPSHOT_OK = True
+except Exception as _e:
+    _candle_snap = None
+    _SNAPSHOT_OK = False
+    print(f'[candle_snapshot] import failed (non-fatal): {_e}', flush=True)
+
 # Post-mortem tuning engine (HL-only; MT4 close path does NOT call this).
 # Import is defensive: if the module or its deps are missing, the rest of
 # precog.py still runs. Every call site below is guarded.
@@ -2083,6 +2093,7 @@ def health():
                     'trail':TRAIL_PCT,
                     'gates_loaded':len(TICKER_GATES),
                     'regime':cur_regime,
+                    'snapshot': (_candle_snap.snapshot_status() if _SNAPSHOT_OK else {'enabled': False}),
                     'recent_logs':LOG_BUFFER[-20:]})
 
 @app.route('/confluence', methods=['GET'])
@@ -4981,7 +4992,21 @@ def _hl_throttle():
         _HL_LAST_CALL[0] = time.time()
 
 def fetch(coin, n_bars=100, retries=3):
-    """Bybit WS candles FIRST (no rate limit), HL REST only as fallback."""
+    """Bybit WS candles FIRST (no rate limit), HL REST only as fallback.
+
+    2026-04-25: snapshot-fan-in. If the per-tick snapshot has data, use it
+    (zero network calls in hot path). Falls through to legacy fetch chain
+    (Bybit WS → cache → cold-skip → HL REST) when snapshot is empty or stale.
+    Backwards-compatible: signal engines call fetch(coin) unchanged.
+    """
+    # SNAPSHOT FAST PATH — pure read, no network
+    if _SNAPSHOT_OK and _candle_snap is not None:
+        try:
+            snap_candles = _candle_snap.get_candles(coin, '15m')
+            if snap_candles and len(snap_candles) >= n_bars:
+                return snap_candles[-n_bars:]
+        except Exception:
+            pass  # fall through to legacy path
     now = time.time()
     # Try Bybit WS candle buffer first
     try:
@@ -8345,6 +8370,28 @@ def main():
 
             cur_risk = current_risk_pct(equity)
             log(f"--- tick eq=${equity:.2f} risk={cur_risk*100:.2f}% mult={risk_mult} pos={len(live_positions)} cL={state['consec_losses']} ---")
+
+            # ─── SNAPSHOT BUILD (single fan-in per tick) ───
+            # Replaces the previous 78× per-coin REST cascade with one controlled
+            # rebuild per tick cycle. Each signal engine reads from snapshot via
+            # get_candles() — zero network calls in hot path. TTL ~60s matches
+            # tick cadence; per-coin failures fall back to last-known-good.
+            if _SNAPSHOT_OK and _candle_snap is not None:
+                try:
+                    def _snap_fetch(c, tf, nb):
+                        end = int(time.time() * 1000)
+                        # tf to seconds: 15m=900, 1h=3600, 4h=14400
+                        tf_sec = {'15m': 900, '1h': 3600, '4h': 14400}.get(tf, 900)
+                        start_ms = end - nb * tf_sec * 1000
+                        d = info.candles_snapshot(c, tf, start_ms, end)
+                        return [(int(b['t']), float(b['o']), float(b['h']),
+                                 float(b['l']), float(b['c']), float(b['v'])) for b in d]
+                    _candle_snap.build_snapshot(COINS, '15m', _snap_fetch,
+                                                 throttle_fn=_hl_throttle,
+                                                 n_bars=100, log_fn=log)
+                except Exception as _se:
+                    log(f"[snapshot] build err (fail-soft): {_se}")
+
             # Publish cached state for /dash
             try:
                 pos_list = []
