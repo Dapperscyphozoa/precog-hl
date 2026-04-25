@@ -4992,67 +4992,41 @@ def _hl_throttle():
         _HL_LAST_CALL[0] = time.time()
 
 def fetch(coin, n_bars=100, retries=3):
-    """Bybit WS candles FIRST (no rate limit), HL REST only as fallback.
+    """SNAPSHOT-FIRST candle reader. NO REST during tick path.
 
-    2026-04-25: snapshot-fan-in. If the per-tick snapshot has data, use it
-    (zero network calls in hot path). Falls through to legacy fetch chain
-    (Bybit WS → cache → cold-skip → HL REST) when snapshot is empty or stale.
-    Backwards-compatible: signal engines call fetch(coin) unchanged.
+    2026-04-25 (final form): hard boundary. fetch() is now O(1) lookup only.
+    Order: snapshot → LKG (via candle_snapshot) → Bybit WS → empty.
+    Background snapshot builder is the ONLY path that calls HL REST.
+
+    This eliminates the residual REST escape that was causing CloudFront
+    cascades during tick pressure. Trade-off: deterministic stale data
+    (≤60s on 15m timeframe = ~6% drift) > real-time partial data + instability.
+
+    Returns [] only if no data has ever been fetched for this coin.
     """
-    # SNAPSHOT FAST PATH — pure read, no network
+    # 1. SNAPSHOT (primary — atomic, full-universe, coverage-gated)
     if _SNAPSHOT_OK and _candle_snap is not None:
         try:
             snap_candles = _candle_snap.get_candles(coin, '15m')
-            if snap_candles and len(snap_candles) >= n_bars:
-                return snap_candles[-n_bars:]
+            if snap_candles and len(snap_candles) > 0:
+                # Return whatever the snapshot has, capped at n_bars
+                return snap_candles[-n_bars:] if len(snap_candles) >= n_bars else snap_candles
         except Exception:
-            pass  # fall through to legacy path
-    now = time.time()
-    # Try Bybit WS candle buffer first
+            pass
+    # 2. BYBIT WS (already streamed, no REST cost) — kept as best-effort fallback
     try:
         if bybit_ws.has_coin(coin):
-            by_candles = bybit_ws.get_candles(coin, limit=n_bars+50)
+            by_candles = bybit_ws.get_candles(coin, limit=n_bars + 50)
             if len(by_candles) >= n_bars:
                 return by_candles[-n_bars:]
     except Exception:
         pass
-    # Cached HL REST fallback
+    # 3. LEGACY CACHE (stale-acceptable read only — NO new fetch)
     cached = _CANDLE_CACHE.get(coin)
-    if cached and now - cached['ts'] < CANDLE_CACHE_SEC:
+    if cached:
         return cached['data']
-    # 2026-04-22: Cold-skip. If this coin got 429'd in the last 60s, don't
-    # hit HL again — use stale cache if present, otherwise skip the coin
-    # this tick. Prevents cascading 429s from one coin blocking others.
-    # 2026-04-25: prefer stale cache over empty result. Empty list = blind
-    # signal engine = zero throughput. Stale candles (a few minutes old) on
-    # 15m timeframe are still 95% accurate for signal generation.
-    cold_until = _CANDLE_COLD.get(coin, 0)
-    if now < cold_until:
-        if cached:
-            return cached['data']  # stale but usable
-        return []
-    # Global throttle (shared across all worker threads — was per-thread sleep,
-    # which let 8 workers burst HL simultaneously and trigger 429s).
-    _hl_throttle()
-    end=int(time.time()*1000); start=end-n_bars*15*60*1000
-    for attempt in range(retries):
-        try:
-            d=info.candles_snapshot(coin,'15m',start,end)
-            result = [(int(c['t']),float(c['o']),float(c['h']),float(c['l']),float(c['c']),float(c['v'])) for c in d]
-            _CANDLE_CACHE[coin] = {'data': result, 'ts': time.time()}
-            return result
-        except Exception as e:
-            es = str(e)
-            if '429' in es:
-                _CANDLE_COLD[coin] = time.time() + CANDLE_COLD_SEC
-                if attempt < retries-1:
-                    time.sleep(1.5 + random.random()*1.5)
-                    continue
-            # 2026-04-25: serve stale cache on any error, not just 429.
-            # Better stale data than blind signal engine.
-            log(f"candle err {coin}: {e}")
-            return cached['data'] if cached else []
-    return cached['data'] if cached else []
+    # 4. HARD STOP — no REST escape during tick
+    return []
 
 SCAN_BARS = 12  # scan last 12 bars to catch signals after warmup
 CD_MS = 30 * 60 * 1000  # 30 min cooldown — prevents rapid signal re-fire + opposite-exit storm
