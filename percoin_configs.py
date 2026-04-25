@@ -1,11 +1,15 @@
-"""PreCog per-coin configs — ENTERPRISE 15m OOS tuned 2026-04-23.
+"""PreCog per-coin configs — ENTERPRISE 15m OOS tuned.
 
-57 coins validated (Wilson lb>=0.50 after fees+slippage).
-Top-K=3 ensemble stored in regime_configs.py
+71 coins total (57 original + 14 grid-expansion).
 
-PURE_14  (score>=5.0): 7 coins - 15x lev, 0.5% risk
-NINETY_99 (3.0-5.0):  20 coins - 12x lev, 0.5% risk
-EIGHTY_89 (<3.0):     30 coins - 10x lev, 0.5% risk
+Original 57 (2026-04-23): Wilson lb≥0.50 after fees+slippage.
+Grid expansion 14 (2026-04-25): same methodology on 90d 15m BB-rejection backtest.
+Top-K=3 ensemble stored in regime_configs.py.
+
+PURE_14    (score>=5.0):     7 coins - 15x lev, 0.5% risk
+NINETY_99  (3.0-5.0):       20 coins - 12x lev, 0.5% risk
+EIGHTY_89  (<3.0):          34 coins - 10x lev, 0.5% risk  (+4 STRICT 2026-04-25)
+SEVENTY_79 (probationary):  10 coins - 10x lev, 0.5% risk  (RELAXED, monitor closely)
 """
 
 # ─── PURE_14: 7 coins ───
@@ -75,9 +79,31 @@ EIGHTY_89 = {
     'MINA'        : {'sigs':['BB'], 'flt':'none', 'RH':70, 'RL':30, 'TP':0.08, 'SL':0.035},
     'XLM'         : {'sigs':['BB'], 'flt':'none', 'RH':70, 'RL':30, 'TP':0.08, 'SL':0.035},
     'ANIME'       : {'sigs':['BB'], 'flt':'none', 'RH':68, 'RL':32, 'TP':0.08, 'SL':0.035},
+    # ─── Whitelist grid expansion 2026-04-25 (STRICT promotions) ───
+    # Wilson_lb≥50%, PF≥1.3, n≥30 trades on 90d 15m BB-rejection backtest
+    # Same standard as original whitelist promotions (2026-04-23).
+    'UMA'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 65.1% PF 2.25 n=63
+    'MEGA'        : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.035},  # WR 65.4% PF 1.95 n=52
+    'CRV'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 63.5% PF 2.32 n=63
+    'VVV'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 64.0% PF 2.62 n=50
 }
 
-SEVENTY_79 = {}
+# ─── SEVENTY_79: probationary tier (10x lev, 0.5% risk) ───
+# Whitelist grid expansion 2026-04-25 (RELAXED promotions).
+# Wilson_lb 45-50%, PF≥1.1, n≥30 trades. Live but flagged for monitoring.
+# Yank if WR drops below 40% on >5 closed live trades (survival guard catches this).
+SEVENTY_79 = {
+    'NEO'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.025},  # WR 66.7% PF 2.27 n=30
+    'TRX'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.04},   # WR 61.1% PF 2.08 n=54
+    'STABLE'      : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 59.4% PF 1.82 n=69
+    'S'           : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 60.7% PF 1.72 n=56
+    'APEX'        : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.04},   # WR 58.6% PF 1.41 n=70
+    'MANTA'       : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.08, 'SL':0.035},  # WR 60.4% PF 1.60 n=48
+    'POLYX'       : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.035},  # WR 60.4% PF 1.55 n=48
+    'WIF'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.035},  # WR 61.5% PF 2.20 n=39
+    'LTC'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.035},  # WR 59.2% PF 1.88 n=49
+    'BNB'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.025},  # WR 61.8% PF 2.21 n=34
+}
 
 # Enterprise sizing — 0.5% risk uniform (edge-proof phase)
 TIER_SIZING = {
