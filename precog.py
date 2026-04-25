@@ -391,9 +391,20 @@ PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.01'))  
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
 COIN_WR_FILTER_ENABLED = os.environ.get('COIN_WR_FILTER', '1') != '0'
-COIN_WR_FILTER_THRESH  = float(os.environ.get('COIN_WR_FILTER_THRESH', '0.40'))
-COIN_WR_FILTER_MIN_N   = int(os.environ.get('COIN_WR_FILTER_MIN_N', '5'))
+COIN_WR_FILTER_THRESH  = float(os.environ.get('COIN_WR_FILTER_THRESH', '0.35'))   # was 0.40
+COIN_WR_FILTER_MIN_N   = int(os.environ.get('COIN_WR_FILTER_MIN_N', '10'))        # was 5
 COIN_WR_FILTER_WINDOW  = int(os.environ.get('COIN_WR_FILTER_WINDOW', '20'))
+
+# Deadlock valve: if no entries for N seconds, bypass WR + regime filters
+DEADLOCK_BYPASS_SEC = int(os.environ.get('DEADLOCK_BYPASS_SEC', '1800'))  # 30 min
+_LAST_OPEN_TS = 0  # module-level — updated on every successful entry
+
+def _deadlock_active():
+    """True if no opens in last DEADLOCK_BYPASS_SEC. Triggers WR/regime bypass."""
+    if _LAST_OPEN_TS == 0:
+        return False  # never opened — let normal filters apply on cold start
+    import time as _t
+    return (_t.time() - _LAST_OPEN_TS) > DEADLOCK_BYPASS_SEC
 
 # Bootstrap-loaded per-coin WR table. Populated once at startup from trades.csv.
 # Schema: { 'COIN': {'n': int, 'wins': int, 'wr': float} }
@@ -4462,24 +4473,23 @@ def trend_gate(coin, side):
 
 USE_GRID_GATE = False  # overfit layer disabled; V3 + ATR-min do the filtering
 
-def apply_ticker_gate(coin, side, price, candles):
-    """V3 trend + ATR-min filter. Returns True if passes."""
-    # EMERGENCY: directional imbalance check — if 10+ shorts already open and BTC up, block new shorts
+def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
+    """V3 trend + ATR-min filter. Returns True/False bool, OR (passed, reasons) if return_reasons=True.
+    Reasons is a list of strings explaining why it failed (empty if passed)."""
+    reasons = []
+    # CROWDING: directional imbalance — soft penalty (was hard block)
     try:
         if side == 'SELL':
             lp = get_all_positions_live()
             shorts = sum(1 for k,v in lp.items() if v.get('size',0) < 0)
             if shorts >= 10:
-                # Check BTC 15min move
                 btc_state = btc_correlation.get_state()
                 if btc_state.get('btc_move', 0) > 0.002 or btc_state.get('btc_dir', 0) > 0:
-                    log(f"{coin} SELL BLOCKED: {shorts} shorts open + BTC up")
-                    return False
+                    reasons.append('crowding_shorts_btc_up')
     except Exception: pass
     if not trend_gate(coin, side):
-        log(f"{coin} {side} BLOCKED by V3 trend")
+        reasons.append('v3_trend')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'v3_trend_block')
-        return False
     if candles and len(candles) >= 15:
         trs = []
         for j in range(1, min(15, len(candles))):
@@ -4490,20 +4500,21 @@ def apply_ticker_gate(coin, side, price, candles):
             atr_val = sum(trs)/len(trs)
             last_c = candles[-1][4]
             if last_c>0 and atr_val/last_c < 0.001:
-                log(f"{coin} {side} BLOCKED by ATR-min ({atr_val/last_c*100:.2f}%)")
+                reasons.append(f'atr_low_{atr_val/last_c*100:.2f}%')
                 _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'atr_min_block',
                                          {'atr_pct': round(atr_val/last_c*100, 4)})
-                return False
-    # Funding filter — block expensive-carry trades
     if not funding_filter.allow_side(coin, side):
-        log(f"{coin} {side} BLOCKED by funding rate")
+        reasons.append('funding')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'funding_block')
-        return False
-    # BTC correlation — block alt trades against strong BTC direction
     if not btc_correlation.allow_alt_trade(coin, side):
-        log(f"{coin} {side} BLOCKED by BTC correlation")
+        reasons.append('btc_corr')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'btc_correlation_block')
-        return False
+    passed = len(reasons) == 0
+    if return_reasons:
+        return passed, reasons
+    if not passed:
+        log(f"{coin} {side} BLOCKED by {','.join(reasons)}")
+    return passed
     if not USE_GRID_GATE:
         return True
     key = coin.upper().replace('.P','')
@@ -6516,15 +6527,20 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _shadow_record_rejection(coin, sig, f'per_coin_filter_{flt}')
                 sig = None; signal_engine = None
     elif percoin_configs.ELITE_MODE and not percoin_configs.is_elite(coin):
-        # Coin not in elite whitelist: HARD BLOCK.
-        # Experimental promotion disabled 2026-04-23 — live data showed
-        # non-whitelist coins (BTC, FARTCOIN, PROMPT, RENDER, LINK) were
-        # the largest loss concentrations. WR 0-20% on leaked signals
-        # vs 57-73% OOS prediction on whitelist coins. Leak = -$140 realized.
+        # SOFT DEMOTE (was hard block): non-elite signals proceed but flagged.
+        # Confidence gets -15 penalty downstream; WR/regime/conf filters still apply.
+        # Deadlock valve (30min no opens) further loosens WR + regime if all rejecting.
+        # Non-elite gets PIVOT (already fired) + BB engine (no IB — keeps elite specialty).
+        if not sig:
+            try:
+                sig, bar_ts = bb_signal(candles, coin=coin, last_buy_ts=last_b, last_sell_ts=last_s)
+                if sig: signal_engine = 'BB_REJ'
+            except Exception as e:
+                log(f"bb_signal err {coin}: {e}")
         if sig:
-            log(f"{coin} {sig} BLOCKED — not in enterprise whitelist")
-            _shadow_record_rejection(coin, sig, 'not_elite_whitelisted')
-            sig = None; signal_engine = None
+            log(f"{coin} {sig} NON-ELITE → passed downstream (-15 conf penalty)")
+            _shadow_record_rejection(coin, sig, 'non_elite_soft_demote')
+        # DO NOT null sig — let downstream filters decide.
 
     # REVERSAL CONTRACT v2: market-close → confirm closed → allow new entry
     # this tick. Option A per Phase 1 spec. No queueing, no waiting for TP/SL.
@@ -6924,16 +6940,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             return
 
     # Per-ticker gate check — uses candles already fetched above (no extra API call)
-    # SKIPPED for elite-whitelisted coins: regime-aware system already validates per-coin
-    # OOS: V3 OFF + no ticker_gate = +65pp gain over V3 ON
-    if not (percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin)):
-        try:
-            px_for_gate = get_mid(coin) or 0
-            if not apply_ticker_gate(coin, sig, px_for_gate, candles):
-                log(f"{coin} {sig} GATED")
+    # Elite coins: STRICT gate (return on fail). Non-elite: SOFT (conf penalty, no reject).
+    _ticker_gate_penalty = 0
+    is_non_elite = bool(percoin_configs.ELITE_MODE and not percoin_configs.is_elite(coin))
+    try:
+        px_for_gate = get_mid(coin) or 0
+        passed, gate_reasons = apply_ticker_gate(coin, sig, px_for_gate, candles, return_reasons=True)
+        if not passed:
+            if is_non_elite:
+                _ticker_gate_penalty = 10 * len(gate_reasons)  # -10 per failed sub-gate
+                log(f"{coin} {sig} SOFT-GATED(non-elite): {','.join(gate_reasons)} → -{_ticker_gate_penalty} conf")
+            else:
+                log(f"{coin} {sig} GATED(elite-strict): {','.join(gate_reasons)}")
                 return
-        except Exception as e:
-            log(f"{coin} gate check err: {e}")
+    except Exception as e:
+        log(f"{coin} gate check err: {e}")
 
     # Signal persistence: DISABLED temporarily (blocking all live signals, OOS +15% but requires market movement)
     # if not signal_persistence.check(coin, sig, bar_ts): return
@@ -6944,6 +6965,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         btc_state = btc_correlation.get_state()
         btc_d = btc_state.get('btc_dir', 0)
         conf_score, conf_breakdown = confidence.score(candles, [], coin, sig, btc_d)
+        # Non-elite penalty: -15 to confidence + soft ticker-gate penalty (10 per failed sub-gate)
+        if is_non_elite:
+            _orig_conf = conf_score
+            _total_penalty = 15 + _ticker_gate_penalty
+            conf_score = max(0, conf_score - _total_penalty)
+            log(f"{coin} {sig} non-elite conf {_orig_conf}→{conf_score} (-15 base, -{_ticker_gate_penalty} gate)")
         # Pass current regime so floor adapts: 30 in trending, 15 in chop
         import regime_detector as _regdet
         cur_regime = _regdet.get_regime()
@@ -7353,20 +7380,30 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         _wr_rec = _COIN_WR_BOOTSTRAP.get(coin.upper(), {})
         _coin_wr = _wr_rec.get('wr', 0.0)
         _wr_n = _wr_rec.get('n', 0)
+        _bypass = _deadlock_active()
+        if _bypass:
+            log(f"DEADLOCK {coin} {sig} | {int((time.time()-_LAST_OPEN_TS)/60)}min since last open → bypass WR+regime")
 
-        # Guard 2: regime direction filter
-        rb_block, rb_reason = _regime_dir_blocks_entry(sig)
-        if rb_block:
-            log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=regime/{rb_reason}")
-            return
+        # Guard 2: regime direction filter (softened — block only if conf<65)
+        if not _bypass:
+            rb_block, rb_reason = _regime_dir_blocks_entry(sig)
+            if rb_block:
+                # Only block weak counter-trend (conf<65 if known); strong setups pass
+                _conf_pre = locals().get('conf_score', None)
+                if _conf_pre is None or _conf_pre < 65:
+                    log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=regime/{rb_reason}")
+                    return
+                else:
+                    log(f"ALLOW {coin} | regime={_regime} sig={sig} conf={_conf_pre} note=counter_trend_high_conf")
         # Guard 3: per-coin WR filter (with bootstrap fallback)
-        wr_block, wr_reason = _coin_wr_blocks_entry(coin)
-        if wr_block:
-            log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=coin_wr/{wr_reason}")
-            return
-        elif wr_reason and 'unproven' in wr_reason:
-            # Allowed but log for visibility (non-blocking)
-            log(f"ALLOW {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} note=unproven/{wr_reason}")
+        if not _bypass:
+            wr_block, wr_reason = _coin_wr_blocks_entry(coin)
+            if wr_block:
+                log(f"REJECT {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} reason=coin_wr/{wr_reason}")
+                return
+            elif wr_reason and 'unproven' in wr_reason:
+                # Allowed but log for visibility (non-blocking)
+                log(f"ALLOW {coin} | regime={_regime} sig={sig} wr={_coin_wr:.2f} trades={_wr_n} note=unproven/{wr_reason}")
     # ─────────────────────────────────────────────────────
 
     if sig == 'SELL':
@@ -7477,6 +7514,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                             _promo.record_promotion(coin, 'SELL', _exp_tag)
                         except Exception as _pe:
                             print(f'[precog] promo record err: {_pe}', flush=True)
+                    # Deadlock valve tracker — successful entry resets timer
+                    global _LAST_OPEN_TS
+                    _LAST_OPEN_TS = time.time()
     else:
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
@@ -7576,6 +7616,9 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                             _promo.record_promotion(coin, 'BUY', _exp_tag)
                         except Exception as _pe:
                             print(f'[precog] promo record err: {_pe}', flush=True)
+                    # Deadlock valve tracker — successful entry resets timer
+                    global _LAST_OPEN_TS
+                    _LAST_OPEN_TS = time.time()
 
 # ═══════════════════════════════════════════════════════
 
@@ -8247,6 +8290,9 @@ def main():
                                         'trade_id': _wh_trade_id,
                                         'cloid': _wh_cloid,
                                     }
+                                    # Deadlock valve tracker — webhook entry counts
+                                    global _LAST_OPEN_TS
+                                    _LAST_OPEN_TS = time.time()
                                     log(f"WEBHOOK OPEN {coin} {side_str} @ {fill} (px_src={'bybit_ws' if px==by_px else 'hl_mid'}, age={by_age}ms)")
                                     log_trade('HL', coin, side_str, fill, 0, 'webhook')
                     wh_count += 1
