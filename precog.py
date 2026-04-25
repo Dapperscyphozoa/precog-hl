@@ -27,6 +27,7 @@ import profit_lock
 import leverage_map
 import wall_bounce
 import wall_exhaustion
+import wall_absorption
 import funding_engine
 import liquidation_ws
 import bybit_lead
@@ -2032,6 +2033,7 @@ def engines_status():
             'PULLBACK': True,
             'WALL_BNC': v_ok('by') or v_ok('bn'),
             'WALL_EXH': v_ok('by') or v_ok('bn'),
+            'WALL_ABSORB': wall_absorption.status().get('enabled', False),
             'FUNDING_MR': funding_engine.status().get('enabled', False),
             'LIQ_CSCD': True,
             'CVD_DIV': True,
@@ -2183,6 +2185,7 @@ def health():
                     },
                     'atomic_reconciler': atomic_reconciler.status(),
                     'wall_exhaustion': wall_exhaustion.status(),
+                    'wall_absorption': wall_absorption.status(),
                     'funding_mr': funding_engine.status(),
                     'use_atomic_exec': USE_ATOMIC_EXEC,
                     'use_ledger_for_size': USE_LEDGER_FOR_SIZE,
@@ -7248,6 +7251,37 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     f"@ ${we_ctx['wall_usd']/1000:.0f}k")
         except Exception as e:
             log(f"wall_exhaustion err {coin}: {e}")
+    # 2026-04-25: WALL_ABSORPTION engine — first-touch BB extreme + stable wall.
+    # Fades the move (bounce off support / rejection at resistance). Mutually
+    # exclusive with wall_exhaustion via wall classification (STABLE vs
+    # EXHAUSTING) and with funding_engine via internal funding-overlap guard.
+    # Default DISABLED via WALL_ABSORB_ENABLED=0; flip env to enable.
+    if not sig:
+        try:
+            _wa_regime = 'unknown'
+            try:
+                _wa_regime = regime_detector.get_regime() or 'unknown'
+            except Exception: pass
+            # Count active absorption positions for capacity gate
+            _wa_active = 0
+            try:
+                for _c, _p in (state.get('positions') or {}).items():
+                    if _p and _p.get('signal_engine') == 'WALL_ABSORB':
+                        _wa_active += 1
+            except Exception: pass
+            cur_px = get_mid(coin)
+            wa_side, wa_ctx = wall_absorption.check(coin, cur_px, _wa_regime, _wa_active)
+            if wa_side:
+                sig = wa_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_ABSORB'
+                state.setdefault('wall_entries', {})[coin] = {
+                    'side': wa_side, 'wall_price': wa_ctx['wall_price'],
+                    'wall_usd': wa_ctx['wall_usd'], 'entry_ts': time.time(),
+                    'engine': 'WALL_ABSORB'}
+                log(f"WALL-ABSORPTION {coin} {wa_side} {wa_ctx['bb_position']} "
+                    f"decay={wa_ctx['wall_decay_pct']}% dist={wa_ctx['distance_pct']}% "
+                    f"@ ${wa_ctx['wall_usd']/1000:.0f}k")
+        except Exception as e:
+            log(f"wall_absorption err {coin}: {e}")
     # 2026-04-25: FUNDING_MR engine — counter-crowd fade in chop. When HL
     # funding is extreme and Binance confirms, fade the over-positioned side.
     # Default DISABLED via FUNDING_MR_ENABLED=0; flip env to enable. Only
