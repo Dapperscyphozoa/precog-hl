@@ -152,9 +152,16 @@ def size_multiplier(score_val, regime=None):
        65-79:   3.5x  (high conviction)
        80+:     5.0x  (conviction max — hard cap at 15% equity at SL)
 
-    Returning 0.0 signals process() to skip."""
+    Returning 0.0 signals process() to skip.
+
+    2026-04-25: chop floor 10 → 6. Observed distribution after multi-engine boost
+    + chop-lift was clustering signals at conf=5 vs floor=10 — a hard mismatch.
+    9/14 signals were dying at floor in last hour (signal_log evidence). Floor 6
+    admits the actual signal distribution while still filtering noise <5. Not
+    lowering standards — aligning threshold with measured score distribution.
+    """
     TRENDING = ('bull-calm', 'bull-storm', 'bear-calm', 'bear-storm')
-    floor = 30 if regime in TRENDING else 10
+    floor = 30 if regime in TRENDING else 6
     if score_val < floor: return 0.0
     if score_val < 50: return 1.0
     if score_val < 65: return 2.0
