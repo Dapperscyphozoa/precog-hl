@@ -63,11 +63,20 @@ class PositionLedger:
     # ─── Mutators (called by dispatcher / WS feeder) ──────────────────
     def begin_pending(self, coin, is_long, size, entry_px, sl_px, tp_px,
                       cloid_entry, cloid_sl=None, cloid_tp=None,
-                      sl_oid=None, tp_oid=None, entry_oid=None):
+                      sl_oid=None, tp_oid=None, entry_oid=None,
+                      protection_state='PROVISIONAL'):
         """Called by atomic_entry immediately after bulk_orders submission.
 
         Records intent + resting trigger oids returned in the bulk response.
         Entry fill arrives later via WS, transitioning PENDING → LIVE.
+
+        protection_state lifecycle (set by atomic_reconciler):
+          PROVISIONAL  → atomic placed, SL/TP sized to intent_size (may be wrong)
+          CONFIRMED    → actual fill matches intent within tolerance
+          RESIZED      → actual ≠ intent; SL/TP cancelled + replaced with correct size
+          RECONCILE_FAIL → reconciliation failed; emergency close fired
+          CONFIRMED is also the default state for non-atomic (legacy) entries
+          where enforce_protection synchronously verified post-fill size.
         """
         coin = coin.upper()
         now = time.time()
@@ -90,8 +99,30 @@ class PositionLedger:
                 'created_ts': now,
                 'updated_ts': now,
                 'fills':      [],   # list of (ts_ms, side, sz, px, oid, cloid)
+                'protection_state': protection_state,
             }
             self.stats['pending_created'] += 1
+
+    def set_protection_state(self, coin, new_state, reason=None):
+        """Update protection_state. Returns True if row exists, else False.
+        Valid states: PROVISIONAL, CONFIRMED, RESIZED, RECONCILE_FAIL."""
+        coin = coin.upper()
+        with self._lock:
+            row = self._rows.get(coin)
+            if not row:
+                return False
+            row['protection_state'] = new_state
+            if reason:
+                row['protection_reason'] = reason
+            row['updated_ts'] = time.time()
+            return True
+
+    def get_protection_state(self, coin):
+        """Returns current protection_state or None if no row."""
+        coin = coin.upper()
+        with self._lock:
+            row = self._rows.get(coin)
+            return row.get('protection_state') if row else None
 
     def on_fill(self, coin, side, sz, px, ts_ms, oid=None, cloid=None):
         """WS userFills event. Side is 'B' or 'A' (Ask=Sell).
@@ -212,6 +243,10 @@ class PositionLedger:
                         'created_ts': now, 'updated_ts': now,
                         'fills':      [],
                         'orphan':     True,
+                        # Orphans from webData2 (non-atomic legacy entries OR
+                        # orphan recovery): mark CONFIRMED so atomic_reconciler
+                        # never touches them. Only atomic_entry sets PROVISIONAL.
+                        'protection_state': 'CONFIRMED',
                     }
             # Update trigger oids from open orders (stays even when position size syncs)
             for o in open_orders or []:
@@ -347,3 +382,5 @@ all_rows           = _LEDGER.all_rows
 mark_ws_connected  = _LEDGER.mark_ws_connected
 ws_is_fresh        = _LEDGER.ws_is_fresh
 status             = _LEDGER.status
+set_protection_state = _LEDGER.set_protection_state
+get_protection_state = _LEDGER.get_protection_state
