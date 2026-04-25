@@ -104,15 +104,28 @@ def snapshot_status():
 
 
 def get_candles(coin, tf='15m'):
-    coin_u = coin.upper()
+    # 2026-04-25: case-preserving lookup. HL uses lowercase 'k' prefix for
+    # 1000x multiplier symbols (kFLOKI, kSHIB, kPEPE). Uppercasing breaks them.
+    # Try exact match first (fast), then case-insensitive scan as fallback
+    # for legacy callers that may use a different case.
     with _SNAPSHOT_LOCK:
         snap_tf = _GLOBAL_SNAPSHOT['tf'].get(tf, {})
-        if coin_u in snap_tf:
-            return snap_tf[coin_u]
+        # Exact match — fast path
+        if coin in snap_tf:
+            return snap_tf[coin]
         lkg_tf = _LAST_KNOWN_GOOD.get(tf, {})
-        if coin_u in lkg_tf:
+        if coin in lkg_tf:
             _STATS['fallback_to_lkg'] += 1
-            return lkg_tf[coin_u]
+            return lkg_tf[coin]
+        # Case-insensitive scan — slow fallback for callers using different case
+        coin_l = coin.lower()
+        for k, v in snap_tf.items():
+            if k.lower() == coin_l:
+                return v
+        for k, v in lkg_tf.items():
+            if k.lower() == coin_l:
+                _STATS['fallback_to_lkg'] += 1
+                return v
     return []
 
 
@@ -146,23 +159,23 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
         missing_coins = []
 
         for coin in coins_list:
-            coin_u = coin.upper()
+            # 2026-04-25: preserve original case (HL needs 'kFLOKI' not 'KFLOKI')
             try:
                 if throttle_fn:
                     throttle_fn()
-                candles = fetch_fn(coin_u, tf, n_bars)
+                candles = fetch_fn(coin, tf, n_bars)
                 if candles and len(candles) > 0:
-                    new_snap[coin_u] = candles
+                    new_snap[coin] = candles
                     ok_count += 1
                 else:
                     fail_count += 1
-                    missing_coins.append(coin_u)
+                    missing_coins.append(coin)
             except Exception as e:
                 _STATS['fetch_errors'] += 1
                 fail_count += 1
-                missing_coins.append(coin_u)
+                missing_coins.append(coin)
                 if log_fn:
-                    log_fn(f"[snapshot] fetch err {coin_u} {tf}: {e}")
+                    log_fn(f"[snapshot] fetch err {coin} {tf}: {e}")
 
         duration = time.time() - start
         coverage = ok_count / max(1, n_total)
