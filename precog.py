@@ -48,6 +48,16 @@ except Exception as _e:
     _SNAPSHOT_OK = False
     print(f'[candle_snapshot] import failed (non-fatal): {_e}', flush=True)
 
+# Event-confirmed SL state machine (replaces poll-with-deadline that produced
+# false-negative emergency closes when exchange visibility lagged placement).
+try:
+    import sl_state_tracker as _sl_state_tracker
+    _SL_STATE_OK = True
+except Exception as _e:
+    _sl_state_tracker = None
+    _SL_STATE_OK = False
+    print(f'[sl_state_tracker] import failed (non-fatal): {_e}', flush=True)
+
 # Post-mortem tuning engine (HL-only; MT4 close path does NOT call this).
 # Import is defensive: if the module or its deps are missing, the rest of
 # precog.py still runs. Every call site below is guarded.
@@ -2094,6 +2104,7 @@ def health():
                     'gates_loaded':len(TICKER_GATES),
                     'regime':cur_regime,
                     'snapshot': (_candle_snap.snapshot_status() if _SNAPSHOT_OK else {'enabled': False}),
+                    'sl_state': (_sl_state_tracker.status() if _SL_STATE_OK else {'enabled': False}),
                     'recent_logs':LOG_BUFFER[-20:]})
 
 @app.route('/confluence', methods=['GET'])
@@ -5994,6 +6005,12 @@ def close(coin, state_ref=None, reason=None):
         Returns None. All callers must treat close() as fire-and-forget.
         Reconciler is the sole writer (uses _close_direct() to bypass shim).
     """
+    # SL state cleanup — when position closes, no SL needed; clear tracking
+    if _SL_STATE_OK and _sl_state_tracker is not None:
+        try:
+            _sl_state_tracker.cleanup(coin, reason or 'close')
+        except Exception:
+            pass
     # STEP 3: shim routing
     if os.environ.get('RECONCILER_AUTHORITATIVE', '0') == '1':
         if _INTENTS_OK and _intents is not None:
@@ -6185,10 +6202,42 @@ def flatten_all(reason='KILL'):
 # ═══════════════════════════════════════════════════════
 
 def _ep_fetch_size(coin):
-    """Fetch authoritative position size from HL. Direct call (no cache)
-    because we need point-in-time truth during protection enforcement."""
+    """Fetch authoritative position size from HL.
+
+    2026-04-25: now uses cached state when fresh (≤2s) to avoid 429 cascade
+    during rapid SL/TP placement retries. Direct user_state() call only when
+    cache is genuinely stale or missing. Was: every call hits HL → DYM-style
+    429 storm during retry loops.
+    """
     try:
+        # Prefer cached state if fresh — protects against retry-storm 429s
+        try:
+            cache_ts = _cache.get('state_ts', 0)
+            if time.time() - cache_ts < 2.0:  # fresh enough
+                cached = _cache.get('state')
+                if cached:
+                    for ap in cached.get('assetPositions', []):
+                        p = ap.get('position', {})
+                        if p.get('coin', '').upper() == coin.upper():
+                            szi = float(p.get('szi', 0))
+                            if abs(szi) > 1e-12:
+                                return abs(szi)
+                    # Not in cache → position not held (don't fall through)
+                    return None
+        except Exception:
+            pass
+        # Cache stale or unavailable — direct call (with throttle)
+        try:
+            _hl_throttle()
+        except Exception:
+            pass
         us = info.user_state(WALLET)
+        # Refresh cache while we're here
+        try:
+            _cache['state'] = us
+            _cache['state_ts'] = time.time()
+        except Exception:
+            pass
         for ap in us.get('assetPositions', []):
             p = ap.get('position', {})
             if p.get('coin', '').upper() == coin.upper():
