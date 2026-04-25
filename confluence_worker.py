@@ -264,6 +264,18 @@ def _record_slippage(coin, slip_pct):
 
 def _register_position(coin, signal, fill_result):
     """Track cluster position locally for monitoring + exit management."""
+    # ─── ALIGNMENT 2026-04-25 STEP 2: hard check at entry ───────
+    # Even if a stray signal slips through earlier filters, refuse to
+    # register if coin is not in current System A whitelist.
+    try:
+        import percoin_configs as _pc
+        _wl = set(list(_pc.PURE_14.keys()) + list(_pc.NINETY_99.keys()) +
+                  list(_pc.EIGHTY_89.keys()) + list(_pc.SEVENTY_79.keys()))
+        if coin not in _wl:
+            _log(f"REJECT_ENTRY {coin}: not in current ELITE whitelist — alignment guard")
+            return
+    except Exception as e:
+        _log(f"alignment guard err {coin}: {e} — failing OPEN to allow entry")
     with _state_lock:
         _state['open_positions'][coin] = {
             'side': signal['side'],
@@ -274,6 +286,9 @@ def _register_position(coin, signal, fill_result):
             'tp_pct': signal['tp_pct'],
             'sl_pct': signal['sl_pct'],
             'max_hold_s': signal['max_hold_s'],
+            # ─── STEP 3: tag every trade with source universe ───
+            'universe': 'ELITE_71',
+            'universe_aligned_ts': 1777076400,  # 2026-04-25 alignment anchor
         }
         _state['total_fires'] += 1
         _state['last_fire_ts'][coin] = int(time.time())
@@ -380,8 +395,21 @@ def _scan_once():
         _log("precog not initialized yet, skip")
         return
 
-    # OOS-validated whitelist (190 tested, 99 passed PnL>=+2% on 60d 2-sys confluence)
-    CONFLUENCE_UNIVERSE = ['JUP', 'PENGU', 'MINA', 'MANTA', 'MOVE', 'ENA', 'GRIFFAIN', 'DYDX', 'WLD', 'ZEREBRO', 'GMX', 'HEMI', 'VIRTUAL', 'ALT', 'UNI', 'XPL', 'ZEN', 'MON', 'IP', 'ZEC', 'ENS', 'IOTA', 'SKY', 'TRB', 'BTC', 'CFX', 'LAYER', 'XLM', 'XMR', 'ZRO', 'LINEA', 'PENDLE', 'PYTH', 'SAGA', 'W', 'BCH', 'POPCAT', '2Z', 'EIGEN', 'HYPER', 'ME', 'ARB', 'GOAT', 'MET', 'MORPHO', 'ORDI', 'STX', 'kPEPE', 'PAXG', 'UMA', 'GAS', 'PURR', 'GALA', 'PNUT', 'FTT', 'MAV', 'SUPER', 'PUMP', 'BABY', 'FARTCOIN', 'SEI', 'TIA', 'MNT', 'ACE', 'PROMPT', '0G', 'ZK', 'NEAR', 'NIL', 'MERL', 'TRX', 'DOT', 'HYPE', 'LINK', 'MELANIA', 'NXPC', 'SUI', 'AAVE', 'IO', 'kLUNC', 'MEW', 'POLYX', 'AR', 'FIL', 'INIT', 'WIF', 'ZORA', 'kNEIRO', 'XRP', 'LTC', 'ANIME', 'BLAST', 'IMX', 'KAITO', 'RESOLV', 'REZ', 'RENDER', 'ALGO', 'VVV']
+    # ─── ALIGNMENT 2026-04-25: bind to System A universe ───────────
+    # Was: 99 hardcoded OOS-validated coins from earlier sweep.
+    # Now: imported live from percoin_configs — same source of truth as System A.
+    # Updates to whitelist auto-propagate. No drift, no silent mismatches.
+    try:
+        import percoin_configs as _pc
+        CONFLUENCE_UNIVERSE = sorted(set(
+            list(_pc.PURE_14.keys()) +
+            list(_pc.NINETY_99.keys()) +
+            list(_pc.EIGHTY_89.keys()) +
+            list(_pc.SEVENTY_79.keys())
+        ))
+    except Exception as e:
+        _log(f"universe import err, falling back to empty: {e}")
+        CONFLUENCE_UNIVERSE = []
     coins = CONFLUENCE_UNIVERSE
     if not coins:
         _log("no coin universe defined, skip")
@@ -569,3 +597,37 @@ def status():
     """Expose state for /health or /confluence endpoint."""
     with _state_lock:
         return dict(_state)
+
+
+def reset(preserve_history=False):
+    """Reset System B state. Used after universe alignment to clear positions
+    that were opened under the old (drift-prone) universe.
+    
+    If preserve_history=True, keeps total_fires/wins/losses/pnl as 'pre_alignment'
+    snapshot fields (for audit), zeros active counters.
+    """
+    with _state_lock:
+        if preserve_history:
+            _state['pre_alignment_snapshot'] = {
+                'total_fires': _state['total_fires'],
+                'wins': _state['wins'],
+                'losses': _state['losses'],
+                'timeouts': _state['timeouts'],
+                'total_pnl_pct': _state['total_pnl_pct'],
+                'snapshot_ts': int(time.time()),
+                'snapshot_reason': 'universe_alignment_2026_04_25',
+            }
+        # Clear active state
+        _state['open_positions'] = {}
+        _state['total_fires'] = 0
+        _state['wins'] = 0
+        _state['losses'] = 0
+        _state['timeouts'] = 0
+        _state['total_pnl_pct'] = 0.0
+        _state['fired_events'] = {}
+        _state['pending_queue'] = []
+        _state['last_fire_ts'] = {}
+        # last_bar_ts intentionally preserved — avoids re-firing same bars
+    _save_state()
+    _log("STATE RESET — universe alignment complete, fresh sample begins now")
+    return True
