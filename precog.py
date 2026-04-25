@@ -5705,6 +5705,164 @@ def try_tier_bump(incoming_coin, state, live_positions):
         log(f"TIER-BUMP: freed ~${freed:.0f} by closing {count} lower-tier positions for {incoming_coin}")
     return freed, count
 
+# ─── ATOMIC ENTRY DISPATCHER ─────────────────────────────────────────
+# 2026-04-25: when USE_ATOMIC_EXEC=1, route entry through atomic_entry which
+# submits entry+SL+TP in one bulk_orders call. Eliminates the fill-before-SL
+# race that was triggering the audit→enforce cascade. Falls back to legacy
+# place() if disabled or if atomic submission fails.
+
+def _compute_sl_px(coin, is_long, entry):
+    """Compute SL trigger price for atomic entry. Pure — no I/O.
+    Returns (sl_px_rounded, sl_pct_used) or (None, None)."""
+    sl_pct = STOP_LOSS_PCT  # global fallback
+    try:
+        if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+            cfg = percoin_configs.get_config(coin)
+            if cfg and 'SL' in cfg:
+                sl_pct = cfg['SL']
+    except Exception: pass
+    if not sl_pct or sl_pct <= 0:
+        return None, None
+    entry = float(entry)
+    trigger_px = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
+    try:
+        return float(round_price(coin, trigger_px)), float(sl_pct)
+    except Exception:
+        return float(trigger_px), float(sl_pct)
+
+
+def _compute_tp_px(coin, is_long, entry):
+    """Compute TP trigger price for atomic entry. Pure — no I/O.
+    Returns (tp_px_rounded, tp_pct_used) or (None, None)."""
+    cfg = None
+    try:
+        if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+            cfg = percoin_configs.get_config(coin)
+    except Exception: pass
+    if not cfg or 'TP' not in cfg:
+        # Contract fallback for non-elite coins
+        if _EC_OK and _contract is not None:
+            try:
+                cfg = _contract.get_fallback_config(coin)
+            except Exception:
+                return None, None
+        else:
+            return None, None
+    tp_pct = cfg.get('TP') if cfg else None
+    if not tp_pct or tp_pct <= 0:
+        return None, None
+    if MAX_TP_PCT > 0 and tp_pct > MAX_TP_PCT:
+        tp_pct = MAX_TP_PCT
+    entry = float(entry)
+    trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
+    try:
+        return float(round_price(coin, trigger_px)), float(tp_pct)
+    except Exception:
+        return float(trigger_px), float(tp_pct)
+
+
+def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
+    """Single entry-point that routes to atomic OR legacy based on flag.
+
+    Returns dict:
+      {
+        'fill_px':       float or None,
+        'sl_pct':        float or None,    # populated if atomic succeeded
+        'tp_pct':        float or None,    # populated if atomic succeeded
+        'atomic_used':   bool,             # True if bulk_orders succeeded
+        'reason':        str or None,
+      }
+
+    On atomic-success: SL+TP are already placed atomically. Caller should
+    SKIP enforce_position_protection (it would just be a redundant verifier).
+
+    On atomic-fail or flag-off: falls back to legacy place(). Caller should
+    run enforce_position_protection as before.
+    """
+    out = {'fill_px': None, 'sl_pct': None, 'tp_pct': None,
+           'atomic_used': False, 'reason': None}
+
+    # ─── Legacy path (flag off, or atomic skipped) ────────────────────
+    if not USE_ATOMIC_EXEC:
+        out['fill_px'] = place(coin, is_buy, size, cloid=cloid)
+        out['reason'] = 'flag_off'
+        return out
+
+    # ─── Atomic path ──────────────────────────────────────────────────
+    # Lifecycle lock — same dedup as place()
+    if cloid is not None:
+        if not order_state.acquire(cloid):
+            log(f"atomic_entry({coin}) SKIP: cloid={cloid} already in flight")
+            out['reason'] = 'cloid_in_flight'
+            return out
+
+    try:
+        # Pre-checks shared with place()
+        size = round_size(coin, size)
+        if size <= 0:
+            out['reason'] = 'size_rounded_zero'
+            log(f"{coin} size rounded to 0 — skip atomic"); return out
+
+        try:
+            set_isolated_leverage(coin)
+        except Exception as _le:
+            log(f"{coin} leverage set err (non-fatal): {_le}")
+
+        mark_px = get_mid(coin)
+        if not mark_px:
+            out['reason'] = 'no_mark_px'
+            log(f"{coin} no mid price — skip atomic"); return out
+
+        is_long = bool(is_buy)
+        sl_px, sl_pct = _compute_sl_px(coin, is_long, mark_px)
+        tp_px, tp_pct = _compute_tp_px(coin, is_long, mark_px)
+        if sl_px is None or tp_px is None:
+            # Can't form a complete bracket — fall back to legacy.
+            log(f"{coin} atomic skipped: sl_px={sl_px} tp_px={tp_px} → legacy")
+            out['fill_px'] = place(coin, is_buy, size, cloid=cloid)
+            out['reason'] = 'no_bracket_pcts'
+            return out
+
+        # Submit atomically
+        tid = trade_id or cloid or f"{coin}_{'B' if is_buy else 'S'}_{int(time.time())}"
+        result = atomic_entry.submit_atomic(
+            exchange=exchange,
+            coin=coin, is_buy=is_buy, size=size,
+            mark_px=mark_px, sl_px=sl_px, tp_px=tp_px,
+            trade_id=tid,
+            log_fn=log,
+        )
+
+        if result.get('success'):
+            out['fill_px'] = result.get('fill_px') or mark_px
+            out['sl_pct'] = sl_pct
+            out['tp_pct'] = tp_pct
+            out['atomic_used'] = True
+            out['reason'] = 'atomic_ok'
+            log(f"{coin} ATOMIC ENTRY ok: fill={out['fill_px']} "
+                f"sl={sl_px}({sl_pct*100:.2f}%) tp={tp_px}({tp_pct*100:.2f}%) "
+                f"oids: e={result.get('entry_oid')} sl={result.get('sl_oid')} tp={result.get('tp_oid')}")
+            return out
+
+        # Atomic failed — try legacy as last resort
+        log(f"{coin} ATOMIC FAILED ({result.get('reason')}) → legacy place()")
+        # If atomic placed orphan triggers, cancel them before legacy retry
+        for _kind, _oid in (('sl', result.get('sl_oid')), ('tp', result.get('tp_oid'))):
+            if _oid:
+                try:
+                    exchange.cancel(coin, _oid)
+                    log(f"{coin} cleaned up orphan {_kind}_oid={_oid}")
+                except Exception as _ce:
+                    log(f"{coin} orphan {_kind}_oid={_oid} cleanup err: {_ce}")
+        # Use _place_impl (lock-free) — we already hold the cloid lock in this scope
+        out['fill_px'] = _place_impl(coin, is_buy, size, cloid=cloid)
+        out['reason'] = f"atomic_fail_legacy_fallback:{result.get('reason')}"
+        return out
+    finally:
+        if cloid is not None:
+            order_state.release(cloid)
+
+
 def place(coin, is_buy, size, cloid=None):
     """HL-compliant price rounding + maker/taker handling.
 
@@ -7952,7 +8110,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 # STEP 2: generate trade identity before placing
                 _trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
                 _cloid = (f"{_trade_id[:8]}{coin[:4]}{'S'}"[:16]) if _trade_id else None
-                fill_px = place(coin, False, sz, cloid=_cloid)
+                # 2026-04-25: route entry through _dispatch_entry. When
+                # USE_ATOMIC_EXEC=1, this submits entry+SL+TP via bulk_orders
+                # (one atomic call) and atomic_used=True; we then skip
+                # enforce_position_protection. When flag=0 (default),
+                # dispatcher calls legacy place() and atomic_used=False;
+                # enforce runs normally.
+                _dr = _dispatch_entry(coin, False, sz, cloid=_cloid, trade_id=_trade_id)
+                fill_px = _dr['fill_px']
+                _atomic_used = _dr['atomic_used']
+                _atomic_sl_pct = _dr.get('sl_pct')
+                _atomic_tp_pct = _dr.get('tp_pct')
                 if fill_px:
                     # STEP 2: ENTRY event to ledger — binds identity before any further writes
                     if _LEDGER_OK and _ledger is not None and _trade_id:
@@ -7968,16 +8136,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_sell')
                         except Exception: pass
-                    # ENFORCE PROTECTION: atomic TP+SL placement with exchange
-                    # size authority. Replaces old sequential place_native_sl/tp.
-                    _ep_result = enforce_position_protection(coin, False, fill_px, origin='precog_15m_sell')
-                    _sl_pct_used = _ep_result.get('sl_pct')
-                    _tp_pct_used = _ep_result.get('tp_pct')
-                    if _INV_OK and _invariants is not None:
-                        try:
-                            _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
-                            _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
-                        except Exception: pass
+                    # ENFORCE PROTECTION: skip when atomic already placed bracket.
+                    # Atomic path: SL+TP submitted in same bulk_orders as entry —
+                    # there's no race window. Legacy: place SL/TP via enforce.
+                    if _atomic_used:
+                        _sl_pct_used = _atomic_sl_pct
+                        _tp_pct_used = _atomic_tp_pct
+                    else:
+                        _ep_result = enforce_position_protection(coin, False, fill_px, origin='precog_15m_sell')
+                        _sl_pct_used = _ep_result.get('sl_pct')
+                        _tp_pct_used = _ep_result.get('tp_pct')
+                        if _INV_OK and _invariants is not None:
+                            try:
+                                _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
+                                _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
+                            except Exception: pass
                     # CONTRACT: both TP and SL must be on exchange. If either
                     # is None, emergency close immediately (naked position).
                     if _EC_OK and _contract is not None:
@@ -8055,7 +8228,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 # STEP 2: generate trade identity before placing
                 _trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
                 _cloid = (f"{_trade_id[:8]}{coin[:4]}{'L'}"[:16]) if _trade_id else None
-                fill_px = place(coin, True, sz, cloid=_cloid)
+                # 2026-04-25: route entry through _dispatch_entry. See SELL site for rationale.
+                _dr = _dispatch_entry(coin, True, sz, cloid=_cloid, trade_id=_trade_id)
+                fill_px = _dr['fill_px']
+                _atomic_used = _dr['atomic_used']
+                _atomic_sl_pct = _dr.get('sl_pct')
+                _atomic_tp_pct = _dr.get('tp_pct')
                 if fill_px:
                     # STEP 2: ENTRY event to ledger
                     if _LEDGER_OK and _ledger is not None and _trade_id:
@@ -8071,16 +8249,19 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     if _INV_OK and _invariants is not None:
                         try: _invariants.record_action(coin, 'entry', size_before=0, size_after=sz, origin='precog_15m_buy')
                         except Exception: pass
-                    # ENFORCE PROTECTION: atomic TP+SL placement with exchange
-                    # size authority. Replaces old sequential place_native_sl/tp.
-                    _ep_result = enforce_position_protection(coin, True, fill_px, origin='precog_15m_buy')
-                    _sl_pct_used = _ep_result.get('sl_pct')
-                    _tp_pct_used = _ep_result.get('tp_pct')
-                    if _INV_OK and _invariants is not None:
-                        try:
-                            _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
-                            _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
-                        except Exception: pass
+                    # ENFORCE PROTECTION: skip when atomic placed bracket atomically.
+                    if _atomic_used:
+                        _sl_pct_used = _atomic_sl_pct
+                        _tp_pct_used = _atomic_tp_pct
+                    else:
+                        _ep_result = enforce_position_protection(coin, True, fill_px, origin='precog_15m_buy')
+                        _sl_pct_used = _ep_result.get('sl_pct')
+                        _tp_pct_used = _ep_result.get('tp_pct')
+                        if _INV_OK and _invariants is not None:
+                            try:
+                                _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
+                                _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
+                            except Exception: pass
                     # CONTRACT: enforce TP/SL presence post-entry
                     if _EC_OK and _contract is not None:
                         try:
@@ -8835,7 +9016,10 @@ def main():
                                 # STEP 2: generate trade identity before placing
                                 _wh_trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
                                 _wh_cloid = (f"{_wh_trade_id[:8]}{coin[:4]}{'L' if is_buy else 'S'}"[:16]) if _wh_trade_id else None
-                                fill = place(coin, is_buy, sz, cloid=_wh_cloid)
+                                # 2026-04-25: route entry through _dispatch_entry. See process() entry sites.
+                                _wh_dr = _dispatch_entry(coin, is_buy, sz, cloid=_wh_cloid, trade_id=_wh_trade_id)
+                                fill = _wh_dr['fill_px']
+                                _wh_atomic_used = _wh_dr['atomic_used']
                                 if fill:
                                     # STEP 2: ENTRY event to ledger
                                     if _LEDGER_OK and _ledger is not None and _wh_trade_id:
@@ -8848,10 +9032,14 @@ def main():
                                             )
                                         except Exception as _le:
                                             log(f"[ledger] webhook append_entry err {coin}: {_le}")
-                                    # ENFORCE PROTECTION: atomic TP+SL with authoritative size
-                                    _ep_res = enforce_position_protection(coin, is_buy, fill, origin='webhook')
-                                    _sl_pct_used = _ep_res.get('sl_pct')
-                                    _tp_pct_used = _ep_res.get('tp_pct')
+                                    # ENFORCE PROTECTION: skip when atomic placed bracket atomically.
+                                    if _wh_atomic_used:
+                                        _sl_pct_used = _wh_dr.get('sl_pct')
+                                        _tp_pct_used = _wh_dr.get('tp_pct')
+                                    else:
+                                        _ep_res = enforce_position_protection(coin, is_buy, fill, origin='webhook')
+                                        _sl_pct_used = _ep_res.get('sl_pct')
+                                        _tp_pct_used = _ep_res.get('tp_pct')
                                     try:
                                         _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
                                     except Exception:
