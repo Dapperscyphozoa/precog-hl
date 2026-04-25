@@ -337,31 +337,64 @@ def enforce_protection(coin, is_long, entry_px,
         # still waiting for exchange to propagate — keep checking, don't kill.
         sl_verified = False
         sl_state_str = 'UNKNOWN'
+
+        # ─── LEDGER-FIRST EARLY EXIT ─────────────────────────────────
+        # 2026-04-25: if WS-fed ledger already shows sl_oid, skip polling.
+        # The verify loop below was the dominant source of post-entry REST
+        # pressure; ledger short-circuits it when authoritative truth exists.
+        try:
+            import position_ledger as _pl_pre
+            if _pl_pre.ws_is_fresh(max_age_sec=30):
+                _prot = _pl_pre.get_protection(coin)
+                if _prot and _prot.get('sl_oid'):
+                    sl_verified = True
+                    sl_state_str = 'CONFIRMED_VIA_LEDGER_PRE'
+                    _log(f'{coin} SL pre-verified via ledger '
+                         f'(sl_oid={_prot["sl_oid"]}) — skipping verify loop.')
+        except Exception:
+            pass
+
         try:
             import sl_state_tracker as _slt
             # Register the placement
             _slt.mark_sent(coin, order_id=None, size=actual_size,
                             side=('SHORT' if is_long else 'LONG'), log_fn=_log)
-            # Poll across the verification window using state machine
-            verify_start = time.time()
-            while time.time() - verify_start < SL_DEADLINE_SEC:
-                state, reason = _slt.check_state(coin,
-                    fetch_orders_fn=lambda c: fetch_orders_fn(c),
-                    expected_size=actual_size, log_fn=_log)
-                sl_state_str = state
-                if state == _slt.CONFIRMED:
-                    sl_verified = True
-                    break
-                # PENDING or MISSING — but only break out on MISSING after
-                # grace cycles exhausted (state machine handles this internally)
-                if state == _slt.MISSING:
-                    break
-                time.sleep(1.0)  # gentler polling — state machine has propagation grace built in
+            if sl_verified:
+                # Already confirmed via ledger pre-check; just sync tracker
+                try: _slt.confirm(coin, log_fn=_log)
+                except Exception: pass
+            else:
+                # Poll across the verification window using state machine
+                verify_start = time.time()
+                while time.time() - verify_start < SL_DEADLINE_SEC:
+                    state, reason = _slt.check_state(coin,
+                        fetch_orders_fn=lambda c: fetch_orders_fn(c),
+                        expected_size=actual_size, log_fn=_log)
+                    sl_state_str = state
+                    if state == _slt.CONFIRMED:
+                        sl_verified = True
+                        break
+                    # PENDING or MISSING — but only break out on MISSING after
+                    # grace cycles exhausted (state machine handles this internally)
+                    if state == _slt.MISSING:
+                        break
+                    time.sleep(1.0)  # gentler polling — state machine has propagation grace built in
         except Exception as _slte:
             _log(f'{coin} SL state-tracker err (fallback to legacy poll): {_slte}')
             # Fallback: original poll loop if state tracker unavailable
             verify_start = time.time()
             while time.time() - verify_start < SL_DEADLINE_SEC:
+                # Even in fallback, check ledger every iteration (cheap)
+                try:
+                    import position_ledger as _pl_fb
+                    if _pl_fb.ws_is_fresh(max_age_sec=30):
+                        _prot_fb = _pl_fb.get_protection(coin)
+                        if _prot_fb and _prot_fb.get('sl_oid'):
+                            sl_verified = True
+                            sl_state_str = 'CONFIRMED_VIA_LEDGER_FB'
+                            break
+                except Exception:
+                    pass
                 try:
                     verify_orders = fetch_orders_fn(coin)
                     v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
@@ -373,7 +406,51 @@ def enforce_protection(coin, is_long, entry_px,
                 time.sleep(0.5)
 
         if not sl_verified:
-            # CRITICAL: SL state-machine confirms MISSING (or fallback timer expired)
+            # 2026-04-25: ledger-first + PENDING-tolerant breach decision.
+            # The verify loop exits at SL_DEADLINE_SEC; the tracker's grace
+            # window (PROPAGATION_GRACE_SEC + GRACE_CYCLES cycles) can exceed
+            # it, leaving state at PENDING. Previous logic treated that as
+            # SL_DEADLINE_BREACH → emergency close on healthy positions.
+            #
+            # New rule: emergency close requires BOTH
+            #   (a) tracker definitively says MISSING, AND
+            #   (b) position_ledger (fed by HL webData2 WS) shows no sl_oid
+            # On PENDING-with-no-ledger, defer to next reconciler cycle.
+            has_sl_in_ledger = False
+            try:
+                import position_ledger as _pl
+                if _pl.ws_is_fresh(max_age_sec=30):
+                    prot = _pl.get_protection(coin)
+                    if prot and prot.get('sl_oid'):
+                        has_sl_in_ledger = True
+            except Exception:
+                pass
+
+            if has_sl_in_ledger:
+                # WS authoritative — ledger sees the SL oid. Confirm it.
+                sl_verified = True
+                sl_state_str = 'CONFIRMED_VIA_LEDGER'
+                _log(f'{coin} SL verify loop exited unconfirmed but '
+                     f'ledger.sl_oid is set — confirming via WS truth.')
+                try:
+                    import sl_state_tracker as _slt
+                    _slt.confirm(coin, log_fn=_log)
+                except Exception:
+                    pass
+            elif sl_state_str == 'PENDING':
+                # Tracker hasn't reached MISSING yet. Don't kill the
+                # position — defer to next reconciler cycle which will
+                # re-run check_state. Soft-success here so this enforce
+                # call returns OK and TP placement still proceeds.
+                sl_verified = True
+                sl_state_str = 'PENDING_DEFERRED'
+                _log(f'{coin} SL verify loop exited at PENDING (tracker still '
+                     f'resolving). Deferring to next reconciler cycle. '
+                     f'NOT closing position.')
+
+        if not sl_verified:
+            # CRITICAL: tracker says MISSING AND ledger has no sl_oid.
+            # This is a genuine SL placement failure. Emergency close.
             _STATS['sl_deadline_breach'] += 1
             result['reason'] = f'SL_DEADLINE_BREACH: state={sl_state_str}'
             _log(f'⚠ CRITICAL: {result["reason"]} — EMERGENCY CLOSE')
@@ -414,12 +491,25 @@ def enforce_protection(coin, is_long, entry_px,
         final_sl_ok = sl_verified
         verify_start = time.time()
         while time.time() - verify_start < TP_DEADLINE_SEC:
+            # 2026-04-25: ledger-first SL check on every iteration. If WS
+            # ledger shows sl_oid is set, that's authoritative even if REST
+            # fetch_orders returns it briefly absent.
+            try:
+                import position_ledger as _pl_v
+                if _pl_v.ws_is_fresh(max_age_sec=30):
+                    _prot_v = _pl_v.get_protection(coin)
+                    if _prot_v and _prot_v.get('sl_oid'):
+                        final_sl_ok = True
+            except Exception:
+                pass
             try:
                 verify_orders = fetch_orders_fn(coin)
                 v_tp = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'tp']
                 v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
                 final_tp_ok = (len(v_tp) == 1 and abs(float(v_tp[0].get('sz', 0)) - actual_size) < 1e-9)
-                final_sl_ok = (len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9)
+                # If REST shows SL valid, accept; if not but ledger says SL is set, keep final_sl_ok=True from above
+                if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
+                    final_sl_ok = True
                 if final_tp_ok and final_sl_ok:
                     full_verified = True
                     break
@@ -441,21 +531,38 @@ def enforce_protection(coin, is_long, entry_px,
             result['success'] = False  # protection not fully complete
             # Do NOT emergency close — SL is protecting the position
         elif not final_sl_ok:
-            # SL lost between first verify and full check → emergency close
-            _STATS['sl_deadline_breach'] += 1
-            result['reason'] = 'SL_LOST_POST_PLACEMENT'
-            _log(f'⚠ CRITICAL: SL disappeared post-placement → EMERGENCY CLOSE')
-            if emergency_close_fn:
-                try:
-                    emergency_close_fn(coin, 'sl_lost_post_placement')
-                    result['emergency_closed'] = True
-                    _STATS['emergency_closes'] += 1
-                except Exception as e:
-                    _log(f'emergency_close err: {e}')
-            halt_coin(coin, duration_sec=300, reason='sl_lost_post_placement')
-            result['coin_halted'] = True
-            _STATS['failed'] += 1
-            _STATS['by_coin'][coin]['failed'] += 1
+            # 2026-04-25: ledger-first override before declaring SL lost.
+            # Emergency close requires BOTH tracker MISSING and ledger empty.
+            _ledger_has_sl = False
+            try:
+                import position_ledger as _pl_lost
+                if _pl_lost.ws_is_fresh(max_age_sec=30):
+                    _prot_lost = _pl_lost.get_protection(coin)
+                    if _prot_lost and _prot_lost.get('sl_oid'):
+                        _ledger_has_sl = True
+            except Exception:
+                pass
+            if _ledger_has_sl:
+                _log(f'{coin} REST says SL lost but ledger.sl_oid is set — '
+                     f'NOT closing (deferring to next reconciler cycle).')
+                result['reason'] = 'sl_lost_ledger_overrides_no_close'
+                result['success'] = False
+            else:
+                # SL lost between first verify and full check → emergency close
+                _STATS['sl_deadline_breach'] += 1
+                result['reason'] = 'SL_LOST_POST_PLACEMENT'
+                _log(f'⚠ CRITICAL: SL disappeared post-placement → EMERGENCY CLOSE')
+                if emergency_close_fn:
+                    try:
+                        emergency_close_fn(coin, 'sl_lost_post_placement')
+                        result['emergency_closed'] = True
+                        _STATS['emergency_closes'] += 1
+                    except Exception as e:
+                        _log(f'emergency_close err: {e}')
+                halt_coin(coin, duration_sec=300, reason='sl_lost_post_placement')
+                result['coin_halted'] = True
+                _STATS['failed'] += 1
+                _STATS['by_coin'][coin]['failed'] += 1
 
         return result
 
