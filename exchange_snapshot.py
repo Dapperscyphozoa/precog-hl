@@ -28,7 +28,10 @@ _SNAPSHOT = {
 _LOCK = threading.Lock()
 _STOP = threading.Event()
 _REFRESH_INTERVAL_SEC = 5
-_STALE_THRESHOLD_SEC = 30
+_STALE_THRESHOLD_SEC = 60   # 2026-04-25: 30→60. With refresh_interval at 10s
+                            # and occasional 429-induced skips, 30s was tripping
+                            # reconciler halt unnecessarily. 60s = 6 missed
+                            # refreshes before halt — true outage signal.
 _FILLS_WINDOW_SEC = 300  # keep 5 min of fills
 
 _user_state_fn = None  # callable(wallet) -> dict (HL clearinghouseState)
