@@ -41,6 +41,13 @@ import funding_arb
 # 2026-04-25: OKX-based candle fetcher replaces HL REST (CloudFront 429 cascade
 # on shared cloud IPs). Same dict shape as info.candles_snapshot for drop-in.
 import okx_fetch
+
+# 2026-04-25 (later): flight_guard adds per-coin spacing on HL execution
+# writes (cancel + order) to prevent CloudFront burst-trip on cancel→taker
+# patterns observed in logs (cancel err WLFI + 619ms later taker err WLFI,
+# both 429). order_state prevents duplicate lifecycle execution per trade_id.
+import flight_guard
+import order_state
 # Single-snapshot candle pipeline (collapses 78× per-tick fan-out into one
 # controlled snapshot rebuild per cycle — eliminates CloudFront 429 cascades).
 try:
@@ -2130,6 +2137,8 @@ def health():
                     'sl_state': (_sl_state_tracker.status() if _SL_STATE_OK else {'enabled': False}),
                     'execution_state': (_exec_state.status() if _EXEC_STATE_OK else {'enabled': False}),
                     'order_finality': (_order_finality.status() if _ORDER_FINALITY_OK else {'enabled': False}),
+                    'flight_guard': flight_guard.status(),
+                    'order_state': order_state.status(),
                     'recent_logs':LOG_BUFFER[-20:]})
 
 @app.route('/confluence', methods=['GET'])
@@ -4871,7 +4880,14 @@ _orig_exchange_order = exchange.order
 def _rate_limited_order(*args, **kwargs):
     """Rate-limit wrapper around exchange.order.
     Enforces: (1) min-interval between consecutive orders, (2) absolute
-    burst cap in a rolling window. Waits just enough to stay legal."""
+    burst cap in a rolling window, (3) per-coin spacing via flight_guard
+    to prevent same-coin write collisions (cancel→taker 429 pattern).
+    Waits just enough to stay legal."""
+    # Per-coin spacing first — cheap, prevents same-coin burst BEFORE
+    # we hit the global burst cap.
+    coin = args[0] if args else kwargs.get('coin')
+    if coin:
+        flight_guard.acquire(coin)
     with _order_lock:
         now = time.time()
         # Min-interval check
@@ -4898,6 +4914,33 @@ def _rate_limited_order(*args, **kwargs):
     return _orig_exchange_order(*args, **kwargs)
 
 exchange.order = _rate_limited_order
+
+# 2026-04-25: cancel wrapper. exchange.cancel was bypassing the order
+# rate limiter entirely, so cancel→taker on the same coin within ~600ms
+# kept tripping CloudFront (verified in logs: WLFI cancel + taker both
+# 429'd 619ms apart). Wrapping cancel in flight_guard fixes it.
+_orig_exchange_cancel = exchange.cancel
+def _rate_limited_cancel(*args, **kwargs):
+    """Apply per-coin spacing + global min-interval to cancels.
+    Same write-class as orders from CloudFront's perspective."""
+    coin = args[0] if args else kwargs.get('coin')
+    if coin:
+        flight_guard.acquire(coin)
+    # Also burn one slot in the global order rate limiter — cancel
+    # contributes to the same per-IP window as order placement.
+    with _order_lock:
+        now = time.time()
+        gap = now - _last_order_ts[0]
+        if gap < _ORDER_MIN_INTERVAL:
+            time.sleep(_ORDER_MIN_INTERVAL - gap)
+            now = time.time()
+        _last_order_ts[0] = now
+        _order_times.append(now)
+        cutoff = now - _ORDER_BURST_WINDOW
+        while _order_times and _order_times[0] < cutoff: _order_times.pop(0)
+    return _orig_exchange_cancel(*args, **kwargs)
+
+exchange.cancel = _rate_limited_cancel
 # ───────────────────────────────────────────────────────────────────────
 
 _META_CACHE = None
@@ -5636,7 +5679,25 @@ def place(coin, is_buy, size, cloid=None):
 
     Step 2: accepts optional cloid for exchange-side identity binding.
     cloid derives from trade_id by caller; see entry sites in process()/webhook.
+
+    2026-04-25: lifecycle lock — if a place() for this cloid is already in
+    flight (e.g. webhook re-fired while previous attempt still running),
+    skip and return None. Prevents duplicate fills and cancel/taker race.
     """
+    # Lifecycle lock — prevent duplicate dispatch on same trade_id
+    if cloid is not None:
+        if not order_state.acquire(cloid):
+            log(f"place({coin}) SKIP: cloid={cloid} already in flight")
+            return None
+    try:
+        return _place_impl(coin, is_buy, size, cloid)
+    finally:
+        if cloid is not None:
+            order_state.release(cloid)
+
+
+def _place_impl(coin, is_buy, size, cloid=None):
+    """Original place() body — wrapped by place() with lifecycle lock."""
     # Convert cloid string to hyperliquid Cloid object if provided
     _cloid_obj = None
     if cloid:
