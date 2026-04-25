@@ -1,15 +1,19 @@
 """Wall-bounce retest entry engine. Third signal source.
 Entry: verified wall holds → price pulls away ≥0.3% → returns within ±0.1% → fire aligned with V3.
 SL: tight behind wall (wall fails = exit fast). TP: opposite-side wall or 1.5x wall-distance.
+
+Env-tunable for chop regime: in low-vol chop, the default 0.3% pullback in 5min
+rarely triggers. Operators can relax via WALL_BNC_PULL_MIN (default 0.003) and
+WALL_BNC_PULL_LOOKBACK_SEC (default 300). For chop: 0.0015 + 600 fires more.
 """
-import time, threading
+import os, time, threading
 import orderbook_ws
 
-RETEST_PROXIMITY = 0.001   # within 0.1% of wall
-PULL_MIN = 0.003           # must have pulled away ≥0.3% first
-PULL_LOOKBACK_SEC = 300    # within last 5min
-MIN_WALL_USD = 750000      # larger than default OB threshold for higher conviction
-COOLDOWN_SEC = 600         # 10min per coin
+RETEST_PROXIMITY = float(os.environ.get('WALL_BNC_RETEST_PROXIMITY', '0.001'))   # within 0.1% of wall
+PULL_MIN = float(os.environ.get('WALL_BNC_PULL_MIN', '0.003'))                   # ≥0.3% pull-away
+PULL_LOOKBACK_SEC = int(os.environ.get('WALL_BNC_PULL_LOOKBACK_SEC', '300'))     # 5min default
+MIN_WALL_USD = float(os.environ.get('WALL_BNC_MIN_WALL_USD', '750000'))
+COOLDOWN_SEC = int(os.environ.get('WALL_BNC_COOLDOWN_SEC', '600'))               # 10min/coin
 
 _LAST_FIRED = {}           # coin -> ts
 _PULL_HISTORY = {}         # coin -> [(ts, px, wall_price, wall_side)]
