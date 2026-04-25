@@ -6606,15 +6606,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if coin_disabled(coin, state): return
 
     # STEP 3: reconciler halt flag — block new entries if drift is unsafe
+    # 2026-04-25: SAFE MODE — drift≥5% no longer hard-blocks entries.
+    # Diagnosis: during candle bucket rebuild windows, ledger/exchange snapshots
+    # can briefly diverge (ingestion artifact, not real divergence). Hard HALT
+    # was reacting to data-pacing noise, blocking valid trades. Now: warn +
+    # size×0.5 instead of full block. Real persistent drift (3+ consecutive
+    # cycles) still triggers entry suppression via entry_limiter().
     if _RECONCILER_OK and _reconciler is not None:
         try:
             if _reconciler.is_halted():
+                # Was: return (hard block). Now: log + size penalty.
                 if hash(coin + str(int(time.time() / 300))) % 10 == 0:
-                    log(f"{coin} LIFECYCLE HALT — reconciler drift ≥ 5%, blocking new entries")
-                return
+                    log(f"{coin} LIFECYCLE WARN — reconciler drift ≥ 5%, sizing×0.5 (safe mode, not blocking)")
+                risk_mult = risk_mult * 0.5
+                # NO RETURN — let signal proceed at half size
             # STEP 4 spec §2B: degraded-state entry limiter
             limiter = _reconciler.entry_limiter()
             if limiter == 'halted':
+                # Reconciler-internal hard halt (3+ unsafe cycles) — still respected
+                if hash(coin + str(int(time.time() / 300))) % 10 == 0:
+                    log(f"{coin} ENTRY-LIMITER halted: persistent drift across cycles")
                 return
             if limiter == 'reduced':
                 # Scale risk_mult down by 50% when drift degraded (1-5%)
