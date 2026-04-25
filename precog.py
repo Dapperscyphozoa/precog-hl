@@ -4812,6 +4812,22 @@ CANDLE_CACHE_SEC = 300  # 2026-04-22: 120→300s. Longer cache = fewer HL REST
                         # catches every fresh bar close. Reduces HL burst load.
 CANDLE_COLD_SEC = 60    # after a 429, skip this coin's HL fetches for 60s
 
+# Global HL throttle: shared mutex enforces min-gap across ALL worker threads.
+# Without this, 8 ThreadPool workers each had their own 50ms sleep → bursts of
+# 8 simultaneous HL requests every 400ms → instant 429.
+_HL_THROTTLE_LOCK = threading.Lock()
+_HL_LAST_CALL = [0.0]   # mutable container for thread-shared state
+HL_MIN_GAP_SEC = 0.12   # 120ms between any two HL REST candle fetches → ~8 req/s ceiling
+
+def _hl_throttle():
+    """Block until enough time has elapsed since the last HL call (any thread)."""
+    with _HL_THROTTLE_LOCK:
+        now = time.time()
+        gap = now - _HL_LAST_CALL[0]
+        if gap < HL_MIN_GAP_SEC:
+            time.sleep(HL_MIN_GAP_SEC - gap + random.uniform(0, 0.02))
+        _HL_LAST_CALL[0] = time.time()
+
 def fetch(coin, n_bars=100, retries=3):
     """Bybit WS candles FIRST (no rate limit), HL REST only as fallback."""
     now = time.time()
@@ -4833,9 +4849,9 @@ def fetch(coin, n_bars=100, retries=3):
     cold_until = _CANDLE_COLD.get(coin, 0)
     if now < cold_until:
         return cached['data'] if cached else []
-    # Serialized inter-call delay. Multiple coins fetching in quick
-    # succession cause bursts. 50ms between fetches spreads the load.
-    time.sleep(0.05)
+    # Global throttle (shared across all worker threads — was per-thread sleep,
+    # which let 8 workers burst HL simultaneously and trigger 429s).
+    _hl_throttle()
     end=int(time.time()*1000); start=end-n_bars*15*60*1000
     for attempt in range(retries):
         try:
@@ -5735,6 +5751,7 @@ def run_profit_management(state, live_positions):
                 # 1h bias
                 _c1h = _CANDLE_CACHE.get(f'htf_1h_{coin}')
                 if not _c1h or time.time() - _c1h['ts'] > 600:
+                    _hl_throttle()
                     _body = json.dumps({'type':'candleSnapshot',
                         'req':{'coin':coin,'interval':'1h',
                                'startTime': int(time.time()*1000) - 30*3600*1000,
@@ -5749,6 +5766,7 @@ def run_profit_management(state, live_positions):
                 # 4h bias
                 _c4h = _CANDLE_CACHE.get(f'htf_4h_{coin}')
                 if not _c4h or time.time() - _c4h['ts'] > 600:
+                    _hl_throttle()
                     _body = json.dumps({'type':'candleSnapshot',
                         'req':{'coin':coin,'interval':'4h',
                                'startTime': int(time.time()*1000) - 30*4*3600*1000,
@@ -7026,6 +7044,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 if _cached and time.time() - _cached['ts'] < 600:  # 10min cache
                     _c_4h = _cached['data']
                 else:
+                    _hl_throttle()
                     _body = json.dumps({'type':'candleSnapshot',
                         'req':{'coin':coin,'interval':'4h',
                                'startTime': int(time.time()*1000) - 30*4*3600*1000,
