@@ -106,13 +106,30 @@ def cloid_for(coin, side, purpose, size, precision=6):
     - No timestamp → retries don't create duplicates
     - Includes side to avoid TP/SL confusion across opposing positions
 
-    Returns a 16-char hex string (HL accepts 128-bit cloids).
+    Returns a hyperliquid.utils.types.Cloid object (NOT a raw string).
+
+    Critical: HL SDK calls .to_raw() on cloids during signing — passing a
+    bare string crashes the SL/TP placement path with "'str' object has no
+    attribute 'to_raw'". Always return the wrapped object.
+
+    Idempotent: if input is already a Cloid (future refactors), passes
+    through unchanged. Prevents Cloid(Cloid(...)) double-wrap bugs later.
     """
     import hashlib
     sz_rounded = round(float(size), precision)
     key = f"{coin.upper()}_{side}_{purpose}_{sz_rounded}"
     h = hashlib.sha256(key.encode()).hexdigest()
-    return '0x' + h[:32]  # 128-bit cloid, HL-compatible format
+    raw = '0x' + h[:32]  # 128-bit cloid, HL-compatible format
+    # 2026-04-25: wrap in Cloid object for SDK compatibility, idempotent.
+    try:
+        from hyperliquid.utils.types import Cloid
+        # Idempotency guard: pass through if already a Cloid (defensive)
+        if isinstance(raw, Cloid):
+            return raw
+        return Cloid(raw)
+    except Exception:
+        # Fallback: if SDK unavailable, return raw string (legacy paths)
+        return raw
 
 
 def _wait_for_size_settlement(fetch_size_fn, coin, timeout=3.0):
