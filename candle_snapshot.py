@@ -46,7 +46,7 @@ _BUILD_LOCK = {
     'started_at': 0.0,
 }
 
-SNAPSHOT_TTL_SEC = 180.0   # 2026-04-25: 60→180. With throttle raised to 0.7s
+SNAPSHOT_TTL_SEC = 300.0   # 5 min — accommodates 156s build at 2.0s gap
                            # for CloudFront friendliness, build takes ~55s for
                            # 78 coins. 60s TTL caused stale flips immediately
                            # after each commit. 180s gives 3 builds of headroom.
