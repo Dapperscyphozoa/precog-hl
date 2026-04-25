@@ -2174,6 +2174,8 @@ def confluence_status():
         total_closed = st.get('wins', 0) + st.get('losses', 0)
         if total_closed > 0:
             wr = st['wins'] * 100 // total_closed
+        # Last-bar diagnostics — if empty, worker isn't fetching candles
+        last_bars = st.get('last_bar_ts', {})
         return jsonify({
             'enabled': cw.ENABLED,
             'dry_run': cw.DRY_RUN,
@@ -2188,6 +2190,10 @@ def confluence_status():
             'total_pnl_pct': st.get('total_pnl_pct', 0.0),
             'open_positions': st.get('open_positions', {}),
             'last_fire_ts': st.get('last_fire_ts', {}),
+            # Diagnostics
+            'last_bar_coins': len(last_bars),
+            'last_bar_sample': dict(list(last_bars.items())[:5]),
+            'killed_coins': list(st.get('killed_coins', {}).keys())[:20],
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
