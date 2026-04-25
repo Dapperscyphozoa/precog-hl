@@ -323,44 +323,53 @@ def enforce_protection(coin, is_long, entry_px,
             _log(f'place_sl err: {e}')
         sl_elapsed = time.time() - sl_start
 
-        # 5a. VERIFY SL EXISTS within deadline
+        # 5a. VERIFY SL EXISTS — STATE MACHINE based (no single-shot timer)
+        # 2026-04-25 (final): replaced poll-with-deadline + second-pass with
+        # event-confirmed state machine. mark_sent() registers the placement;
+        # check_state() returns CONFIRMED/PENDING/MISSING. Emergency close
+        # ONLY fires on MISSING (after grace cycles). PENDING means we're
+        # still waiting for exchange to propagate — keep checking, don't kill.
         sl_verified = False
-        verify_start = time.time()
-        while time.time() - verify_start < SL_DEADLINE_SEC:
-            try:
-                verify_orders = fetch_orders_fn(coin)
-                v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
-                if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
+        sl_state_str = 'UNKNOWN'
+        try:
+            import sl_state_tracker as _slt
+            # Register the placement
+            _slt.mark_sent(coin, order_id=None, size=actual_size,
+                            side=('SHORT' if is_long else 'LONG'), log_fn=_log)
+            # Poll across the verification window using state machine
+            verify_start = time.time()
+            while time.time() - verify_start < SL_DEADLINE_SEC:
+                state, reason = _slt.check_state(coin,
+                    fetch_orders_fn=lambda c: fetch_orders_fn(c),
+                    expected_size=actual_size, log_fn=_log)
+                sl_state_str = state
+                if state == _slt.CONFIRMED:
                     sl_verified = True
                     break
-            except Exception:
-                pass
-            time.sleep(0.5)
-
-        # 2026-04-25: Option C — second confirmation pass before emergency close.
-        # If first window missed, wait for exchange state to propagate then check
-        # one more time. Distinguishes "SL never placed" (persists across cycles)
-        # from "SL placed, state lag" (resolves on second check). Only fires
-        # emergency close when SL is genuinely missing across both windows.
-        if not sl_verified:
-            _log(f'{coin} SL not visible in {SL_DEADLINE_SEC}s — second-pass check before emergency')
-            time.sleep(5.0)  # let exchange state propagate
-            for _retry in range(SL_EMERGENCY_CONFIRM_CYCLES):
+                # PENDING or MISSING — but only break out on MISSING after
+                # grace cycles exhausted (state machine handles this internally)
+                if state == _slt.MISSING:
+                    break
+                time.sleep(1.0)  # gentler polling — state machine has propagation grace built in
+        except Exception as _slte:
+            _log(f'{coin} SL state-tracker err (fallback to legacy poll): {_slte}')
+            # Fallback: original poll loop if state tracker unavailable
+            verify_start = time.time()
+            while time.time() - verify_start < SL_DEADLINE_SEC:
                 try:
                     verify_orders = fetch_orders_fn(coin)
                     v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
-                    if len(v_sl) >= 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
+                    if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
                         sl_verified = True
-                        _log(f'{coin} SL verified on second-pass (was state lag, not failure)')
                         break
                 except Exception:
                     pass
-                time.sleep(2.0)
+                time.sleep(0.5)
 
         if not sl_verified:
-            # CRITICAL: SL deadline breach → emergency close + halt coin
+            # CRITICAL: SL state-machine confirms MISSING (or fallback timer expired)
             _STATS['sl_deadline_breach'] += 1
-            result['reason'] = f'SL_DEADLINE_BREACH: SL not verified within {SL_DEADLINE_SEC}s'
+            result['reason'] = f'SL_DEADLINE_BREACH: state={sl_state_str}'
             _log(f'⚠ CRITICAL: {result["reason"]} — EMERGENCY CLOSE')
 
             if emergency_close_fn:
