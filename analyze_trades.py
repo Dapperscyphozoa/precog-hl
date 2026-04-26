@@ -154,7 +154,11 @@ def load_trades(path):
                 completed.append({
                     **e,
                     'exit_price': to_float(r.get('exit_price')),
-                    'pnl': to_float(r.get('pnl'), 0.0),
+                    # 2026-04-26: pnl default None (not 0). A close with no
+                    # pnl recorded is UNKNOWN, not a breakeven. Conflating
+                    # the two understated WR — saw it on CONFLUENCE_SWING:
+                    # 1W/1L/1unknown was reading as 33% WR instead of 50%.
+                    'pnl': to_float(r.get('pnl')),
                     'close_reason': r.get('close_reason', '') or 'unknown',
                     'funding_paid_pct': to_float(r.get('funding_paid_pct')),
                     'mfe_pct': to_float(r.get('mfe_pct')),
@@ -166,7 +170,13 @@ def load_trades(path):
 
 
 def bucket_stats(trades, key_fn):
-    """Group trades by key_fn(trade) and compute per-bucket stats."""
+    """Group trades by key_fn(trade) and compute per-bucket stats.
+
+    2026-04-26: WR computed as wins / (wins + losses). Breakevens and
+    unknowns excluded from the denominator — a flat-PnL trade isn't
+    a loss, and a trade with no recorded pnl shouldn't be counted at all.
+    Wilson CI bounds the WR estimate over the DECIDED population only.
+    """
     buckets = defaultdict(list)
     for t in trades:
         k = key_fn(t)
@@ -174,21 +184,27 @@ def bucket_stats(trades, key_fn):
     out = {}
     for k, ts in buckets.items():
         n = len(ts)
-        pnls = [t['pnl'] or 0.0 for t in ts]
-        wins = sum(1 for p in pnls if p > 0)
-        losses = sum(1 for p in pnls if p < 0)
-        wr = wins / n if n else 0.0
-        lo, hi = wilson_ci(wins, n)
+        # Separate decided/breakeven/unknown
+        pnls_known = [t['pnl'] for t in ts if t.get('pnl') is not None]
+        unknown = n - len(pnls_known)
+        wins = sum(1 for p in pnls_known if p > 0)
+        losses = sum(1 for p in pnls_known if p < 0)
+        breakeven = sum(1 for p in pnls_known if p == 0)
+        decided = wins + losses
+        wr = (wins / decided) if decided else None
+        lo, hi = wilson_ci(wins, decided) if decided else (0.0, 0.0)
         funding_present = sum(1 for t in ts if t.get('funding_paid_pct') is not None)
         out[k] = {
             'n': n,
             'wins': wins,
             'losses': losses,
-            'wr_pct': round(wr * 100, 1),
-            'wilson_95_lo_pct': round(lo * 100, 1),
-            'wilson_95_hi_pct': round(hi * 100, 1),
-            'mean_pnl': round(sum(pnls) / n, 4) if n else 0.0,
-            'sum_pnl': round(sum(pnls), 4),
+            'breakeven': breakeven,
+            'unknown': unknown,
+            'wr_pct': round(wr * 100, 1) if wr is not None else None,
+            'wilson_95_lo_pct': round(lo * 100, 1) if decided else None,
+            'wilson_95_hi_pct': round(hi * 100, 1) if decided else None,
+            'mean_pnl': round(sum(pnls_known) / len(pnls_known), 4) if pnls_known else 0.0,
+            'sum_pnl': round(sum(pnls_known), 4),
             'funding_logged_pct': round(funding_present / n * 100, 1) if n else 0.0,
         }
     return out
@@ -207,12 +223,17 @@ def render(title, stats):
     print(f"\n=== {title} ===")
     rows = sorted(stats.items(), key=lambda kv: -kv[1]['n'])
     width = max(8, max(len(str(k)) for k, _ in rows))
-    print(f"{'bucket'.ljust(width)}  {'n':>5}  {'wr%':>5}  "
-          f"{'wilson_95%':>13}  {'mean_pnl':>10}  {'sum_pnl':>11}  {'fund%':>6}")
+    # n = total / w/l/be/un = decided/breakeven/unknown breakdown
+    print(f"{'bucket'.ljust(width)}  {'n':>4} {'w':>3}/{'l':>3}/{'be':>3}/{'un':>3}  "
+          f"{'wr%':>5}  {'wilson_95%':>13}  {'mean_pnl':>10}  {'sum_pnl':>11}  {'fund%':>6}")
     for k, s in rows:
-        wilson = f"[{s['wilson_95_lo_pct']:.1f},{s['wilson_95_hi_pct']:.1f}]"
-        print(f"{str(k).ljust(width)}  {s['n']:>5}  {s['wr_pct']:>5.1f}  "
-              f"{wilson:>13}  {s['mean_pnl']:>10.4f}  {s['sum_pnl']:>11.4f}  "
+        wr_str = f"{s['wr_pct']:>5.1f}" if s.get('wr_pct') is not None else "  —  "
+        if s.get('wilson_95_lo_pct') is not None:
+            wilson = f"[{s['wilson_95_lo_pct']:.1f},{s['wilson_95_hi_pct']:.1f}]"
+        else:
+            wilson = "      —      "
+        print(f"{str(k).ljust(width)}  {s['n']:>4} {s['wins']:>3}/{s['losses']:>3}/{s.get('breakeven',0):>3}/{s.get('unknown',0):>3}  "
+              f"{wr_str}  {wilson:>13}  {s['mean_pnl']:>10.4f}  {s['sum_pnl']:>11.4f}  "
               f"{s['funding_logged_pct']:>6.1f}")
 
 
@@ -220,26 +241,35 @@ def header_summary(trades):
     n = len(trades)
     if n == 0:
         return
-    pnls = [t['pnl'] or 0.0 for t in trades]
-    wins = sum(1 for p in pnls if p > 0)
-    wr = wins / n
-    lo, hi = wilson_ci(wins, n)
-    total = sum(pnls)
+    pnls_known = [t['pnl'] for t in trades if t.get('pnl') is not None]
+    unknown = n - len(pnls_known)
+    wins = sum(1 for p in pnls_known if p > 0)
+    losses = sum(1 for p in pnls_known if p < 0)
+    breakeven = sum(1 for p in pnls_known if p == 0)
+    decided = wins + losses
+    wr = (wins / decided) if decided else None
+    lo, hi = wilson_ci(wins, decided) if decided else (0.0, 0.0)
+    total = sum(pnls_known)
     funding_logged = sum(1 for t in trades if t.get('funding_paid_pct') is not None)
     edge_logged = sum(1 for t in trades if t.get('expected_edge_at_entry') is not None)
     holds_known = [t['hold_sec'] for t in trades if t.get('hold_sec') is not None]
     median_hold = (sorted(holds_known)[len(holds_known) // 2] if holds_known else None)
 
     print("=" * 64)
-    print(f"  TRADES: {n}")
-    print(f"  WIN RATE: {wr*100:.1f}%   wilson_95=[{lo*100:.1f}, {hi*100:.1f}]")
-    print(f"  TOTAL PnL: {total:.4f} USD   mean={total/n:.4f}")
+    print(f"  TRADES: {n}  (decided={decided} W={wins} L={losses} BE={breakeven} unknown={unknown})")
+    if wr is not None:
+        print(f"  WIN RATE: {wr*100:.1f}%   wilson_95=[{lo*100:.1f}, {hi*100:.1f}]   (over decided trades)")
+    else:
+        print(f"  WIN RATE: —   no decided trades to compute over")
+    print(f"  TOTAL PnL: {total:.4f} USD   mean={(total/len(pnls_known)):.4f} per known trade" if pnls_known else f"  TOTAL PnL: 0   no pnl recorded")
     if median_hold is not None:
         print(f"  MEDIAN HOLD: {median_hold/60:.1f} min")
     print(f"  Edge logged: {edge_logged}/{n} ({edge_logged/n*100:.0f}%)   "
           f"Funding logged: {funding_logged}/{n} ({funding_logged/n*100:.0f}%)")
-    if lo < 0.5:
+    if wr is not None and lo < 0.5:
         print("  >>> Wilson lower bound <50% — WR is not yet distinguishable from a coin flip.")
+    if unknown > 0:
+        print(f"  >>> {unknown} trades have no recorded pnl — data quality issue, not counted in WR.")
     print("=" * 64)
 
 
