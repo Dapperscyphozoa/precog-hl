@@ -69,16 +69,22 @@ DECAY_PNL_THRESHOLD = 0.0
 DEDUPE_WINDOW_S = 24 * 3600
 
 # ─── FIX B: entry drift control ──────────────────────────────────────
-MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '3600'))
-# 2026-04-26: was hardcoded 15min. Empirically impossible: bars are
-# timestamped at bar START, so a signal on the bar that just closed has
-# age=15min before the scan even runs (bar took 15min to form). Add
-# scan_interval lag and every signal hits 18-22min minimum, so the
-# 15min gate rejected 100% of yielded signals. Net effect: 0 fires
-# despite 32+ signals/scan. Default raised to 60min — covers ~4 bars
-# of look-back; IOC slippage buffer (0.08%) protects against price
-# drift on genuinely stale signals (won't fill if price moved away).
-# Operator can tune via env without redeploy.
+MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '86400'))
+# 2026-04-26: was hardcoded 15min, then 60min — both empirically inadequate.
+# `latest_signal_ts` is the bar START of the most recent qualifying bar in
+# the 24h CONF_WINDOW. EMA crosses with all 6 filters passing are rare, so
+# the most recent qualifier is typically 1-12h old. With caps below 60min
+# we got: 15min→32 stale 0 fires, 60min→29 stale 0 fires (regime shifted
+# but same blocker pattern).
+#
+# Default 86400s = 24h, matches CONF_WINDOW_S — effectively defers to the
+# engine's own window as the upper bound. The IOC slippage buffer (0.08%
+# in _size_and_fire) is the natural price-staleness filter: if the market
+# drifted past entry, the order won't fill. Bad fills aren't possible.
+# Maximum signal flow with bounded execution risk.
+#
+# Tighten via CONFLUENCE_MAX_SIGNAL_AGE_S env if no-fill IOCs spike API
+# usage. e.g. =14400 (4h), =3600 (60min, prior default).
 
 _state = {
     'last_fire_ts': {},          # coin -> ts (24h cooldown tracking)
