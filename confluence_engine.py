@@ -53,6 +53,27 @@ SYSTEMS = {
     'SWING':  {'tf_mult': 4,  'lookback': 20, 'max_pct': 2.0,
                'buy_max': 70, 'sell_min': 30, 'vol_mult': 1.3},
 }
+
+# 2026-04-26: FUNDING as 4th orthogonal system.
+# Existing 3 systems are all price-action (RSI/EMA/structure on bars). They
+# correlate. Adding a 4th price-action input would mostly echo the others.
+# Funding rate is microstructure (positioning/leverage state) — strictly
+# orthogonal information, doesn't redundantly confirm.
+#
+# Logic mirrors precog FUNDING_MR engine: extreme funding = crowd paying to
+# hold one side = mean-revert opportunity. Sign convention on HL: positive
+# funding = longs pay shorts.
+#   funding > +THRESHOLD  →  longs paying  →  SELL signal (fade the crowd)
+#   funding < -THRESHOLD  →  shorts paying →  BUY signal (fade the crowd)
+#
+# Why this both increases triggers AND reduces noise on SWING:
+#   - More triggers: net-new combinations possible — FUNDING alone, plus
+#     FUNDING+SNIPER, FUNDING+DAY, FUNDING+SWING. Previously these scenarios
+#     had no signal path.
+#   - Less noise on SWING: SWING+FUNDING (n_sys=2) is a higher-quality fire
+#     than SWING-alone. The additional signal lets us prefer 2-sys combos
+#     when both are available.
+FUNDING_THRESHOLD_HR_PCT = 0.0001  # 1bp/hr = 24bp/day. Mirrors FUNDING_MR.
 HTF_MULT_FOR_F6 = 16  # 4h context from 15m base
 
 # ─── Per-filter rejection counters (instrumentation, no logic change) ────
@@ -350,6 +371,20 @@ def eval_coin(coin, bars_15m, now_ts=None):
         'DAY':    _recent_signals(ctx_30, ctx_4h, 'DAY',    CONF_WINDOW_S),
         'SWING':  _recent_signals(ctx_60, ctx_4h, 'SWING',  CONF_WINDOW_S),
     }
+
+    # FUNDING as 4th system — point-in-time check, not bar-windowed. Live
+    # funding rate beats THRESHOLD on either side → emit (now_ts, side).
+    # Best-effort: any failure (module not loaded, no rate cached) falls
+    # through silently — the engine works fine on the original 3 systems.
+    try:
+        from funding_arb import get_hl_funding_rate
+        _rate = float(get_hl_funding_rate(coin) or 0.0)
+        if _rate > FUNDING_THRESHOLD_HR_PCT:
+            recents['FUNDING'] = [(now_ts, 'SELL')]   # fade longs paying funding
+        elif _rate < -FUNDING_THRESHOLD_HR_PCT:
+            recents['FUNDING'] = [(now_ts, 'BUY')]    # fade shorts paying funding
+    except Exception:
+        pass
 
     # Tally per side
     by_side = {'BUY': set(), 'SELL': set()}
