@@ -1058,8 +1058,8 @@ async function loadConfluence() {
         if (posKeys.length === 0) {
             posDiv.innerHTML = '<div style="opacity:0.5;font-style:italic;padding:8px 0">// no open confluence positions</div>';
         } else {
-            const headerStyle = 'display:grid;grid-template-columns:90px 50px 90px 130px 70px 70px 100px;gap:8px;padding:6px 0;font-weight:bold;color:var(--blood);border-bottom:1px solid var(--blood);font-size:10px;letter-spacing:0.05em';
-            const rowStyle = 'display:grid;grid-template-columns:90px 50px 90px 130px 70px 70px 100px;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,0,0,0.08)';
+            const headerStyle = 'display:grid;grid-template-columns:80px 40px 80px 110px 55px 55px 60px 60px 80px;gap:6px;padding:6px 0;font-weight:bold;color:var(--blood);border-bottom:1px solid var(--blood);font-size:10px;letter-spacing:0.05em';
+            const rowStyle = 'display:grid;grid-template-columns:80px 40px 80px 110px 55px 55px 60px 60px 80px;gap:6px;padding:4px 0;border-bottom:1px solid rgba(255,0,0,0.08)';
             const rows = posKeys.map(k => {
                 const p = positions[k] || {};
                 const sysStr = (p.systems || []).join('+');
@@ -1069,18 +1069,30 @@ async function loadConfluence() {
                 const sl = (p.sl_at_be ? 'BE' : (p.sl_pct ? (p.sl_pct*100).toFixed(2)+'%' : '—'));
                 const tid = p.trade_id ? p.trade_id.slice(0,8) : '<span style="color:#f88">no_id</span>';
                 const ageMin = p.ts ? Math.floor((Date.now()/1000 - p.ts)/60) : 0;
+                // MFE/MAE — instant visibility into "is this trade going right"
+                const mfeRaw = p.mfe_pct;
+                const maeRaw = p.mae_pct;
+                const mfe = (mfeRaw != null) ? (mfeRaw*100).toFixed(2)+'%' : '—';
+                const mae = (maeRaw != null) ? (maeRaw*100).toFixed(2)+'%' : '—';
+                // Diagnostic flag: position is mfe=0 + mae<-0.3% = bad-entry pattern
+                const badEntry = (mfeRaw === 0 && maeRaw != null && maeRaw < -0.003);
+                const coinHtml = badEntry
+                    ? `<strong style="color:#f88">${k}</strong> <span style="opacity:0.4;font-size:9px">${ageMin}m</span>`
+                    : `<strong>${k}</strong> <span style="opacity:0.4;font-size:9px">${ageMin}m</span>`;
                 return `<div style="${rowStyle}">
-                    <div><strong>${k}</strong> <span style="opacity:0.4;font-size:9px">${ageMin}m</span></div>
+                    <div>${coinHtml}</div>
                     <div><span class="pos-side ${sideClass}">${sideShort}</span></div>
                     <div>${p.entry||'?'}</div>
                     <div style="font-size:10px;opacity:0.85">${sysStr}</div>
                     <div style="color:var(--acid)">${tp}</div>
                     <div style="color:#f88">${sl}</div>
+                    <div style="color:var(--acid);font-size:10px">${mfe}</div>
+                    <div style="color:#f88;font-size:10px">${mae}</div>
                     <div style="font-family:monospace;font-size:10px;opacity:0.7">${tid}</div>
                 </div>`;
             }).join('');
             posDiv.innerHTML = `<div style="${headerStyle}">
-                <div>COIN</div><div>SIDE</div><div>ENTRY</div><div>SYSTEMS</div><div>TP</div><div>SL</div><div>TRADE_ID</div>
+                <div>COIN</div><div>SIDE</div><div>ENTRY</div><div>SYSTEMS</div><div>TP</div><div>SL</div><div>MFE</div><div>MAE</div><div>TRADE_ID</div>
             </div>${rows}`;
         }
 
