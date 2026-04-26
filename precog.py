@@ -754,7 +754,17 @@ MIN_RR = float(os.environ.get('MIN_RR', '1.2'))
 # regardless of computed size. ($11 not $10 — buffer above HL's $10 minimum
 # for rounding + slippage so orders don't bounce.) Use for diagnostic phase
 # only. Set to 0 to disable and resume normal sizing.
-FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '11'))
+FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '22'))
+# 2026-04-26: 11 → 22. User's discipline was "scale when profitable". After
+# +$2 equity climb in 8h post-fix, scaling 2x. Same risk math (2.5% SL),
+# 2x dollar PnL per trade. Override via env if needed.
+
+# 2026-04-26: per-coin blocklist for engines that have shown persistent
+# losing patterns. Initially RSR (PIVOT engine, single -$0.45 event) and
+# JTO (FUNDING_MR engine, single -$0.34 event). Both engines have high
+# WR overall (70% and 86%) — only these specific coins drag them.
+# Comma-separated. Override via env.
+COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,JTO').split(',') if c.strip()}
 
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
@@ -6319,6 +6329,15 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
     if coin and coin.startswith('k') and len(coin) >= 4 and coin[1].isupper():
         out['reason'] = 'k_coin_blocked'
         log(f"{coin} blocked: k-prefix coin (1000x scale mismatch — see TODO)")
+        return out
+
+    # 2026-04-26: per-coin blocklist (RSR, JTO by default). These two had
+    # outsized single-trade losses (-$0.45 and -$0.34) that ate the PnL
+    # of otherwise-winning engines (PIVOT 70% WR, FUNDING_MR 86% WR).
+    # Block at the dispatcher so all engine paths skip them.
+    if coin and coin.upper() in COIN_BLOCKLIST:
+        out['reason'] = 'coin_blocklist'
+        log(f"{coin} blocked: in COIN_BLOCKLIST={sorted(COIN_BLOCKLIST)}")
         return out
 
     # 2026-04-26: side filter — defaults to BOTH sides. The earlier 30-trade
