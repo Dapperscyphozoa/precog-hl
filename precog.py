@@ -3886,16 +3886,33 @@ def get_trades_recent():
         for t in trades:
             p = t.get('_pnl_f')
             if p is None: continue
+            # 2026-04-26: by_side was using `direction` which is always
+            # 'CLOSE' on close events — gave a single useless bucket.
+            # Use `side` (BUY/SELL preserved through close) instead.
             for bucket, key in [(by_engine, t.get('engine','?')),
-                                (by_side, t.get('direction','?')),
+                                (by_side, t.get('side','?')),
                                 (by_coin, t.get('coin','?')),
                                 (by_hour, t['_ts'][:13])]:
-                b = bucket.setdefault(key, {'n':0,'w':0,'l':0,'b':0,'pnl':0.0})
+                b = bucket.setdefault(key, {'n':0,'w':0,'l':0,'b':0,'pnl':0.0,
+                                            'mfe_sum':0.0, 'mae_sum':0.0,
+                                            'mfe_count':0, 'mae_count':0})
                 b['n'] += 1
                 if p > 0: b['w'] += 1
                 elif p < 0: b['l'] += 1
                 else: b['b'] += 1   # exact 0 = breakeven, distinct from null/unknown
                 b['pnl'] += p
+                # MFE/MAE aggregation — surfaces "side X consistently goes
+                # against us before recovering" patterns at the breakdown level
+                _mfe = t.get('mfe_pct', '')
+                _mae = t.get('mae_pct', '')
+                try:
+                    if _mfe not in (None, ''):
+                        b['mfe_sum'] += float(_mfe); b['mfe_count'] += 1
+                except Exception: pass
+                try:
+                    if _mae not in (None, ''):
+                        b['mae_sum'] += float(_mae); b['mae_count'] += 1
+                except Exception: pass
         def fmt(b):
             # 2026-04-26: WR = w / (w+l). Breakevens excluded from denominator
             # — a breakeven is not a loss. Without this, a 1W/1L/1BE trade set
@@ -3904,6 +3921,13 @@ def get_trades_recent():
                 decided = v['w'] + v['l']
                 v['wr'] = round(v['w']/decided*100, 1) if decided else None
                 v['pnl'] = round(v['pnl'], 4)
+                # Average MFE/MAE per bucket. "avg_mfe near 0 + avg_mae deep
+                # negative" = systematic bad-entry pattern for that bucket.
+                v['avg_mfe_pct'] = round(v['mfe_sum']/v['mfe_count']*100, 3) if v['mfe_count'] else None
+                v['avg_mae_pct'] = round(v['mae_sum']/v['mae_count']*100, 3) if v['mae_count'] else None
+                # Cleanup raw sums from response
+                v.pop('mfe_sum', None); v.pop('mae_sum', None)
+                v.pop('mfe_count', None); v.pop('mae_count', None)
             return b
         closed = [t for t in trades if t.get('_pnl_f') is not None]
         no_pnl = [t for t in trades if t.get('_pnl_f') is None]
