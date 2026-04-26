@@ -7359,7 +7359,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         try:
             _wa_regime = 'unknown'
             try:
-                _wa_regime = regime_detector.get_regime() or 'unknown'
+                import regime_detector as _rd_wa
+                _wa_regime = _rd_wa.get_regime() or 'unknown'
             except Exception: pass
             # Count active absorption positions for capacity gate
             _wa_active = 0
@@ -7389,7 +7390,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         try:
             _fmr_regime = 'unknown'
             try:
-                _fmr_regime = regime_detector.get_regime() or 'unknown'
+                import regime_detector as _rd_fmr
+                _fmr_regime = _rd_fmr.get_regime() or 'unknown'
             except Exception: pass
             fmr_side, fmr_ctx = funding_engine.check(coin, _fmr_regime)
             if fmr_side:
