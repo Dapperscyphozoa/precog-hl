@@ -9764,6 +9764,44 @@ def dash_json():
                                   'lev':int(pp['leverage']['value'])})
         except Exception as e:
             pass
+    # Enrich with TP/SL prices from bot's tracked state. HL's user_state
+    # doesn't return TP/SL — those are separate trigger orders. We compute
+    # the price from entry * (1 ± tp_pct) using the bot's own tracker.
+    # Sources checked, in order: precog state['positions'][coin], then
+    # confluence_worker open_positions[coin]. Either has tp_pct/sl_pct.
+    try:
+        cw_open = {}
+        try:
+            import confluence_worker as _cw_mod
+            cw_open = dict(_cw_mod._state.get('open_positions', {}))
+        except Exception:
+            cw_open = {}
+        for pos_rec in positions:
+            coin = pos_rec.get('coin')
+            entry_px = pos_rec.get('entry')
+            is_long = pos_rec.get('side') == 'L'
+            if not coin or not entry_px:
+                continue
+            tracked = state.get('positions', {}).get(coin, {})
+            tp_pct = tracked.get('tp_pct')
+            sl_pct = tracked.get('sl_pct')
+            engine = tracked.get('engine')
+            if not tp_pct:
+                cf = cw_open.get(coin, {})
+                tp_pct = cf.get('tp_pct')
+                sl_pct = sl_pct or cf.get('sl_pct')
+                if cf.get('systems'):
+                    engine = engine or ('CONFLUENCE_' + '+'.join(cf.get('systems') or []))
+            if tp_pct:
+                pos_rec['tp_pct'] = tp_pct
+                pos_rec['tp'] = entry_px * (1 + tp_pct) if is_long else entry_px * (1 - tp_pct)
+            if sl_pct:
+                pos_rec['sl_pct'] = sl_pct
+                pos_rec['sl'] = entry_px * (1 - sl_pct) if is_long else entry_px * (1 + sl_pct)
+            if engine:
+                pos_rec['engine'] = engine
+    except Exception:
+        pass
     try: news = news_filter.get_state()
     except Exception: news = {}
     try: ladder = risk_ladder.get_state()
