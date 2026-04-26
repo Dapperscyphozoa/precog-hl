@@ -344,10 +344,12 @@ def append_close(trade_id, exit_price, pnl, close_reason,
             # Unknown trade — still record as orphan close
             coin = ''
             side = ''
+            engine = ''
             source = 'orphan_close'
         else:
             coin = existing.get('coin', '')
             side = existing.get('side', '')
+            engine = existing.get('engine', '')   # inherit engine tag from entry
 
         # Idempotency check — is this trade already closed?
         if trade_id not in _INDEX['open_trades'] and existing and existing.get('event_type') == 'CLOSE':
@@ -363,6 +365,7 @@ def append_close(trade_id, exit_price, pnl, close_reason,
             'timestamp': _now_iso(),
             'coin': coin,
             'side': side,
+            'engine': engine,                          # carry-over so by_engine attribution works
             'exit_price': exit_price if exit_price is not None else '',
             'pnl': pnl if pnl is not None else '',
             'close_reason': close_reason,
