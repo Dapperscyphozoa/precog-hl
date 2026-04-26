@@ -287,6 +287,93 @@ def is_noise_engine(name):
     return _engine_label(name) in NOISE_ENGINES
 
 
+def _excursion_bucket(t):
+    """Distinguish 'good entry / bad exit' from 'bad entry'."""
+    mfe = t.get('mfe_pct')
+    mae = t.get('mae_pct')
+    pnl = t.get('pnl') or 0
+    if mfe is None and mae is None:
+        return 'no_data'
+    if mfe is not None and mfe > 0.005 and pnl <= 0:
+        return 'hit_mfe_then_reversed'
+    if mfe is not None and mfe < 0.001 and pnl < 0:
+        return 'bad_entry_no_mfe'
+    if mae is not None and mae < -0.01 and pnl > 0:
+        return 'survived_deep_mae'
+    if pnl > 0:
+        return 'clean_win'
+    return 'clean_loss'
+
+
+def _summary_dict(trades):
+    """Same numbers header_summary prints, returned as a dict."""
+    n = len(trades)
+    if n == 0:
+        return {'n': 0, 'wr_pct': None, 'wilson_95_lo_pct': None,
+                'wilson_95_hi_pct': None, 'sum_pnl': 0.0, 'mean_pnl': 0.0,
+                'wins': 0, 'losses': 0, 'breakeven': 0, 'unknown': 0,
+                'decided': 0, 'median_hold_min': None,
+                'edge_logged_pct': 0.0, 'funding_logged_pct': 0.0}
+    pnls_known = [t['pnl'] for t in trades if t.get('pnl') is not None]
+    unknown = n - len(pnls_known)
+    wins = sum(1 for p in pnls_known if p > 0)
+    losses = sum(1 for p in pnls_known if p < 0)
+    breakeven = sum(1 for p in pnls_known if p == 0)
+    decided = wins + losses
+    wr = (wins / decided) if decided else None
+    lo, hi = wilson_ci(wins, decided) if decided else (0.0, 0.0)
+    funding_logged = sum(1 for t in trades if t.get('funding_paid_pct') is not None)
+    edge_logged = sum(1 for t in trades if t.get('expected_edge_at_entry') is not None)
+    holds_known = [t['hold_sec'] for t in trades if t.get('hold_sec') is not None]
+    median_hold = (sorted(holds_known)[len(holds_known) // 2] if holds_known else None)
+    return {
+        'n': n, 'decided': decided,
+        'wins': wins, 'losses': losses, 'breakeven': breakeven, 'unknown': unknown,
+        'wr_pct': round(wr * 100, 1) if wr is not None else None,
+        'wilson_95_lo_pct': round(lo * 100, 1) if decided else None,
+        'wilson_95_hi_pct': round(hi * 100, 1) if decided else None,
+        'sum_pnl': round(sum(pnls_known), 4),
+        'mean_pnl': round(sum(pnls_known) / len(pnls_known), 4) if pnls_known else 0.0,
+        'median_hold_min': round(median_hold / 60.0, 1) if median_hold is not None else None,
+        'edge_logged_pct': round(edge_logged / n * 100, 1),
+        'funding_logged_pct': round(funding_logged / n * 100, 1),
+    }
+
+
+def analyze_to_dict(path='/var/data/trades.csv', since_ts=None):
+    """Programmatic entrypoint — returns the same analysis the CLI prints,
+    structured as a dict ready for JSON serialization.
+
+    `since_ts`: optional unix-seconds floor. Trades with entry_ts older are
+    dropped — useful for windowing post-deploy data only.
+    """
+    trades = load_trades(path)
+    if since_ts is not None:
+        cutoff = datetime.fromtimestamp(float(since_ts))
+        trades = [t for t in trades if t.get('entry_ts') and t['entry_ts'] >= cutoff]
+    real_trades = [t for t in trades if not is_noise_engine(t.get('engine'))]
+    noise_trades = [t for t in trades if is_noise_engine(t.get('engine'))]
+    return {
+        'path': path,
+        'since_ts': since_ts,
+        'total_trades': len(trades),
+        'real_trades': len(real_trades),
+        'noise_trades': len(noise_trades),
+        'real_summary': _summary_dict(real_trades),
+        'noise_summary': _summary_dict(noise_trades),
+        'real_by_engine':         bucket_stats(real_trades, lambda t: _engine_label(t.get('engine'))),
+        'real_by_coin':           bucket_stats(real_trades, lambda t: t.get('coin') or '?'),
+        'real_by_side':           bucket_stats(real_trades, lambda t: t.get('side') or '?'),
+        'real_by_close_reason':   bucket_stats(real_trades, lambda t: t.get('close_reason') or '?'),
+        'real_by_hold_bucket':    bucket_stats(real_trades, lambda t: hold_bucket(t.get('hold_sec'))),
+        'real_by_hour_utc':       bucket_stats(real_trades, hour_of_day),
+        'real_by_expected_edge_band': bucket_stats(real_trades, lambda t: edge_bucket(t.get('expected_edge_at_entry'))),
+        'real_by_regime':         bucket_stats(real_trades, lambda t: t.get('regime') or 'unknown'),
+        'real_by_excursion_pattern': bucket_stats(real_trades, _excursion_bucket),
+        'noise_by_engine':        bucket_stats(noise_trades, lambda t: _engine_label(t.get('engine'))),
+    }
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else '/var/data/trades.csv'
     trades = load_trades(path)
@@ -314,29 +401,8 @@ def main():
     render('by_regime (real)', bucket_stats(real_trades, lambda t: t.get('regime') or 'unknown'))
 
     # MFE/MAE excursion analysis — distinguishes "good entry / bad exit"
-    # from "bad entry". Critical diagnostic per user's refinement plan.
-    def _excursion_bucket(t):
-        mfe = t.get('mfe_pct')
-        mae = t.get('mae_pct')
-        pnl = t.get('pnl') or 0
-        if mfe is None and mae is None:
-            return 'no_data'
-        # Was trade ever in profit?
-        if mfe is not None and mfe > 0.005 and pnl <= 0:
-            # Hit MFE > 0.5% then closed flat or negative — exit-logic
-            # problem. Position WAS winning; bot didn't capture it.
-            return 'hit_mfe_then_reversed'
-        if mfe is not None and mfe < 0.001 and pnl < 0:
-            # Never in profit, closed at loss — entry was wrong direction
-            # or timing.
-            return 'bad_entry_no_mfe'
-        if mae is not None and mae < -0.01 and pnl > 0:
-            # Went deep against us but recovered to win — SL might be
-            # too tight; could have been stopped out unnecessarily.
-            return 'survived_deep_mae'
-        if pnl > 0:
-            return 'clean_win'
-        return 'clean_loss'
+    # from "bad entry". _excursion_bucket lives at module scope so the
+    # programmatic /analyze endpoint shares the same definition.
     render('by_excursion_pattern (real)', bucket_stats(real_trades, _excursion_bucket))
 
     if noise_trades:

@@ -56,6 +56,14 @@ SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '300'))
 MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
+# 2026-04-26: SELL directional bias confirmed in /trades/recent — BUY 60% / +$0.196
+# vs SELL 54.5% / -$0.334 over 30 decided. Default to BUY-only until SELL gets
+# tightened gating. Override via ALLOWED_SIDES env: "BUY", "SELL", "BUY,SELL".
+_sides_raw = os.environ.get('ALLOWED_SIDES', 'BUY').upper()
+ALLOWED_SIDES = {s.strip() for s in _sides_raw.split(',') if s.strip() in ('BUY', 'SELL')}
+if not ALLOWED_SIDES:
+    ALLOWED_SIDES = {'BUY', 'SELL'}
+
 STATE_FILE      = '/var/data/confluence_state.json'
 LOG_FILE        = '/var/data/confluence.log'
 
@@ -282,6 +290,8 @@ def _in_position(coin, exchange_coins=None):
 
 def _entry_gate_ok(coin, side):
     """Reuse precog's existing gate stack — V3 trend, ATR-min, ticker gate."""
+    if side not in ALLOWED_SIDES:
+        return False, 'side_filter'
     try:
         if hasattr(_precog, 'trend_gate') and not _precog.trend_gate(coin, side):
             return False, 'V3'
@@ -913,7 +923,7 @@ def _scan_once():
             ok, why = _entry_gate_ok(coin, sig['side'])
             if not ok:
                 _log(f"{coin} {sig['side']} n={sig['n_sys']} — gated by {why}")
-                _bump('entry_gate_v3'); continue
+                _bump(f'entry_gate_{why.lower()}'); continue
 
             sig['_evt_key'] = evt_key
             sig['_first_ts'] = first_ts
