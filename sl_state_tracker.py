@@ -57,7 +57,13 @@ MISSING = 'MISSING'
 # REST visibility lag (5-10s typical, 15s+ during congestion). Lower numbers
 # were producing false MISSING → false emergency close → killed valid trades.
 GRACE_CYCLES = int(os.environ.get('SL_GRACE_CYCLES', '4'))
-PROPAGATION_GRACE_SEC = float(os.environ.get('SL_PROPAGATION_GRACE_SEC', '12.0'))
+# 2026-04-26: PROPAGATION_GRACE_SEC 12s → 5s. Live data showed verify loops
+# in enforce_protection (15s deadline) spending most time in propagation
+# grace, leaving only ~3 actual REST polls — and the cache was stale on
+# those. Cutting grace to 5s gives ~10 polls per verify window. SL has
+# its own 4-cycle grace AFTER REST polling for absent SLs, so we don't
+# regress to false-MISSING territory.
+PROPAGATION_GRACE_SEC = float(os.environ.get('SL_PROPAGATION_GRACE_SEC', '5.0'))
 
 # Ledger integration — when True, query position_ledger first. Only falls
 # through to REST poll if ledger is stale or doesn't know about this coin.
@@ -196,9 +202,16 @@ def check_state(coin, fetch_orders_fn=None, expected_size=None, log_fn=None):
             sl_orders = [o for o in orders if (o.get('tpsl') or '').lower() == 'sl']
             sl_visible = False
             if expected_size is not None:
-                # Match by size if available
+                # 2026-04-26: relative-tolerance size match. Was `< 1e-9`
+                # which failed on float-precision noise between expected
+                # and HL-returned sizes. 0.5% relative + 1e-6 absolute floor.
                 for sl in sl_orders:
-                    if abs(float(sl.get('sz', 0)) - expected_size) < 1e-9:
+                    try:
+                        sz = float(sl.get('sz', 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    diff = abs(sz - expected_size)
+                    if diff < 1e-6 or (expected_size > 0 and diff / expected_size < 0.005):
                         sl_visible = True
                         break
             else:

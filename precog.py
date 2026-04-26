@@ -7088,6 +7088,13 @@ def place_native_sl(coin, is_long, entry, size):
             return None
         else:
             log(f"{coin} NATIVE SL placed @ {trigger_px} (sl_pct={sl_pct*100:.1f}%, size={sl_size})")
+            # Invalidate frontend_orders cache so the verify loop's first poll
+            # sees the just-placed SL rather than a stale snapshot.
+            try:
+                _cache['fo'] = None
+                _cache['fo_ts'] = 0
+            except Exception:
+                pass
         return sl_pct
     except Exception as e:
         log(f"{coin} native SL err: {e}")
@@ -7233,6 +7240,14 @@ def place_native_tp(coin, is_long, entry, size):
             return None
         else:
             log(f"{coin} NATIVE TP placed @ {trigger_px} (tp_pct={tp_pct*100:.2f}%, size={tp_size})")
+            # Invalidate frontend_orders cache so the verify loop's first poll
+            # sees the just-placed TP rather than a 3s-stale snapshot from
+            # before the placement.
+            try:
+                _cache['fo'] = None
+                _cache['fo_ts'] = 0
+            except Exception:
+                pass
         return tp_pct
     except Exception as e:
         log(f"{coin} native TP err: {e}")
