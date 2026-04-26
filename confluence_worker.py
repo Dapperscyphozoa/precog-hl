@@ -354,8 +354,17 @@ def _size_and_fire(coin, signal, equity):
     # skips its adopt path.
     #
     # entry_price is the SIGNAL'S entry (last bar close), not the actual
-    # fill — fill differs by slippage (typically <0.5%). Slippage tracked
-    # separately via _record_slippage.
+    # fill — fill differs by slippage (typically <0.5%). realized_slippage_pct
+    # is added to the row by an ENTRY_UPDATE after the fill returns.
+    # regime captured at entry time. Direct call to regime_detector since
+    # precog doesn't cache it on state — only emits in /health per-tick.
+    _regime_at_entry = None
+    try:
+        import regime_detector as _rd_e
+        _regime_at_entry = _rd_e.get_regime()
+    except Exception:
+        _regime_at_entry = None
+
     if _trade_id and _LEDGER_OK and _ledger:
         try:
             _edge = (_gates.compute_expected_edge(signal['tp_pct'], signal['sl_pct'])
@@ -367,6 +376,7 @@ def _size_and_fire(coin, signal, equity):
                 sl_pct=signal['sl_pct'], tp_pct=signal['tp_pct'],
                 expected_edge_at_entry=_edge,
                 trade_id=_trade_id, cloid=_cloid,
+                regime=_regime_at_entry,
             )
         except Exception as _le:
             _log(f"[ledger] confluence pre-place append_entry err {coin}: {_le}")
@@ -403,12 +413,28 @@ def _size_and_fire(coin, signal, equity):
         actual_px = float(fill_px)
         _log(f"{coin} FILLED via precog.place: {actual_px:.6f} (signal_entry={entry:.6f})")
 
+        slip_pct_pct = 0.0
+        slip_pct_signed = None
         if entry > 0:
-            slip_pct = abs(actual_px - entry) / entry * 100
-            _record_slippage(coin, slip_pct)
+            slip_pct_pct = abs(actual_px - entry) / entry * 100
+            _record_slippage(coin, slip_pct_pct)
+            # Signed slippage from the trade's perspective (positive = paid more
+            # than signal price for buys / received less for sells = unfavorable).
+            _drift = (actual_px - entry) / entry
+            slip_pct_signed = _drift if is_buy else -_drift
+        # Update the pre-written ENTRY row with actual fill price + signed slippage.
+        if _trade_id and _LEDGER_OK and _ledger:
+            try:
+                _ledger.update_entry_fields(
+                    _trade_id,
+                    realized_slippage_pct=slip_pct_signed,
+                    entry_price=actual_px,
+                )
+            except Exception as _ue:
+                _log(f"[ledger] confluence ENTRY_UPDATE post-fill err {coin}: {_ue}")
         # Synthesize a result dict for callers that expect the legacy shape.
         r = {'expected_px': entry, 'actual_px': actual_px,
-             'slip_pct': abs(actual_px - entry) / entry * 100 if entry > 0 else 0.0,
+             'slip_pct': slip_pct_pct,
              'trade_id': _trade_id}
         return r
     except Exception as e:
@@ -565,6 +591,22 @@ def _monitor_exits():
                 continue
             raw_move = ((px - entry) / entry) if is_buy else ((entry - px) / entry)
 
+            # MFE/MAE tracking — high/low water of price-side raw move during hold.
+            # Used at close to compute "did this trade ever go in our favor?" and
+            # "how deep did it go against us?" — single most important diagnostic
+            # for distinguishing bad-entry from bad-exit.
+            with _state_lock:
+                if coin in _state['open_positions']:
+                    _cur = _state['open_positions'][coin]
+                    if 'mfe_pct' not in _cur:
+                        _cur['mfe_pct'] = 0.0
+                    if 'mae_pct' not in _cur:
+                        _cur['mae_pct'] = 0.0
+                    if raw_move > _cur['mfe_pct']:
+                        _cur['mfe_pct'] = raw_move
+                    if raw_move < _cur['mae_pct']:
+                        _cur['mae_pct'] = raw_move
+
             # 1+2: traditional SL/TP
             if raw_move <= -pos['sl_pct']:
                 _log(f"{coin} SL hit pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat")
@@ -669,6 +711,10 @@ def _close_position(coin, reason, pnl=None):
                         coin, pos.get('side', ''), float(_entry_ts), time.time())
             except Exception:
                 _fp = None
+        # MFE/MAE: tracked by _monitor_exits at every monitor tick. Default 0
+        # if the trade closed before any monitor cycle saw it.
+        _mfe = pos.get('mfe_pct')
+        _mae = pos.get('mae_pct')
         try:
             _ledger.append_close(
                 trade_id=_tid,
@@ -677,6 +723,8 @@ def _close_position(coin, reason, pnl=None):
                 close_reason=reason,
                 source='confluence_close',
                 funding_paid_pct=_fp,
+                mfe_pct=_mfe,
+                mae_pct=_mae,
             )
         except Exception as _le:
             _log(f"[ledger] confluence append_close err {coin}: {_le}")
