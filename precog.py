@@ -2478,6 +2478,43 @@ def confluence_status():
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/shadow', methods=['GET'])
+def shadow_status():
+    """Shadow-tier screening results. Tracks coins NOT currently in the
+    confluence universe — eval'd every scan, hypothetical TP/SL outcomes
+    resolved as candles advance.
+
+    Promotion candidates (n >= 15 AND wr >= 65%) appear flagged.
+    Add coins by editing percoin_configs.py once promoted.
+    """
+    try:
+        import shadow_trades as _st
+        per_coin = _st.per_coin_stats(reason_filter='shadow_screen_tier', min_n=1)
+        promotion_candidates = [c for c, d in per_coin.items() if d.get('promotion_candidate')]
+        # Also surface confluence_worker shadow scan diagnostics
+        try:
+            import confluence_worker as cw
+            sw = cw._state
+            shadow_diag = {
+                'shadow_universe_size': sw.get('shadow_universe_size', 0),
+                'shadow_signals_last_scan': sw.get('shadow_signals_last_scan', 0),
+            }
+        except Exception:
+            shadow_diag = {}
+        return jsonify({
+            'overall': _st.status(),
+            'shadow_tier_screen': {
+                'per_coin': per_coin,
+                'promotion_candidates': promotion_candidates,
+                'criteria': {'min_n': 15, 'min_wr_pct': 65.0},
+                **shadow_diag,
+            },
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
+
+
 @app.route('/analyze', methods=['GET'])
 def analyze_endpoint():
     """Run the full trade analysis against /var/data/trades.csv and return

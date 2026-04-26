@@ -417,3 +417,49 @@ def status():
         'by_reason': sorted_stats,
         'max_pending_age_sec': MAX_PENDING_AGE_SEC,
     }
+
+
+def per_coin_stats(reason_filter=None, min_n=0):
+    """Per-coin shadow WR breakdown — useful for tier-promotion decisions.
+
+    Args:
+        reason_filter: only count records with this reason (e.g. 'shadow_screen_tier')
+        min_n: minimum number of resolved trades to include
+
+    Returns: dict[coin] -> {n, wins, losses, wr_pct, mean_pnl_r,
+                            promotion_candidate (bool, n>=15 and wr>=65)}
+    """
+    with _LOCK:
+        resolved = list(_RESOLVED)
+
+    by_coin = defaultdict(lambda: {'n': 0, 'wins': 0, 'losses': 0, 'pnl_r_list': []})
+    for rec in resolved:
+        if reason_filter and rec.get('reason') != reason_filter:
+            continue
+        if rec.get('outcome') not in ('tp', 'sl'):
+            continue
+        coin = rec.get('coin', '?')
+        by_coin[coin]['n'] += 1
+        if rec['outcome'] == 'tp':
+            by_coin[coin]['wins'] += 1
+        else:
+            by_coin[coin]['losses'] += 1
+        by_coin[coin]['pnl_r_list'].append(rec.get('pnl_r', 0))
+
+    out = {}
+    for coin, d in by_coin.items():
+        if d['n'] < min_n:
+            continue
+        wr = (d['wins'] / d['n'] * 100) if d['n'] else 0
+        mean_pnl_r = (sum(d['pnl_r_list']) / len(d['pnl_r_list'])) if d['pnl_r_list'] else 0
+        out[coin] = {
+            'n': d['n'],
+            'wins': d['wins'],
+            'losses': d['losses'],
+            'wr_pct': round(wr, 1),
+            'mean_pnl_r': round(mean_pnl_r, 3),
+            # Promotion criteria: 15+ resolved trades AND WR >= 65%
+            'promotion_candidate': bool(d['n'] >= 15 and wr >= 65.0),
+        }
+    # Sort by promotion potential (candidates first, then by WR)
+    return dict(sorted(out.items(), key=lambda kv: (-int(kv[1]['promotion_candidate']), -kv[1]['wr_pct'])))
