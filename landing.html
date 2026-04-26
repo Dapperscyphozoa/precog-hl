@@ -702,6 +702,17 @@ body::after {
     <div id="ob-heatmap" style="height: 520px; position: relative;"></div>
 </div>
 
+<!-- CONFLUENCE · SYSTEM B -->
+<div class="panel" style="margin-bottom: 32px;">
+    <div class="panel-head">
+        <div class="panel-title">Confluence · System B</div>
+        <div class="panel-meta" id="conf-meta">—</div>
+    </div>
+    <div id="confluence-stats" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 16px;"></div>
+    <div id="confluence-positions" style="font-size: 11px; max-height: 360px; overflow-y: auto;"></div>
+    <div id="confluence-rejects" style="margin-top: 12px; font-size: 10px; opacity: 0.75; letter-spacing: 0.05em;"></div>
+</div>
+
 <!-- COIN WR HEATMAP -->
 <div class="panel" style="margin-bottom: 32px;">
     <div class="panel-head">
@@ -751,11 +762,13 @@ async function loadDash() {
             const cls = (p.upnl||0)>=0?'pnl-pos':'pnl-neg';
             const sign = (p.upnl||0)>=0?'+':'';
             const lev = p.lev || '-';
-            const tp = p.tp ? p.tp.toPrecision(5) : '-';
+            const tp = (p.tp != null) ? Number(p.tp).toPrecision(5) : '-';
+            const sl = (p.sl != null) ? Number(p.sl).toPrecision(5) : '-';
+            const eng = p.engine ? `<span style="opacity:0.45;font-size:9px;letter-spacing:0.05em">${p.engine}</span>` : '';
             return `<div class="pos-row">
-                <div class="pos-coin">${p.coin}</div>
+                <div class="pos-coin">${p.coin}${eng?'<br>'+eng:''}</div>
                 <div><span class="pos-side side-${p.side}">${p.side}</span> <span style="opacity:0.5;font-size:9px">${lev}x</span></div>
-                <div class="pos-size">${p.size} @ ${p.entry}<br><span style="opacity:0.5;font-size:9px">TP ${tp}</span></div>
+                <div class="pos-size">${p.size} @ ${p.entry}<br><span style="opacity:0.5;font-size:9px">TP ${tp} · SL ${sl}</span></div>
                 <div class="pos-pnl ${cls}">${sign}$${(p.upnl||0).toFixed(2)}</div>
             </div>`;
         }).join('') || '<div class="pos-row" style="opacity:0.5">// no active positions</div>';
@@ -997,6 +1010,98 @@ async function loadEngines() {
 
 loadEngines();
 setInterval(loadEngines, 5000);
+
+async function loadConfluence() {
+    try {
+        const r = await fetch('/confluence');
+        const d = await r.json();
+        if (!d || d.err) {
+            document.getElementById('conf-meta').textContent = 'error: ' + (d?.err || 'unknown');
+            return;
+        }
+        const meta = document.getElementById('conf-meta');
+        const flagDry = d.dry_run ? '<span style="color:#fb0">DRY-RUN</span>' : '<span style="color:var(--acid)">LIVE</span>';
+        const flagEn  = d.enabled ? '' : ' <span style="color:#f88">DISABLED</span>';
+        meta.innerHTML = `${flagDry}${flagEn} · scan ${d.scan_interval_s||0}s · risk ${(d.risk_pct||0)*100}%`;
+
+        // Top metrics row
+        const open = Object.keys(d.open_positions || {}).length;
+        const cap  = d.max_positions || 0;
+        const queue = (d.rejects_cumulative || {}).cap_queued || 0;
+        const fires = d.total_fires || 0;
+        const wins  = d.wins || 0;
+        const losses = d.losses || 0;
+        const totN = wins + losses;
+        const wr = totN > 0 ? (wins/totN*100).toFixed(1) : '—';
+        const pnlPct = (d.total_pnl_pct != null) ? Number(d.total_pnl_pct).toFixed(3) : '0.000';
+        const pa = d.place_attempts || 0;
+        const pf = d.place_filled || 0;
+        const pn = d.place_no_fill || 0;
+        const pe = d.place_error || 0;
+        document.getElementById('confluence-stats').innerHTML = `
+            <div class="metric-cell"><div class="metric-val">${fires}</div><div class="metric-lbl">Fires</div></div>
+            <div class="metric-cell"><div class="metric-val">${wins}</div><div class="metric-lbl">Wins</div></div>
+            <div class="metric-cell"><div class="metric-val">${losses}</div><div class="metric-lbl">Losses</div></div>
+            <div class="metric-cell"><div class="metric-val">${wr}${totN?'%':''}</div><div class="metric-lbl">WR</div></div>
+            <div class="metric-cell"><div class="metric-val">${pnlPct}%</div><div class="metric-lbl">PnL %</div></div>
+            <div class="metric-cell"><div class="metric-val">${open}/${cap}</div><div class="metric-lbl">Open / Cap</div></div>
+            <div class="metric-cell"><div class="metric-val">${d.last_scan_signals||0}/${d.last_scan_fires||0}</div><div class="metric-lbl">Last Sig/Fire</div></div>
+            <div class="metric-cell"><div class="metric-val">${pf}/${pa}</div><div class="metric-lbl">Filled/Attempts</div></div>
+            <div class="metric-cell"><div class="metric-val">${pn}</div><div class="metric-lbl">No-Fill</div></div>
+            <div class="metric-cell"><div class="metric-val">${pe}</div><div class="metric-lbl">Errors</div></div>
+        `;
+
+        // Open positions table
+        const posDiv = document.getElementById('confluence-positions');
+        const positions = d.open_positions || {};
+        const posKeys = Object.keys(positions).sort();
+        if (posKeys.length === 0) {
+            posDiv.innerHTML = '<div style="opacity:0.5;font-style:italic;padding:8px 0">// no open confluence positions</div>';
+        } else {
+            const headerStyle = 'display:grid;grid-template-columns:90px 50px 90px 130px 70px 70px 100px;gap:8px;padding:6px 0;font-weight:bold;color:var(--blood);border-bottom:1px solid var(--blood);font-size:10px;letter-spacing:0.05em';
+            const rowStyle = 'display:grid;grid-template-columns:90px 50px 90px 130px 70px 70px 100px;gap:8px;padding:4px 0;border-bottom:1px solid rgba(255,0,0,0.08)';
+            const rows = posKeys.map(k => {
+                const p = positions[k] || {};
+                const sysStr = (p.systems || []).join('+');
+                const sideClass = p.side === 'BUY' ? 'side-L' : 'side-S';
+                const sideShort = p.side === 'BUY' ? 'L' : 'S';
+                const tp = p.tp_pct ? (p.tp_pct*100).toFixed(2)+'%' : '—';
+                const sl = (p.sl_at_be ? 'BE' : (p.sl_pct ? (p.sl_pct*100).toFixed(2)+'%' : '—'));
+                const tid = p.trade_id ? p.trade_id.slice(0,8) : '<span style="color:#f88">no_id</span>';
+                const ageMin = p.ts ? Math.floor((Date.now()/1000 - p.ts)/60) : 0;
+                return `<div style="${rowStyle}">
+                    <div><strong>${k}</strong> <span style="opacity:0.4;font-size:9px">${ageMin}m</span></div>
+                    <div><span class="pos-side ${sideClass}">${sideShort}</span></div>
+                    <div>${p.entry||'?'}</div>
+                    <div style="font-size:10px;opacity:0.85">${sysStr}</div>
+                    <div style="color:var(--acid)">${tp}</div>
+                    <div style="color:#f88">${sl}</div>
+                    <div style="font-family:monospace;font-size:10px;opacity:0.7">${tid}</div>
+                </div>`;
+            }).join('');
+            posDiv.innerHTML = `<div style="${headerStyle}">
+                <div>COIN</div><div>SIDE</div><div>ENTRY</div><div>SYSTEMS</div><div>TP</div><div>SL</div><div>TRADE_ID</div>
+            </div>${rows}`;
+        }
+
+        // Last-scan reject distribution (only show non-zero buckets)
+        const rl = d.rejects_last_scan || {};
+        const nonzero = Object.entries(rl).filter(([k,v]) => v > 0);
+        const rejDiv = document.getElementById('confluence-rejects');
+        if (nonzero.length > 0) {
+            const total = nonzero.reduce((s,[,v]) => s+v, 0);
+            rejDiv.innerHTML = '// last scan rejects (' + total + ' total): ' +
+                nonzero.map(([k,v]) => `<span style="color:var(--blood)">${k}=${v}</span>`).join(' · ');
+        } else {
+            rejDiv.innerHTML = '// last scan: no rejects';
+        }
+    } catch(e) {
+        console.error('confluence load err', e);
+        document.getElementById('conf-meta').textContent = 'fetch failed';
+    }
+}
+loadConfluence();
+setInterval(loadConfluence, 10000);
 
 loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); updateClock();
 setInterval(loadDash, 5000);
