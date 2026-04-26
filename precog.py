@@ -512,6 +512,27 @@ PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.005')) 
 # profit. BE-lock at 0.5% still protects against round-trip-to-loss.
 # Tunable via env without redeploy.
 
+# ─── TRAIL SL LADDER ──────────────────────────────────────────
+# 2026-04-26: BE-lock fires once at +0.5% then SL stays at entry+0.2%. If
+# trade hits MFE 1.8% then retraces, it locks only +0.2% — capturing 11%
+# of MFE. With trail ladder, SL chases MFE up in tiers, locking more as
+# the trade extends. /analyze TP backtest at session end showed wins
+# averaging $0.001-0.02 (capped by profit_lock-2% bug); this trail
+# captures more of every winner.
+#
+# Each rung: (mfe_threshold, lock_pct above entry). Rungs are permanent
+# (sl_trail_level state); SL never moves backward. Reuses
+# modify_sl_to_breakeven with a larger buffer.
+#
+# Same trade pattern (MFE 1.8% then retrace):
+#   Before: SL at entry+0.2% → realized +0.2% × $11 = $0.022
+#   After:  SL at entry+0.8% → realized +0.8% × $11 = $0.088 (4x)
+TRAIL_LADDER = [
+    (0.015, 0.008),   # MFE 1.5% → SL to entry+0.8% (lock 0.8%)
+    (0.025, 0.015),   # MFE 2.5% → SL to entry+1.5% (lock 1.5%)
+    (0.035, 0.025),   # MFE 3.5% → SL to entry+2.5% (lock 2.5%)
+]
+
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
 COIN_WR_FILTER_ENABLED = os.environ.get('COIN_WR_FILTER', '1') != '0'
@@ -9354,6 +9375,38 @@ def main():
                                             log(f"{_pl_coin} PROFIT_LOCK BE: raw move ≥{PROFIT_LOCK_BE_PCT*100:.1f}% — SL moved to entry")
                                     except Exception as _be_e:
                                         log(f"{_pl_coin} profit_lock BE err: {_be_e}")
+
+                            # ─── TRAIL SL LADDER ──────────────────────
+                            # 2026-04-26: data showed avg trade reached MFE
+                            # ~1-2% then retraced. With BE-lock-only, those
+                            # round-tripped to entry + 0.2% buffer (~$0.02).
+                            # Trail ladder locks more profit per rung as MFE
+                            # grows. Each rung is permanent; SL never moves
+                            # back. /analyze TP backtest can be re-run after
+                            # 24h to see if MFE distribution shifts up.
+                            try:
+                                _pl_state = state.get('positions', {}).get(_pl_coin, {})
+                                _trail_level = int(_pl_state.get('sl_trail_level', 0))
+                                _cur_mfe = (_mm_pos.get('mfe_pct') or 0) if _mm_pos else 0
+                                for _ti, (_t_mfe, _t_lock) in enumerate(TRAIL_LADDER):
+                                    if _ti < _trail_level:
+                                        continue
+                                    if _cur_mfe >= _t_mfe:
+                                        _pl_entry = float(_pl_lp.get('entry') or 0)
+                                        _pl_size = abs(_pl_lp.get('size', 0))
+                                        _pl_is_long = _pl_lp.get('size', 0) > 0
+                                        if _pl_entry > 0 and _pl_size > 0:
+                                            modify_sl_to_breakeven(_pl_coin, _pl_entry,
+                                                                   _pl_size, _pl_is_long,
+                                                                   buffer_pct=_t_lock)
+                                            _pl_state['sl_trail_level'] = _ti + 1
+                                            state.setdefault('positions', {})[_pl_coin] = _pl_state
+                                            log(f"{_pl_coin} TRAIL_SL rung {_ti+1}/{len(TRAIL_LADDER)}: "
+                                                f"MFE {_cur_mfe*100:.2f}% ≥ {_t_mfe*100:.1f}% — "
+                                                f"SL → entry+{_t_lock*100:.1f}%")
+                                        break  # one rung per tick
+                            except Exception as _tr_e:
+                                log(f"{_pl_coin} trail_sl err: {_tr_e}")
                         except Exception as _pl_inner:
                             log(f"profit_lock {_pl_coin} err: {_pl_inner}")
             except Exception as _pl_outer:
