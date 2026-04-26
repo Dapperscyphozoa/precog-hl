@@ -593,6 +593,45 @@ def latest_open_trade_id_for_coin(coin: str):
         return _INDEX['coin_to_latest_open'].get(coin)
 
 
+def recent_close_ts(coin, max_age_sec=45):
+    """Return the most recent CLOSE event timestamp (unix seconds) for `coin`
+    within `max_age_sec`, or None if no qualifying close.
+
+    Used by lifecycle_reconciler to suppress orphan-adopt for coins that
+    were just closed via any path (confluence_close, precog close_trade,
+    webhook). Without this, the post-close exchange-snapshot lag (~5-15s)
+    causes the reconciler to adopt the still-flattening position as a
+    fresh RECONCILED trade — the bug pattern we saw on XRP/WLFI/UNI/etc
+    after the WR-fix deploy.
+
+    Implementation: scan in-memory CSV rows, take max CLOSE timestamp.
+    O(n) but n is bounded — only ledger rows in the active process.
+    """
+    if not coin:
+        return None
+    coin_u = coin.upper()
+    cutoff = time.time() - max_age_sec
+    latest = None
+    with _LOCK:
+        for tid, row in _INDEX['by_trade_id'].items():
+            if (row.get('coin') or '').upper() != coin_u:
+                continue
+            if row.get('event_type') != 'CLOSE':
+                continue
+            ts_iso = row.get('timestamp', '')
+            if not ts_iso:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if ts < cutoff:
+                continue
+            if latest is None or ts > latest:
+                latest = ts
+    return latest
+
+
 def is_closed(trade_id: str) -> bool:
     with _LOCK:
         return trade_id not in _INDEX['open_trades']
