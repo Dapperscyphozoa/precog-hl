@@ -360,6 +360,15 @@ def eval_coin(coin, bars_15m, now_ts=None):
         _STATS['eval_calls'] += 1
         _STATS['short_history'] += 1
         return None
+    # 2026-04-26: skip k-prefix coins (kFLOKI, kPEPE, kSHIB, kBONK, kNEIRO).
+    # HL reports their prices in two scales — k-coin internal (1e-5 range)
+    # vs displayed (1e-2 range). The bot's get_mid() and order-fill paths
+    # disagree, producing bogus 1000x-off pnls (saw kFLOKI close report
+    # +$998 on a $11 trade). Until the unit handling is fixed, skip them
+    # entirely from confluence. precog also blocks via the same prefix.
+    if coin and coin.startswith('k') and len(coin) >= 4 and coin[1].isupper():
+        _STATS['eval_calls'] += 1
+        return None
     _STATS['eval_calls'] += 1
     now_ts = now_ts or int(time.time())
 
