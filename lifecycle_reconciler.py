@@ -155,11 +155,33 @@ def _add_to_recent_closed_ring(trade_id, coin=None):
 
 
 def _coin_recently_closed(coin):
-    """True if we closed this coin within the last _RECENT_CLOSED_COIN_TTL_SEC."""
+    """True if we closed this coin within the last _RECENT_CLOSED_COIN_TTL_SEC.
+
+    Checks BOTH:
+      1. Local recent-closed ring (closes that went through the reconciler's
+         own intent path)
+      2. The trade_ledger directly (closes that bypassed the reconciler —
+         e.g. confluence_close, precog close_trade, webhook close)
+
+    Without (2), confluence-side closes left the reconciler unaware, so
+    the post-close exchange-snapshot lag caused the reconciler to adopt
+    the still-flattening position as a fresh RECONCILED trade — the
+    duplicate-booking pattern observed on XRP/WLFI/UNI/etc after the
+    WR-fix deploy.
+    """
     ts = _recent_closed_coins.get(coin)
-    if not ts:
-        return False
-    return (time.time() - ts) < _RECENT_CLOSED_COIN_TTL_SEC
+    if ts and (time.time() - ts) < _RECENT_CLOSED_COIN_TTL_SEC:
+        return True
+    # Ledger fallback — catches close paths that don't touch the local ring
+    try:
+        ledger = _deps.get('ledger')
+        if ledger and hasattr(ledger, 'recent_close_ts'):
+            led_ts = ledger.recent_close_ts(coin, max_age_sec=_RECENT_CLOSED_COIN_TTL_SEC)
+            if led_ts is not None:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def _log(msg):
