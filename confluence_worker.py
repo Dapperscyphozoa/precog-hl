@@ -230,18 +230,34 @@ def _fetch_15m_bars(coin, n_bars=800):
             _log(f"{coin} candle err: {str(e)[:80]}")
         return None
 
-def _in_position(coin):
-    """Check if precog already has an open position on this coin, OR our own tracker does."""
+def _in_position(coin, exchange_coins=None):
+    """Check if there's an open position on `coin` from ANY source.
+
+    Three checks (any True → True):
+      1. Confluence's own open_positions tracker
+      2. precog's cached live_positions tracker (may be WS-stale)
+      3. Authoritative exchange snapshot (set passed in by caller)
+
+    `exchange_coins` is a set of coin names with non-zero positions on the
+    exchange right now — fetched once per scan in _scan_once via REST. This
+    catches the cases where (1) and (2) miss because of WS lag or restart
+    state-load gaps, which is what was producing duplicate trade_ids
+    (e.g. confluence firing ICP at 07:47 even though precog had it open
+    since 06:37 — same exchange position, two ledger trade_ids).
+    """
     with _state_lock:
         if coin in _state['open_positions']:
             return True
-    # Defer to precog's state if available
+    # Defer to precog's cached state if available
     try:
         live = _precog.live_positions
         if live and coin in live:
             return True
     except Exception:
         pass
+    # Authoritative — exchange-truth snapshot, if caller fetched one
+    if exchange_coins is not None and coin in exchange_coins:
+        return True
     return False
 
 def _entry_gate_ok(coin, side):
@@ -705,6 +721,30 @@ def _scan_once():
         killed = set(_state['killed_coins'].keys())
         fired_events = dict(_state['fired_events'])
 
+    # 2026-04-26: fetch authoritative exchange position snapshot ONCE per
+    # scan. Plugs the gap where _precog.live_positions is WS-stale or
+    # missing entries from a recent restart — the ICP/AAVE duplicate
+    # trade_id problem comes from confluence firing on a coin that
+    # precog's cached tracker doesn't see but the exchange actually has.
+    # ONE REST call per 5min scan; minimal rate-limit impact.
+    _exchange_coins = None
+    try:
+        _us = _precog.info.user_state(_precog.WALLET)
+        _ec = set()
+        for _p in _us.get('assetPositions', []):
+            _pos = _p.get('position', {}) if isinstance(_p, dict) else {}
+            _name = _pos.get('coin')
+            try:
+                _sz = float(_pos.get('szi', 0) or 0)
+            except (TypeError, ValueError):
+                _sz = 0
+            if _name and abs(_sz) > 0:
+                _ec.add(_name)
+        _exchange_coins = _ec
+    except Exception as _ee:
+        _log(f"[scan] exchange position snapshot fetch failed (non-fatal): {_ee}")
+        # _exchange_coins stays None → _in_position falls back to cached checks only
+
     # Purge old dedupe entries
     for k, fire_ts in list(fired_events.items()):
         if now_ts - fire_ts > DEDUPE_WINDOW_S:
@@ -724,8 +764,9 @@ def _scan_once():
             # Cooldown
             if not _ce.should_enter(coin, _state['last_fire_ts'], now_ts):
                 _bump('cooldown'); continue
-            # Already in position?
-            if _in_position(coin):
+            # Already in position? (checks confluence tracker, precog cache,
+            # AND authoritative exchange snapshot — see _exchange_coins above)
+            if _in_position(coin, exchange_coins=_exchange_coins):
                 _bump('in_position'); continue
             # Fetch + evaluate (Fix 1: only fully-closed bars)
             bars = _fetch_15m_bars(coin, 800)
@@ -830,7 +871,7 @@ def _scan_once():
             continue
         sig = q['signal']
         coin = sig['coin']
-        if _in_position(coin) or coin in killed:
+        if _in_position(coin, exchange_coins=_exchange_coins) or coin in killed:
             with _state_lock:
                 if q in _state['pending_queue']:
                     _state['pending_queue'].remove(q)
