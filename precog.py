@@ -2335,6 +2335,43 @@ def confluence_status():
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/analyze', methods=['GET'])
+def analyze_endpoint():
+    """Run the full trade analysis against /var/data/trades.csv and return
+    structured JSON. Same numbers as `analyze_trades.py` CLI but on demand.
+
+    Query params:
+      ?since=<unix_ts>  — drop trades with entry_ts older than this
+      ?since=24h        — convenience: drop trades older than 24 hours
+      ?path=<file>      — override CSV path (default /var/data/trades.csv)
+    """
+    from flask import request
+    try:
+        import analyze_trades as _at
+        path = request.args.get('path', '/var/data/trades.csv')
+        since_raw = request.args.get('since')
+        since_ts = None
+        if since_raw:
+            s = since_raw.strip().lower()
+            try:
+                if s.endswith('h'):
+                    since_ts = time.time() - float(s[:-1]) * 3600.0
+                elif s.endswith('m'):
+                    since_ts = time.time() - float(s[:-1]) * 60.0
+                elif s.endswith('d'):
+                    since_ts = time.time() - float(s[:-1]) * 86400.0
+                else:
+                    since_ts = float(s)
+            except Exception:
+                since_ts = None
+        out = _at.analyze_to_dict(path=path, since_ts=since_ts)
+        out['generated_at'] = time.time()
+        return jsonify(out)
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
+
+
 @app.route('/confluence/reset', methods=['POST', 'GET'])
 def confluence_reset():
     """Reset System B state. Used after universe alignment.
@@ -6125,6 +6162,19 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
            # = signed (fill - expected)/expected * sign(side). Positive =
            # unfavorable (paid more for buy / received less for sell).
            'expected_px': None, 'realized_slippage_pct': None}
+
+    # 2026-04-26: side filter — SELL bias confirmed in /trades/recent
+    # (BUY +$0.196 / SELL -$0.334 over 30 decided). Default BUY-only;
+    # override via ALLOWED_SIDES env ("BUY", "SELL", "BUY,SELL").
+    _side_label = 'BUY' if is_buy else 'SELL'
+    _sides_env = os.environ.get('ALLOWED_SIDES', 'BUY').upper()
+    _allowed = {s.strip() for s in _sides_env.split(',') if s.strip() in ('BUY', 'SELL')}
+    if not _allowed:
+        _allowed = {'BUY', 'SELL'}
+    if _side_label not in _allowed:
+        out['reason'] = 'side_filter'
+        log(f"{coin} {_side_label} blocked by ALLOWED_SIDES={sorted(_allowed)}")
+        return out
 
     # ─── Legacy path (flag off, or atomic skipped) ────────────────────
     if not USE_ATOMIC_EXEC:
