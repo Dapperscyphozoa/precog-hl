@@ -318,6 +318,30 @@ def _process_intent(intent, snap, authoritative):
 
     position = snap.get('positions', {}).get(coin)
 
+    # Min-age guard for fill_match path — same lag protection as _detect_missing_closes.
+    # If the trade is fresh, exchange snapshot may not yet show the position,
+    # leading to false 'position already gone' detection in Case A.
+    if not position:
+        try:
+            import os
+            from datetime import datetime, timezone
+            MIN_AGE_TO_CLOSE_SEC = int(os.environ.get('RECONCILE_MIN_CLOSE_AGE_SEC', '60'))
+            trade_row = ledger.get_by_trade_id(tid) if hasattr(ledger, 'get_by_trade_id') else None
+            if trade_row:
+                ts_str = trade_row.get('timestamp', '')
+                if ts_str:
+                    trade_dt = datetime.fromisoformat(ts_str)
+                    if trade_dt.tzinfo is None:
+                        trade_dt = trade_dt.replace(tzinfo=timezone.utc)
+                    age_sec = (datetime.now(timezone.utc) - trade_dt).total_seconds()
+                    if age_sec < MIN_AGE_TO_CLOSE_SEC:
+                        with _LOCK:
+                            _METRICS['intent_close_too_fresh'] = \
+                                _METRICS.get('intent_close_too_fresh', 0) + 1
+                        return 'too_fresh_skip'
+        except Exception:
+            pass  # fall through to normal flow
+
     # Case A: position already gone from exchange → late detection of native fill
     if not position:
         fill = _find_recent_fill(coin, snap.get('fills', []))
