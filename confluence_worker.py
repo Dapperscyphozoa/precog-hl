@@ -47,7 +47,7 @@ except Exception:
 ENABLED         = os.environ.get('CONFLUENCE_ENABLED', '0') == '1'
 DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
 SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '300'))
-MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '15'))
+MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
 STATE_FILE      = '/var/data/confluence_state.json'
