@@ -301,6 +301,15 @@ except Exception as _e:
     _LEDGER_OK = False
     print(f'[ledger] CRITICAL: trade_ledger import failed: {_e}', flush=True)
 
+# Gates module — used to compute expected_edge_at_entry on every entry.
+try:
+    import gates as _gates
+    _GATES_OK = True
+except Exception as _e:
+    _gates = None
+    _GATES_OK = False
+    print(f'[gates] import failed (non-fatal): {_e}', flush=True)
+
 try:
     import exchange_snapshot as _snapshot
     _SNAPSHOT_OK = True
@@ -6238,8 +6247,11 @@ def partial_close(coin, fraction, reason='partial_exit_tp1'):
         return None
 
 
-def modify_sl_to_breakeven(coin, entry, size, is_long, buffer_pct=0.002):
-    """Cancel existing SL and place new SL at breakeven + buffer (covers fees).
+def modify_sl_to_breakeven(coin, entry, size, is_long, buffer_pct=0.003):
+    """Cancel existing SL and place new SL at breakeven + buffer (covers fees + slip).
+
+    30bps buffer = ~12.5bps round-trip friction + ~17.5bps safety margin.
+    Caller may override buffer_pct (e.g. partial closes pass new_sl_pct).
 
     Args:
         coin: coin symbol
@@ -8407,6 +8419,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                 _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
                                 _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_sell', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
                             except Exception: pass
+                    # LEDGER: record actual sl/tp/edge now that protection is placed
+                    if _LEDGER_OK and _ledger is not None and _trade_id:
+                        try:
+                            _edge = _gates.compute_expected_edge(_tp_pct_used, _sl_pct_used) \
+                                if (_GATES_OK and _tp_pct_used and _sl_pct_used) else None
+                            _ledger.update_entry_fields(_trade_id, sl_pct=_sl_pct_used,
+                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge)
+                        except Exception as _le:
+                            log(f"[ledger] update_entry_fields err {coin}: {_le}")
                     # CONTRACT: both TP and SL must be on exchange. If either
                     # is None, emergency close immediately (naked position).
                     if _EC_OK and _contract is not None:
@@ -8518,6 +8539,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                 _invariants.record_action(coin, 'sl_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'sl_pct': _sl_pct_used, 'ep_replaced': _ep_result.get('replaced')})
                                 _invariants.record_action(coin, 'tp_place', size_after=_ep_result.get('actual_size') or sz, origin='precog_15m_buy', detail={'tp_pct': _tp_pct_used, 'ep_replaced': _ep_result.get('replaced')})
                             except Exception: pass
+                    # LEDGER: record actual sl/tp/edge now that protection is placed
+                    if _LEDGER_OK and _ledger is not None and _trade_id:
+                        try:
+                            _edge = _gates.compute_expected_edge(_tp_pct_used, _sl_pct_used) \
+                                if (_GATES_OK and _tp_pct_used and _sl_pct_used) else None
+                            _ledger.update_entry_fields(_trade_id, sl_pct=_sl_pct_used,
+                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge)
+                        except Exception as _le:
+                            log(f"[ledger] update_entry_fields err {coin}: {_le}")
                     # CONTRACT: enforce TP/SL presence post-entry
                     if _EC_OK and _contract is not None:
                         try:
@@ -9296,6 +9326,15 @@ def main():
                                         _ep_res = enforce_position_protection(coin, is_buy, fill, origin='webhook')
                                         _sl_pct_used = _ep_res.get('sl_pct')
                                         _tp_pct_used = _ep_res.get('tp_pct')
+                                    # LEDGER: record actual sl/tp/edge now that protection is placed
+                                    if _LEDGER_OK and _ledger is not None and _wh_trade_id:
+                                        try:
+                                            _edge = _gates.compute_expected_edge(_tp_pct_used, _sl_pct_used) \
+                                                if (_GATES_OK and _tp_pct_used and _sl_pct_used) else None
+                                            _ledger.update_entry_fields(_wh_trade_id, sl_pct=_sl_pct_used,
+                                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge)
+                                        except Exception as _le:
+                                            log(f"[ledger] webhook update_entry_fields err {coin}: {_le}")
                                     try:
                                         _sigs_for_pm = list((percoin_configs.get_config(coin) or {}).get('sigs', [])) if percoin_configs.ELITE_MODE else None
                                     except Exception:
