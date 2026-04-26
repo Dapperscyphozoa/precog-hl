@@ -122,6 +122,12 @@ _state = {
     'last_scan_at': 0,
     'last_scan_signals': 0,        # signals_yielded contributed by THIS scan
     'last_scan_fires': 0,
+    # 2026-04-26: fire-stage attempt counters — empirical "why 0 fires"
+    # diagnosis for the post-gate phase (after stale/in_position/etc).
+    'place_attempts': 0,           # times we called _precog.place()
+    'place_filled': 0,             # returned a real fill_px
+    'place_no_fill': 0,            # returned None (both maker AND taker failed)
+    'place_error': 0,              # raised an exception
     # ─── TELEMETRY 2026-04-25: per-trade close log ───
     # Ring buffer of last N closed trades. Used for downstream eval:
     # which scores actually work, which coins are dead weight, exit-reason mix.
@@ -132,6 +138,16 @@ _state_lock = threading.Lock()
 def _log(msg):
     line = f"[{datetime.utcnow().isoformat(timespec='seconds')}Z] [CONFLUENCE] {msg}"
     print(line, flush=True)
+    # Mirror to precog's in-memory LOG_BUFFER if available so /health
+    # recent_logs surfaces confluence activity (otherwise it's stuck in
+    # /var/data/confluence.log only). Best-effort — never break logging.
+    try:
+        if _precog is not None and hasattr(_precog, 'LOG_BUFFER'):
+            _precog.LOG_BUFFER.append(line)
+            if len(_precog.LOG_BUFFER) > 200:
+                _precog.LOG_BUFFER.pop(0)
+    except Exception:
+        pass
     try:
         os.makedirs('/var/data', exist_ok=True)
         with open(LOG_FILE, 'a') as f:
@@ -300,10 +316,16 @@ def _size_and_fire(coin, signal, equity):
         # pure IOC at 30bps and got 0/29 fills because price drift past
         # 30bps in the order-placement window blew through every IOC.
         # place() returns the fill price on success, None on no-fill.
+        with _state_lock:
+            _state['place_attempts'] = _state.get('place_attempts', 0) + 1
         fill_px = _precog.place(coin, is_buy, size_coin, cloid=_cloid)
         if fill_px is None:
+            with _state_lock:
+                _state['place_no_fill'] = _state.get('place_no_fill', 0) + 1
             _log(f"{coin} NO_FILL — precog.place returned None (maker+taker both failed)")
             return None
+        with _state_lock:
+            _state['place_filled'] = _state.get('place_filled', 0) + 1
         actual_px = float(fill_px)
         _log(f"{coin} FILLED via precog.place: {actual_px:.6f} (signal_entry={entry:.6f})")
 
@@ -334,6 +356,8 @@ def _size_and_fire(coin, signal, equity):
                 _log(f"[ledger] confluence append_entry err {coin}: {_le}")
         return r
     except Exception as e:
+        with _state_lock:
+            _state['place_error'] = _state.get('place_error', 0) + 1
         _log(f"{coin} order FAIL: {e}")
         traceback.print_exc()
         return None

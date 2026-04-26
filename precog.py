@@ -2284,6 +2284,11 @@ def confluence_status():
             'last_scan_at': st.get('last_scan_at', 0),
             'last_scan_signals': st.get('last_scan_signals', 0),
             'last_scan_fires': st.get('last_scan_fires', 0),
+            # 2026-04-26: fire-stage diagnostics (why post-gate signals don't fire)
+            'place_attempts': st.get('place_attempts', 0),
+            'place_filled':   st.get('place_filled', 0),
+            'place_no_fill':  st.get('place_no_fill', 0),
+            'place_error':    st.get('place_error', 0),
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
