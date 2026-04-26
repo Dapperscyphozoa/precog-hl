@@ -96,7 +96,7 @@ def record_rejection(coin, side, entry_price, tp_pct, sl_pct, reason, meta=None)
 
 
 # Friction model — MUST match live execution
-FEE_ROUND_TRIP = 0.0007       # 0.07% round-trip (taker entry + taker exit)
+FEE_ROUND_TRIP = 0.0009       # 0.09% round-trip (HL taker 4.5bps x 2). Maker rebate not modeled.
 SLIPPAGE_ROUND_TRIP = 0.0016  # 0.16% round-trip
 MAX_HOLD_SEC = 6 * 3600       # 6h max hold → TIMEOUT
 

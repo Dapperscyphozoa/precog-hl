@@ -46,6 +46,9 @@ SCHEMA = [
     'source',              # precog_signal | webhook | reconcile | admin
     'sl_pct',
     'tp_pct',
+    # Profitability instrumentation (added apr-2026, optional — empty for legacy rows)
+    'expected_edge_at_entry',  # net TP edge after friction; computed by gates.compute_expected_edge
+    'funding_paid_pct',        # signed funding cost on notional; >0 = paid, <0 = received
     # legacy compatibility columns (written as aliases, not read authoritatively)
     'direction',           # mirrors side for legacy parsers
     'entry',               # mirrors entry_price for legacy parsers
@@ -95,7 +98,12 @@ def _read_all() -> list:
 
 
 def _write_header_if_missing():
-    """Ensure CSV has the full schema header. Caller must hold _LOCK."""
+    """Ensure CSV has the full schema header. Caller must hold _LOCK.
+
+    Also performs a one-time schema-extension upgrade: if the existing header
+    is a subset of SCHEMA (i.e. SCHEMA has new fields appended), rewrites the
+    file under the new SCHEMA, padding old rows with empty strings.
+    """
     os.makedirs(os.path.dirname(_PATH), exist_ok=True)
     if not os.path.exists(_PATH):
         with open(_PATH, 'w', newline='') as f:
@@ -109,6 +117,22 @@ def _write_header_if_missing():
         with open(_PATH, 'w', newline='') as f:
             w = csv.writer(f)
             w.writerow(SCHEMA)
+        return
+    existing_cols = [c.strip() for c in first.split(',')]
+    missing_in_header = [c for c in SCHEMA if c not in existing_cols]
+    if missing_in_header:
+        # One-time upgrade: rewrite under full SCHEMA so DictReader can resolve
+        # the new columns going forward.
+        with open(_PATH, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            old_rows = list(reader)
+        tmp = _PATH + '.upgrading'
+        with open(tmp, 'w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=SCHEMA, extrasaction='ignore')
+            w.writeheader()
+            for r in old_rows:
+                w.writerow({k: r.get(k, '') for k in SCHEMA})
+        os.replace(tmp, _PATH)
 
 
 def _migrate_legacy_rows():
@@ -291,10 +315,13 @@ def _rebuild_index():
 # ─────────────────────────────────────────────────────────
 
 def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
-                 sl_pct=None, tp_pct=None, cloid=None, trade_id=None):
+                 sl_pct=None, tp_pct=None, cloid=None, trade_id=None,
+                 expected_edge_at_entry=None):
     """Append ENTRY event. Returns trade_id.
 
     If trade_id is None, generates a new one.
+    `expected_edge_at_entry` is optional; pass gates.compute_expected_edge(tp_pct, sl_pct)
+    when tp/sl are known at entry time so the analyzer can correlate edge with outcome.
     """
     with _LOCK:
         _write_header_if_missing()
@@ -317,6 +344,8 @@ def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
             'sl_pct': sl_pct if sl_pct is not None else '',
             'tp_pct': tp_pct if tp_pct is not None else '',
             'cloid': cloid or '',
+            'expected_edge_at_entry': (expected_edge_at_entry
+                                       if expected_edge_at_entry is not None else ''),
         })
 
         with open(_PATH, 'a', newline='') as f:
@@ -333,8 +362,13 @@ def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
 
 
 def append_close(trade_id, exit_price, pnl, close_reason,
-                 exchange_fill_id=None, source='reconcile'):
+                 exchange_fill_id=None, source='reconcile',
+                 funding_paid_pct=None):
     """Append CLOSE event. Idempotent — returns False if trade already closed.
+
+    `funding_paid_pct` is optional; pass funding_accrual.compute_funding_paid_pct(...)
+    output so realized PnL can be reconciled with funding cost in analyze_trades.
+    Sign: positive = position paid (cost), negative = position received (credit).
 
     Returns True if close was recorded, False if already closed (duplicate).
     """
@@ -373,6 +407,8 @@ def append_close(trade_id, exit_price, pnl, close_reason,
             'source': source,
             'direction': 'CLOSE',  # legacy mirror
             'entry': exit_price if exit_price is not None else '',  # legacy mirror (old schema put exit here)
+            'funding_paid_pct': (funding_paid_pct
+                                 if funding_paid_pct is not None else ''),
         })
 
         with open(_PATH, 'a', newline='') as f:

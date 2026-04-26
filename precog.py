@@ -6236,8 +6236,11 @@ def partial_close(coin, fraction, reason='partial_exit_tp1'):
         return None
 
 
-def modify_sl_to_breakeven(coin, entry, size, is_long, buffer_pct=0.002):
-    """Cancel existing SL and place new SL at breakeven + buffer (covers fees).
+def modify_sl_to_breakeven(coin, entry, size, is_long, buffer_pct=0.003):
+    """Cancel existing SL and place new SL at breakeven + buffer (covers fees + slip).
+
+    30bps buffer = ~12.5bps round-trip friction + ~17.5bps safety margin.
+    Caller may override buffer_pct (e.g. partial closes pass new_sl_pct).
 
     Args:
         coin: coin symbol

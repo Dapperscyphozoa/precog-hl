@@ -174,6 +174,132 @@ def gate7_dislocation(candles, max_disloc_pct=2.0):
 
 
 # ═══════════════════════════════════════════════════════
+# GATE MIN-EDGE — friction-aware sanity check on (tp_pct, sl_pct)
+# Independent of the data-quality gates above; called from the entry path.
+# ═══════════════════════════════════════════════════════
+import os
+
+# Friction model. Keep aligned with shadow_trades.FEE_ROUND_TRIP / SLIPPAGE_ROUND_TRIP.
+MIN_EDGE_FEE_RT = float(os.environ.get('MIN_EDGE_FEE_RT', 0.0009))      # 9 bps round-trip taker
+MIN_EDGE_SLIP_RT = float(os.environ.get('MIN_EDGE_SLIP_RT', 0.0005))    # 5 bps round-trip slip
+MIN_EDGE_SAFETY = float(os.environ.get('MIN_EDGE_SAFETY', 0.0005))      # 5 bps safety margin
+MIN_EDGE_RR = float(os.environ.get('MIN_EDGE_MIN_RR', 1.0))             # net-of-friction R:R floor
+
+# Mode: 'off' (no-op), 'shadow' (log rejects, never block), 'live' (block + log).
+# Default 'off' so this change is behavior-neutral until the operator promotes it.
+MIN_EDGE_MODE = os.environ.get('MIN_EDGE_MODE', 'off').lower()
+
+
+def compute_expected_edge(tp_pct, sl_pct,
+                          fee_rt=None, slip_rt=None):
+    """Return net expected edge on the winning leg, after round-trip friction.
+
+    expected_edge = tp_pct - (fee_rt + slip_rt)
+
+    Positive value = winning trade is profitable after costs. Logged on every
+    entry as `expected_edge_at_entry` so analyze_trades can correlate with
+    realized outcome.
+    """
+    if tp_pct is None or tp_pct <= 0:
+        return 0.0
+    fee = MIN_EDGE_FEE_RT if fee_rt is None else fee_rt
+    slip = MIN_EDGE_SLIP_RT if slip_rt is None else slip_rt
+    return float(tp_pct) - (fee + slip)
+
+
+def gate_min_edge(tp_pct, sl_pct,
+                  fee_rt=None, slip_rt=None, safety=None, min_rr=None):
+    """Friction-aware entry gate.
+
+    Returns (allow, info) where info has: edge, threshold, net_rr, reason.
+
+    Two checks (both must pass):
+      1. Net TP after friction must clear the safety margin
+         (otherwise: even a winning trade barely beats fees)
+      2. Net R:R = (tp_pct - friction) / (sl_pct + friction) >= min_rr
+         (otherwise: losses exceed wins after costs)
+
+    `allow=False` means the gate would reject. Whether that reject actually
+    blocks the trade depends on MIN_EDGE_MODE — gate is pure; mode is policy.
+    """
+    fee = MIN_EDGE_FEE_RT if fee_rt is None else fee_rt
+    slip = MIN_EDGE_SLIP_RT if slip_rt is None else slip_rt
+    safe = MIN_EDGE_SAFETY if safety is None else safety
+    rr_floor = MIN_EDGE_RR if min_rr is None else min_rr
+    friction = fee + slip
+    threshold = friction + safe
+
+    info = {
+        'tp_pct': tp_pct, 'sl_pct': sl_pct,
+        'edge': None, 'threshold': threshold, 'net_rr': None,
+        'fee_rt': fee, 'slip_rt': slip, 'safety': safe,
+        'reason': '',
+    }
+
+    if tp_pct is None or sl_pct is None or tp_pct <= 0 or sl_pct <= 0:
+        info['reason'] = 'missing_or_nonpositive_tp_sl'
+        return False, info
+
+    edge = float(tp_pct) - friction
+    info['edge'] = edge
+    net_tp = edge
+    net_sl = float(sl_pct) + friction
+    net_rr = (net_tp / net_sl) if net_sl > 0 else 0.0
+    info['net_rr'] = net_rr
+
+    if edge < safe:
+        info['reason'] = (f"edge_below_threshold edge={edge:.4f} threshold={threshold:.4f}")
+        return False, info
+    if net_rr < rr_floor:
+        info['reason'] = (f"net_rr_too_low net_rr={net_rr:.2f} floor={rr_floor:.2f}")
+        return False, info
+
+    info['reason'] = 'ok'
+    return True, info
+
+
+def evaluate_min_edge(coin, side, entry_price, tp_pct, sl_pct, engine=None):
+    """Policy wrapper around gate_min_edge.
+
+    Returns (block, info). `block` is True only when MIN_EDGE_MODE='live' AND
+    the gate fails. In 'shadow' mode the rejection is logged but block=False.
+    In 'off' mode this is a no-op (returns block=False, info['reason']='disabled').
+
+    On reject (any mode but 'off'), records a shadow trade so we can later
+    measure the would-have-been outcome distribution per the user's spec:
+      reason='edge_below_threshold', edge=..., threshold=...
+    """
+    if MIN_EDGE_MODE == 'off':
+        return False, {'reason': 'disabled', 'mode': 'off'}
+
+    allow, info = gate_min_edge(tp_pct, sl_pct)
+    info['mode'] = MIN_EDGE_MODE
+    if allow:
+        return False, info
+
+    # Reject — log to shadow trades so we can measure rejected-trade outcomes.
+    try:
+        import shadow_trades
+        shadow_trades.record_rejection(
+            coin=coin, side=side, entry_price=entry_price,
+            tp_pct=tp_pct, sl_pct=sl_pct,
+            reason=info.get('reason', 'edge_gate_fail'),
+            meta={
+                'engine': engine,
+                'edge': info.get('edge'),
+                'threshold': info.get('threshold'),
+                'net_rr': info.get('net_rr'),
+                'mode': MIN_EDGE_MODE,
+            },
+        )
+    except Exception:
+        pass  # never break entry path on telemetry failure
+
+    block = (MIN_EDGE_MODE == 'live')
+    return block, info
+
+
+# ═══════════════════════════════════════════════════════
 # GATE 8: COMPOSITE CONFIDENCE — THE GATEKEEPER
 # ═══════════════════════════════════════════════════════
 MIN_COMPOSITE = 0.55   # minimum aggregate score to pass (0-1 scale)
