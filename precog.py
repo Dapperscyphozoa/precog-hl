@@ -1033,6 +1033,48 @@ def log_trade(engine, coin, direction, entry, pnl, source, sl_pct=None):
     except Exception as e:
         pass  # don't crash on log failure
 
+
+def _compute_engine_health():
+    """Derive per-engine health label from check_calls + success_rate_pct.
+
+    Returns dict like {'wall_exhaustion': 'healthy', 'funding_mr': 'warming_up'}.
+    Labels:
+      warming_up — fewer than 10 check_calls (insufficient data)
+      healthy    — success_rate_pct >= 95
+      degraded   — success_rate_pct 80-94
+      failed     — success_rate_pct < 80
+      err:<TYPE> — status() itself raised an exception (this is the kind of
+                   silent failure mode the integrity-guards layer was built
+                   to surface)
+    """
+    out = {}
+    for name, mod in [('wall_exhaustion', wall_exhaustion),
+                      ('wall_absorption', wall_absorption),
+                      ('wall_bounce',     wall_bounce),
+                      ('funding_mr',      funding_engine)]:
+        try:
+            st = mod.status() if hasattr(mod, 'status') else {}
+            sr = st.get('success_rate_pct', 100.0)
+            calls = st.get('check_calls', 0)
+            errs  = st.get('errors', 0)
+            if calls < 10:
+                label = 'warming_up'
+            elif sr >= 95:
+                label = 'healthy'
+            elif sr >= 80:
+                label = 'degraded'
+            else:
+                label = 'failed'
+            out[name] = {
+                'label':            label,
+                'check_calls':      calls,
+                'errors':           errs,
+                'success_rate_pct': sr,
+            }
+        except Exception as e:
+            out[name] = {'label': f'err:{type(e).__name__}', 'detail': str(e)[:120]}
+    return out
+
 WALLET     = os.environ['HYPERLIQUID_ACCOUNT']
 PRIV_KEY   = os.environ['HL_PRIVATE_KEY']
 STATE_PATH = '/var/data/precog_state.json'
@@ -2186,7 +2228,9 @@ def health():
                     'atomic_reconciler': atomic_reconciler.status(),
                     'wall_exhaustion': wall_exhaustion.status(),
                     'wall_absorption': wall_absorption.status(),
+                    'wall_bounce': wall_bounce.status() if hasattr(wall_bounce, 'status') else {},
                     'funding_mr': funding_engine.status(),
+                    'engine_health': _compute_engine_health(),
                     'use_atomic_exec': USE_ATOMIC_EXEC,
                     'use_ledger_for_size': USE_LEDGER_FOR_SIZE,
                     'recent_logs':LOG_BUFFER[-20:]})
@@ -7361,7 +7405,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             try:
                 import regime_detector as _rd_wa
                 _wa_regime = _rd_wa.get_regime() or 'unknown'
-            except Exception: pass
+            except Exception as _wa_e:
+                log(f"[wall_absorb] regime fetch err: {type(_wa_e).__name__}: {_wa_e}")
             # Count active absorption positions for capacity gate
             _wa_active = 0
             try:
@@ -7392,7 +7437,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             try:
                 import regime_detector as _rd_fmr
                 _fmr_regime = _rd_fmr.get_regime() or 'unknown'
-            except Exception: pass
+            except Exception as _fmr_e:
+                log(f"[funding_mr] regime fetch err: {type(_fmr_e).__name__}: {_fmr_e}")
             fmr_side, fmr_ctx = funding_engine.check(coin, _fmr_regime)
             if fmr_side:
                 sig = fmr_side; bar_ts = int(time.time()*1000); signal_engine = 'FUNDING_MR'
