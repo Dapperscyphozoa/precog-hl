@@ -2276,6 +2276,14 @@ def confluence_status():
             'killed_coins': list(st.get('killed_coins', {}).keys())[:20],
             # Per-filter rejection counters (surgical diagnosis for "why 0 fires")
             'engine_stats': st.get('engine_stats', {}),
+            # 2026-04-26: per-gate reject counters across the scan→fire pipeline.
+            # signals_yielded - sum(rejects_last_scan) - last_scan_fires should = 0.
+            # Whichever bucket dominates rejects_last_scan IS the blocker.
+            'rejects_cumulative': st.get('rejects', {}),
+            'rejects_last_scan': st.get('rejects_last_scan', {}),
+            'last_scan_at': st.get('last_scan_at', 0),
+            'last_scan_signals': st.get('last_scan_signals', 0),
+            'last_scan_fires': st.get('last_scan_fires', 0),
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
