@@ -6068,11 +6068,32 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
     run enforce_position_protection as before.
     """
     out = {'fill_px': None, 'sl_pct': None, 'tp_pct': None,
-           'atomic_used': False, 'reason': None}
+           'atomic_used': False, 'reason': None,
+           # 2026-04-26: expected_px = pre-order mid; realized_slippage_pct
+           # = signed (fill - expected)/expected * sign(side). Positive =
+           # unfavorable (paid more for buy / received less for sell).
+           'expected_px': None, 'realized_slippage_pct': None}
 
     # ─── Legacy path (flag off, or atomic skipped) ────────────────────
     if not USE_ATOMIC_EXEC:
+        # Capture expected (mid) BEFORE place() so we can compute slippage.
+        # place() returns the limit price (not actual fill) so this is best-
+        # effort for legacy — atomic path computes from real fill avgPx.
+        try:
+            _expected = get_mid(coin)
+            if _expected:
+                out['expected_px'] = _expected
+        except Exception:
+            pass
         out['fill_px'] = place(coin, is_buy, size, cloid=cloid)
+        # Best-effort slippage from place() return (which is limit_px on maker
+        # fills, mid on taker). Approximate but still useful.
+        if out['expected_px'] and out['fill_px']:
+            try:
+                _drift = (float(out['fill_px']) - float(out['expected_px'])) / float(out['expected_px'])
+                out['realized_slippage_pct'] = _drift if is_buy else -_drift
+            except Exception:
+                pass
         out['reason'] = 'flag_off'
         return out
 
@@ -6128,6 +6149,14 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
             out['tp_pct'] = tp_pct
             out['atomic_used'] = True
             out['reason'] = 'atomic_ok'
+            # mark_px = expected; result.fill_px = actual avgPx from HL.
+            # This path produces EXACT slippage (vs the legacy approximation).
+            out['expected_px'] = mark_px
+            try:
+                _drift = (float(out['fill_px']) - float(mark_px)) / float(mark_px)
+                out['realized_slippage_pct'] = _drift if is_buy else -_drift
+            except Exception:
+                pass
             log(f"{coin} ATOMIC ENTRY ok: fill={out['fill_px']} "
                 f"sl={sl_px}({sl_pct*100:.2f}%) tp={tp_px}({tp_pct*100:.2f}%) "
                 f"oids: e={result.get('entry_oid')} sl={result.get('sl_oid')} tp={result.get('tp_oid')}")
@@ -6144,7 +6173,16 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
                 except Exception as _ce:
                     log(f"{coin} orphan {_kind}_oid={_oid} cleanup err: {_ce}")
         # Use _place_impl (lock-free) — we already hold the cloid lock in this scope
+        # mark_px from above is the expected reference; place() returns the
+        # limit/mid (best-effort slippage on this fallback path).
+        out['expected_px'] = mark_px
         out['fill_px'] = _place_impl(coin, is_buy, size, cloid=cloid)
+        if out['fill_px']:
+            try:
+                _drift = (float(out['fill_px']) - float(mark_px)) / float(mark_px)
+                out['realized_slippage_pct'] = _drift if is_buy else -_drift
+            except Exception:
+                pass
         out['reason'] = f"atomic_fail_legacy_fallback:{result.get('reason')}"
         return out
     finally:
@@ -8581,7 +8619,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                             _edge = _gates.compute_expected_edge(_tp_pct_used, _sl_pct_used) \
                                 if (_GATES_OK and _tp_pct_used and _sl_pct_used) else None
                             _ledger.update_entry_fields(_trade_id, sl_pct=_sl_pct_used,
-                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge)
+                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge,
+                                realized_slippage_pct=_dr.get('realized_slippage_pct'))
                         except Exception as _le:
                             log(f"[ledger] update_entry_fields err {coin}: {_le}")
                     # CONTRACT: both TP and SL must be on exchange. If either
@@ -8702,7 +8741,8 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                             _edge = _gates.compute_expected_edge(_tp_pct_used, _sl_pct_used) \
                                 if (_GATES_OK and _tp_pct_used and _sl_pct_used) else None
                             _ledger.update_entry_fields(_trade_id, sl_pct=_sl_pct_used,
-                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge)
+                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge,
+                                realized_slippage_pct=_dr.get('realized_slippage_pct'))
                         except Exception as _le:
                             log(f"[ledger] update_entry_fields err {coin}: {_le}")
                     # CONTRACT: enforce TP/SL presence post-entry
@@ -9512,7 +9552,8 @@ def main():
                                             _edge = _gates.compute_expected_edge(_tp_pct_used, _sl_pct_used) \
                                                 if (_GATES_OK and _tp_pct_used and _sl_pct_used) else None
                                             _ledger.update_entry_fields(_wh_trade_id, sl_pct=_sl_pct_used,
-                                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge)
+                                                tp_pct=_tp_pct_used, expected_edge_at_entry=_edge,
+                                                realized_slippage_pct=_wh_dr.get('realized_slippage_pct'))
                                         except Exception as _le:
                                             log(f"[ledger] webhook update_entry_fields err {coin}: {_le}")
                                     try:
