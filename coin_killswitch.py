@@ -12,7 +12,16 @@ ROLLING_WINDOW_SEC = 86400
 CONSEC_LOSS_TRIGGER = 3
 WR_DROP_PP_TRIGGER = 20  # percentage points below expected
 MIN_TRADES_FOR_WR_CHECK = 10
-LOCK = threading.Lock()
+LOCK = threading.RLock()
+# 2026-04-26: was threading.Lock(). Functions like record_trade_close()
+# acquire LOCK, then call _save() which ALSO does `with LOCK:`. Non-
+# reentrant Lock deadlocks the calling thread. RLock allows re-entry by
+# the same thread, restoring the intended behavior. (Same fix pattern
+# applied to engine_killswitch.py earlier — this was the original bug
+# I noticed there, just hadn't been backported here.) Likely cause of
+# coin_killswitch never auto-disabling a coin in production despite
+# the conditions being hit — calls to _save() inside lock-held branches
+# silently hung the calling thread until the next request unblocked it.
 
 # {coin: {'trades': [(ts, win_bool, pnl_pct)], 'disabled': bool, 'disabled_at': ts, 'reason': str, 'consec_losses': int}}
 _state = {}
