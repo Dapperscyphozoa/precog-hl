@@ -69,7 +69,16 @@ DECAY_PNL_THRESHOLD = 0.0
 DEDUPE_WINDOW_S = 24 * 3600
 
 # ─── FIX B: entry drift control ──────────────────────────────────────
-MAX_SIGNAL_AGE_S = 15 * 60   # 1 × 15m bar; skip signals older than 1 bar
+MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '3600'))
+# 2026-04-26: was hardcoded 15min. Empirically impossible: bars are
+# timestamped at bar START, so a signal on the bar that just closed has
+# age=15min before the scan even runs (bar took 15min to form). Add
+# scan_interval lag and every signal hits 18-22min minimum, so the
+# 15min gate rejected 100% of yielded signals. Net effect: 0 fires
+# despite 32+ signals/scan. Default raised to 60min — covers ~4 bars
+# of look-back; IOC slippage buffer (0.08%) protects against price
+# drift on genuinely stale signals (won't fill if price moved away).
+# Operator can tune via env without redeploy.
 
 _state = {
     'last_fire_ts': {},          # coin -> ts (24h cooldown tracking)
