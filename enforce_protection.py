@@ -467,8 +467,17 @@ def enforce_protection(coin, is_long, entry_px,
                 try:
                     verify_orders = fetch_orders_fn(coin)
                     v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
-                    if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
-                        sl_verified = True
+                    # 2026-04-26: relaxed size match (see other call site comment)
+                    for _o in v_sl:
+                        try:
+                            _sz = float(_o.get('sz', 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        _diff = abs(_sz - actual_size)
+                        if _diff < 1e-6 or (actual_size > 0 and _diff / actual_size < 0.005):
+                            sl_verified = True
+                            break
+                    if sl_verified:
                         break
                 except Exception:
                     pass
@@ -585,10 +594,26 @@ def enforce_protection(coin, is_long, entry_px,
                 verify_orders = fetch_orders_fn(coin)
                 v_tp = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'tp']
                 v_sl = [o for o in (verify_orders or []) if (o.get('tpsl') or '').lower() == 'sl']
+                # 2026-04-26: relax size match. Was `== 1 and abs(diff) < 1e-9`
+                # which failed on (a) lingering stale orders making len > 1 and
+                # (b) sub-1e-9 float noise between actual_size and HL-returned
+                # sz. Use relative tolerance + accept ANY matching order.
+                _SIZE_TOL_REL = 0.005   # 0.5% relative
+                _SIZE_TOL_ABS = 1e-6    # absolute floor for tiny sizes
+                def _sz_matches(orders, target):
+                    for o in orders:
+                        try:
+                            sz = float(o.get('sz', 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        diff = abs(sz - target)
+                        if diff < _SIZE_TOL_ABS or (target > 0 and diff / target < _SIZE_TOL_REL):
+                            return True
+                    return False
                 if not final_tp_ok:
-                    final_tp_ok = (len(v_tp) == 1 and abs(float(v_tp[0].get('sz', 0)) - actual_size) < 1e-9)
+                    final_tp_ok = _sz_matches(v_tp, actual_size)
                 if not final_sl_ok:
-                    if len(v_sl) == 1 and abs(float(v_sl[0].get('sz', 0)) - actual_size) < 1e-9:
+                    if _sz_matches(v_sl, actual_size):
                         final_sl_ok = True
                 if final_tp_ok and final_sl_ok:
                     full_verified = True
