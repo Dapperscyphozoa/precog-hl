@@ -86,7 +86,14 @@ _STATS = {
     'skipped_cooldown':   0,
     'skipped_proximity':  0,
     'skipped_no_approach': 0,
+    'errors':             0,
 }
+
+
+import sys as _sys
+def _log_err(msg):
+    """Visible error logger — replaces silent except: pass anti-pattern."""
+    print(f"[wall_exhaustion ERR] {msg}", file=_sys.stderr, flush=True)
 
 
 def _record_price(coin, px):
@@ -192,7 +199,9 @@ def check(coin, current_px):
     # Walk verified walls; check each for exhaustion + proximity
     try:
         verified = ob.get_walls(coin) or []
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"get_walls({coin}): {type(e).__name__}: {e}")
         return None, None
 
     if not verified:
@@ -206,7 +215,9 @@ def check(coin, current_px):
     try:
         history_dict = ob._WALLS_HISTORY
         lock = ob._LOCK
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"orderbook_ws internals access ({coin}): {type(e).__name__}: {e}")
         return None, None
 
     candidates = []  # (decay_pct, side_str, wall_dict)
@@ -282,6 +293,8 @@ def check(coin, current_px):
 def status():
     """Diagnostics for /health."""
     out = dict(_STATS)
+    n = max(1, out['check_calls'])
+    out['success_rate_pct'] = round((1 - out['errors']/n) * 100, 2)
     out['exhaustion_threshold_pct'] = EXHAUSTION_THRESHOLD * 100
     out['weakening_threshold_pct'] = WEAKENING_THRESHOLD * 100
     out['proximity_pct'] = PROXIMITY_PCT * 100
