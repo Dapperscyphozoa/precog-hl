@@ -30,6 +30,20 @@ from datetime import datetime
 _precog = None
 _ce = None
 
+# Trade ledger + edge gate (eager imports — modules don't depend on precog)
+try:
+    import trade_ledger as _ledger
+    _LEDGER_OK = True
+except Exception as _e:
+    _ledger = None
+    _LEDGER_OK = False
+try:
+    import gates as _gates
+    _GATES_OK = True
+except Exception:
+    _gates = None
+    _GATES_OK = False
+
 ENABLED         = os.environ.get('CONFLUENCE_ENABLED', '0') == '1'
 DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
 SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '300'))
@@ -230,6 +244,13 @@ def _size_and_fire(coin, signal, equity):
         return {'dry_run': True, 'size_coin': size_coin, 'tp': tp_px, 'sl': sl_px,
                 'expected_px': entry, 'actual_px': entry}
 
+    # Pre-bind a trade identity so the ENTRY ledger row uses the same id
+    # the close path will reference. Generated even if order fails (we
+    # discard it then) — this avoids a race where the order fills before
+    # the ledger row exists.
+    _trade_id = (_ledger.new_trade_id()
+                 if (_LEDGER_OK and _ledger) else None)
+
     try:
         # IOC limit into slip price
         r = _precog.exchange.order(
@@ -249,6 +270,25 @@ def _size_and_fire(coin, signal, equity):
                 r['expected_px'] = entry
                 r['actual_px'] = actual_px
                 r['slip_pct'] = slip_pct
+        # Record ENTRY in the unified ledger so /trades/recent and
+        # analyze_trades see confluence trades alongside legacy precog ones.
+        # tp_pct/sl_pct are known at signal time (no ENTRY_UPDATE needed).
+        if _trade_id and _LEDGER_OK and _ledger and actual_px:
+            try:
+                _edge = (_gates.compute_expected_edge(signal['tp_pct'], signal['sl_pct'])
+                         if _GATES_OK else None)
+                _engine_tag = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
+                _ledger.append_entry(
+                    coin=coin, side=signal['side'], entry_price=actual_px,
+                    engine=_engine_tag, source='confluence_signal',
+                    sl_pct=signal['sl_pct'], tp_pct=signal['tp_pct'],
+                    expected_edge_at_entry=_edge,
+                    trade_id=_trade_id,
+                )
+                if isinstance(r, dict):
+                    r['trade_id'] = _trade_id
+            except Exception as _le:
+                _log(f"[ledger] confluence append_entry err {coin}: {_le}")
         return r
     except Exception as e:
         _log(f"{coin} order FAIL: {e}")
@@ -311,6 +351,9 @@ def _register_position(coin, signal, fill_result):
             'tp_pct': signal['tp_pct'],
             'sl_pct': signal['sl_pct'],
             'max_hold_s': signal['max_hold_s'],
+            # Unified ledger trade_id stamped by _size_and_fire — used
+            # by _close_position to write the matching CLOSE row.
+            'trade_id': fill_result.get('trade_id') if isinstance(fill_result, dict) else None,
             # ─── STEP 3: tag every trade with source universe ───
             'universe': 'ELITE_71',
             'universe_aligned_ts': 1777076400,  # 2026-04-25 alignment anchor
@@ -414,6 +457,7 @@ def _close_position(coin, reason, pnl=None):
         pos = _state['open_positions'].pop(coin, None)
     if not pos:
         return
+    _exit_px_for_ledger = None
     if not DRY_RUN:
         try:
             # precog has a close helper? Fall back to reduce-only market
@@ -422,6 +466,7 @@ def _close_position(coin, reason, pnl=None):
             else:
                 mids = _precog.info.all_mids()
                 px = float(mids.get(coin, 0))
+                _exit_px_for_ledger = px or None
                 if px:
                     is_buy_close = (pos['side'] == 'SELL')  # opposite side
                     # conservative size read from account
@@ -440,6 +485,22 @@ def _close_position(coin, reason, pnl=None):
                         _log(f"{coin} close fetch err: {e}")
         except Exception as e:
             _log(f"{coin} close err: {e}")
+
+    # Unified ledger CLOSE — pairs with the ENTRY written by _size_and_fire.
+    # confluence's `pnl` arg is a signed fraction (e.g. +0.0032 = +0.32%);
+    # passed through unchanged to match the existing /trades/recent shape.
+    _tid = pos.get('trade_id')
+    if _tid and _LEDGER_OK and _ledger and not DRY_RUN:
+        try:
+            _ledger.append_close(
+                trade_id=_tid,
+                exit_price=_exit_px_for_ledger,
+                pnl=(pnl if pnl is not None else 0.0),
+                close_reason=reason,
+                source='confluence_close',
+            )
+        except Exception as _le:
+            _log(f"[ledger] confluence append_close err {coin}: {_le}")
     if pnl is not None:
         with _state_lock:
             if pnl > 0: _state['wins'] += 1
