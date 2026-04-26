@@ -309,6 +309,32 @@ def _size_and_fire(coin, signal, equity):
         _suffix = 'L' if is_buy else 'S'
         _cloid = f"{_trade_id[:8]}{coin[:4]}{_suffix}"[:16]
 
+    # 2026-04-26: Pre-write the ENTRY ledger row BEFORE placing the order.
+    # Live evidence (AAVE event 337/342): when confluence's append_entry
+    # ran AFTER the fill, the reconciler swept the new exchange position
+    # in that ~1-10s window and adopted it as a fresh RECONCILED trade,
+    # creating a duplicate trade_id (one CONFLUENCE_SNIPER, one RECONCILED).
+    # Writing first means the reconciler finds an existing open entry and
+    # skips its adopt path.
+    #
+    # entry_price is the SIGNAL'S entry (last bar close), not the actual
+    # fill — fill differs by slippage (typically <0.5%). Slippage tracked
+    # separately via _record_slippage.
+    if _trade_id and _LEDGER_OK and _ledger:
+        try:
+            _edge = (_gates.compute_expected_edge(signal['tp_pct'], signal['sl_pct'])
+                     if _GATES_OK else None)
+            _engine_tag = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
+            _ledger.append_entry(
+                coin=coin, side=signal['side'], entry_price=entry,
+                engine=_engine_tag, source='confluence_signal',
+                sl_pct=signal['sl_pct'], tp_pct=signal['tp_pct'],
+                expected_edge_at_entry=_edge,
+                trade_id=_trade_id, cloid=_cloid,
+            )
+        except Exception as _le:
+            _log(f"[ledger] confluence pre-place append_entry err {coin}: {_le}")
+
     try:
         # 2026-04-26: Route through _precog.place() instead of direct
         # exchange.order. precog's place() implements MAKER (post-only Alo)
@@ -323,6 +349,18 @@ def _size_and_fire(coin, signal, equity):
             with _state_lock:
                 _state['place_no_fill'] = _state.get('place_no_fill', 0) + 1
             _log(f"{coin} NO_FILL — precog.place returned None (maker+taker both failed)")
+            # Close the pre-written ENTRY so it doesn't dangle as an orphan
+            # for the reconciler to "discover" and double-book.
+            if _trade_id and _LEDGER_OK and _ledger:
+                try:
+                    _ledger.append_close(
+                        trade_id=_trade_id,
+                        exit_price=None, pnl=0,
+                        close_reason='confluence_no_fill',
+                        source='confluence_close',
+                    )
+                except Exception as _le:
+                    _log(f"[ledger] confluence no_fill close err {coin}: {_le}")
             return None
         with _state_lock:
             _state['place_filled'] = _state.get('place_filled', 0) + 1
@@ -334,31 +372,24 @@ def _size_and_fire(coin, signal, equity):
             _record_slippage(coin, slip_pct)
         # Synthesize a result dict for callers that expect the legacy shape.
         r = {'expected_px': entry, 'actual_px': actual_px,
-             'slip_pct': abs(actual_px - entry) / entry * 100 if entry > 0 else 0.0}
-
-        # Record ENTRY in the unified ledger so /trades/recent and
-        # analyze_trades see confluence trades alongside legacy precog ones.
-        # tp_pct/sl_pct are known at signal time (no ENTRY_UPDATE needed).
-        if _trade_id and _LEDGER_OK and _ledger:
-            try:
-                _edge = (_gates.compute_expected_edge(signal['tp_pct'], signal['sl_pct'])
-                         if _GATES_OK else None)
-                _engine_tag = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
-                _ledger.append_entry(
-                    coin=coin, side=signal['side'], entry_price=actual_px,
-                    engine=_engine_tag, source='confluence_signal',
-                    sl_pct=signal['sl_pct'], tp_pct=signal['tp_pct'],
-                    expected_edge_at_entry=_edge,
-                    trade_id=_trade_id, cloid=_cloid,
-                )
-                r['trade_id'] = _trade_id
-            except Exception as _le:
-                _log(f"[ledger] confluence append_entry err {coin}: {_le}")
+             'slip_pct': abs(actual_px - entry) / entry * 100 if entry > 0 else 0.0,
+             'trade_id': _trade_id}
         return r
     except Exception as e:
         with _state_lock:
             _state['place_error'] = _state.get('place_error', 0) + 1
         _log(f"{coin} order FAIL: {e}")
+        # Close the pre-written ENTRY on exception too.
+        if _trade_id and _LEDGER_OK and _ledger:
+            try:
+                _ledger.append_close(
+                    trade_id=_trade_id,
+                    exit_price=None, pnl=0,
+                    close_reason='confluence_order_exception',
+                    source='confluence_close',
+                )
+            except Exception:
+                pass
         traceback.print_exc()
         return None
 
