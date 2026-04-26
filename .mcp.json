@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "fintools": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--from",
+        "fintools-mcp",
+        "fintools-mcp"
+      ],
+      "env": {}
+    }
+  }
+}
