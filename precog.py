@@ -320,6 +320,16 @@ except Exception as _e:
     print(f'[funding_accrual] import failed (non-fatal): {_e}', flush=True)
 
 
+def _current_regime():
+    """Best-effort current regime classification for entry tagging.
+    Returns None on any failure — never blocks entry."""
+    try:
+        import regime_detector as _rd_h
+        return _rd_h.get_regime()
+    except Exception:
+        return None
+
+
 def _funding_for_close(trade_record):
     """Best-effort funding accrual for a closing trade. Returns signed pct on
     notional (positive = paid, negative = received), or None if uncomputable.
@@ -6740,6 +6750,16 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
     # Best-effort — doesn't block close on failure.
     _funding_pct = _funding_for_close(trade)
 
+    # MFE/MAE: pulled from state['positions'][coin] which the profit_lock
+    # loop updates every tick. Signed fractions of entry price.
+    _mfe = None; _mae = None
+    try:
+        _live_pos = state.get('positions', {}).get(coin, {})
+        _mfe = _live_pos.get('mfe_pct')
+        _mae = _live_pos.get('mae_pct')
+    except Exception:
+        pass
+
     ok = _ledger.append_close(
         trade_id=trade_id,
         exit_price=exit_price,
@@ -6748,6 +6768,8 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
         exchange_fill_id=exchange_fill_id,
         source=source,
         funding_paid_pct=_funding_pct,
+        mfe_pct=_mfe,
+        mae_pct=_mae,
     )
     if not ok:
         return False
@@ -8522,6 +8544,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                 engine=signal_engine, source='precog_signal',
                                 sl_pct=None, tp_pct=None,  # populated below after EP
                                 cloid=_cloid, trade_id=_trade_id,
+                                regime=_current_regime(),
                             )
                         except Exception as _le:
                             log(f"[ledger] append_entry err {coin}: {_le}")
@@ -8644,6 +8667,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                 engine=signal_engine, source='precog_signal',
                                 sl_pct=None, tp_pct=None,
                                 cloid=_cloid, trade_id=_trade_id,
+                                regime=_current_regime(),
                             )
                         except Exception as _le:
                             log(f"[ledger] append_entry err {coin}: {_le}")
@@ -8958,6 +8982,7 @@ def main():
                                     source='reconcile_adopt',
                                     cloid=None,
                                     trade_id=_adopt_trade_id,
+                                    regime=_current_regime(),
                                 )
                                 log(f"RECONCILE LEDGER: adopted NEW {k} as trade_id={_adopt_trade_id[:8]}")
                         except Exception as _le:
@@ -8998,6 +9023,25 @@ def main():
                             _pl_mark = get_mid(_pl_coin)
                             if not _pl_mark:
                                 continue
+                            # MFE/MAE tracking — high/low water of raw move during hold.
+                            # Updates state['positions'][coin] which the close path
+                            # reads to populate trade_ledger CLOSE row.
+                            try:
+                                _mm_pos = state.get('positions', {}).get(_pl_coin, {})
+                                _mm_entry = float(_mm_pos.get('entry') or _pl_lp.get('entry') or 0)
+                                _mm_side = _mm_pos.get('side') or ('L' if float(_pl_lp.get('size', 0)) > 0 else 'S')
+                                if _mm_entry > 0:
+                                    _mm_raw = ((_pl_mark - _mm_entry) / _mm_entry) if _mm_side in ('L', 'BUY') else ((_mm_entry - _pl_mark) / _mm_entry)
+                                    if 'mfe_pct' not in _mm_pos:
+                                        _mm_pos['mfe_pct'] = 0.0
+                                    if 'mae_pct' not in _mm_pos:
+                                        _mm_pos['mae_pct'] = 0.0
+                                    if _mm_raw > _mm_pos['mfe_pct']:
+                                        _mm_pos['mfe_pct'] = _mm_raw
+                                    if _mm_raw < _mm_pos['mae_pct']:
+                                        _mm_pos['mae_pct'] = _mm_raw
+                            except Exception:
+                                pass
                             _pl_action = _profit_lock_check(_pl_coin, _pl_lp, _pl_mark)
                             if _pl_action == 'force_close':
                                 # Emit intent — reconciler resolves
@@ -9441,6 +9485,7 @@ def main():
                                                 engine='WEBHOOK', source='webhook',
                                                 sl_pct=None, tp_pct=None,
                                                 cloid=_wh_cloid, trade_id=_wh_trade_id,
+                                                regime=_current_regime(),
                                             )
                                         except Exception as _le:
                                             log(f"[ledger] webhook append_entry err {coin}: {_le}")

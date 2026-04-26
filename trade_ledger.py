@@ -49,6 +49,11 @@ SCHEMA = [
     # Profitability instrumentation (added apr-2026, optional — empty for legacy rows)
     'expected_edge_at_entry',  # net TP edge after friction; computed by gates.compute_expected_edge
     'funding_paid_pct',        # signed funding cost on notional; >0 = paid, <0 = received
+    # Diagnostic instrumentation v2 (added 2026-04-26)
+    'regime',                  # regime_detector output at entry time (chop|bull-calm|bear-calm|...)
+    'realized_slippage_pct',   # signed (actual_fill_px - signal_px) / signal_px; on ENTRY rows only
+    'mfe_pct',                 # max favourable excursion as fraction; on CLOSE rows only
+    'mae_pct',                 # max adverse excursion as fraction; on CLOSE rows only
     # legacy compatibility columns (written as aliases, not read authoritatively)
     'direction',           # mirrors side for legacy parsers
     'entry',               # mirrors entry_price for legacy parsers
@@ -296,27 +301,29 @@ def _rebuild_index():
                 _INDEX['coin_to_latest_open'][coin] = tid
         elif r.get('event_type') == 'ENTRY_UPDATE':
             # Don't overwrite the ENTRY record — merge fields into it.
-            # This row carries post-fill protection params (sl_pct, tp_pct,
-            # expected_edge_at_entry) that should appear on the canonical
-            # ENTRY record after restart.
+            # This row carries post-fill protection params + fill-corrected
+            # entry_price + realized slippage that should appear on the
+            # canonical ENTRY record after restart.
             entry_row = None
             for prior in rows:
                 if prior.get('trade_id') == tid and prior.get('event_type') == 'ENTRY':
                     entry_row = prior
                     break
             if entry_row is not None:
-                for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry'):
+                for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry',
+                          'realized_slippage_pct', 'entry_price', 'entry'):
                     v = r.get(k)
                     if v not in (None, ''):
                         entry_row[k] = v
                 # Restore by_trade_id pointer to the merged ENTRY row
                 _INDEX['by_trade_id'][tid] = entry_row
         elif r.get('event_type') == 'CLOSE':
-            # Carry through entry-time fields (sl_pct, tp_pct, edge) from any
-            # prior ENTRY/ENTRY_UPDATE so post-close lookups see the full
-            # picture, not just the close row.
+            # Carry through entry-time fields (sl_pct, tp_pct, edge, regime,
+            # slippage) from any prior ENTRY/ENTRY_UPDATE so post-close lookups
+            # see the full picture, not just the close row.
             for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry', 'engine',
-                      'side', 'coin', 'cloid', 'entry_price'):
+                      'side', 'coin', 'cloid', 'entry_price',
+                      'regime', 'realized_slippage_pct'):
                 if r.get(k) in (None, ''):
                     for prior in rows:
                         if (prior.get('trade_id') == tid
@@ -346,12 +353,16 @@ def _rebuild_index():
 
 def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
                  sl_pct=None, tp_pct=None, cloid=None, trade_id=None,
-                 expected_edge_at_entry=None):
+                 expected_edge_at_entry=None,
+                 regime=None, realized_slippage_pct=None):
     """Append ENTRY event. Returns trade_id.
 
     If trade_id is None, generates a new one.
     `expected_edge_at_entry` is optional; pass gates.compute_expected_edge(tp_pct, sl_pct)
     when tp/sl are known at entry time so the analyzer can correlate edge with outcome.
+    `regime` is the regime_detector classification at entry (chop/bull/bear/etc).
+    `realized_slippage_pct` is signed (actual_fill_px - signal_entry_px)/signal_entry_px
+    so the analyzer can break out true net PnL after fill cost.
     """
     with _LOCK:
         _write_header_if_missing()
@@ -376,6 +387,9 @@ def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
             'cloid': cloid or '',
             'expected_edge_at_entry': (expected_edge_at_entry
                                        if expected_edge_at_entry is not None else ''),
+            'regime': regime or '',
+            'realized_slippage_pct': (realized_slippage_pct
+                                      if realized_slippage_pct is not None else ''),
         })
 
         with open(_PATH, 'a', newline='') as f:
@@ -392,15 +406,16 @@ def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
 
 
 def update_entry_fields(trade_id, sl_pct=None, tp_pct=None,
-                        expected_edge_at_entry=None):
-    """Record post-entry-fill protection params for an existing trade.
+                        expected_edge_at_entry=None,
+                        realized_slippage_pct=None,
+                        entry_price=None):
+    """Record post-entry-fill protection params and/or fill-realized fields
+    for an existing trade.
 
     Appends an ENTRY_UPDATE event row and merges the fields into the
     in-memory ENTRY record so subsequent get_by_trade_id calls see them.
-    Use this AFTER enforce_protection completes so sl_pct/tp_pct/edge are
-    captured on every trade — without this the original ENTRY row has
-    blank protection params (the bug we observed in /trades/recent where
-    every entry had empty sl_pct/tp_pct fields).
+    Use AFTER enforce_protection completes (sl_pct/tp_pct/edge) and/or
+    AFTER fill returns (realized_slippage_pct, corrected entry_price).
 
     No-op (returns False) if trade_id is unknown.
     """
@@ -431,6 +446,9 @@ def update_entry_fields(trade_id, sl_pct=None, tp_pct=None,
             'tp_pct': tp_pct if tp_pct is not None else '',
             'expected_edge_at_entry': (expected_edge_at_entry
                                        if expected_edge_at_entry is not None else ''),
+            'realized_slippage_pct': (realized_slippage_pct
+                                      if realized_slippage_pct is not None else ''),
+            'entry_price': entry_price if entry_price is not None else '',
             'source': 'protection_placed',
             'direction': side,  # legacy mirror
         })
@@ -446,33 +464,51 @@ def update_entry_fields(trade_id, sl_pct=None, tp_pct=None,
             existing['tp_pct'] = tp_pct
         if expected_edge_at_entry is not None:
             existing['expected_edge_at_entry'] = expected_edge_at_entry
+        if realized_slippage_pct is not None:
+            existing['realized_slippage_pct'] = realized_slippage_pct
+        if entry_price is not None:
+            existing['entry_price'] = entry_price
+            existing['entry'] = entry_price  # legacy mirror
 
         return True
 
 
 def append_close(trade_id, exit_price, pnl, close_reason,
                  exchange_fill_id=None, source='reconcile',
-                 funding_paid_pct=None):
+                 funding_paid_pct=None,
+                 mfe_pct=None, mae_pct=None):
     """Append CLOSE event. Idempotent — returns False if trade already closed.
 
     `funding_paid_pct` is optional; pass funding_accrual.compute_funding_paid_pct(...)
     output so realized PnL can be reconciled with funding cost in analyze_trades.
     Sign: positive = position paid (cost), negative = position received (credit).
+    `mfe_pct` / `mae_pct` are max favourable / adverse excursion as signed
+    fractions of entry price (e.g. mfe_pct=0.012 = position went +1.2% in our
+    favour during the hold; mae_pct=-0.008 = went -0.8% against us).
 
     Returns True if close was recorded, False if already closed (duplicate).
     """
     with _LOCK:
         existing = _INDEX['by_trade_id'].get(trade_id)
+        # Defaults for orphan close (no prior ENTRY)
+        coin = ''; side = ''; engine = ''
+        _carry_regime = ''; _carry_slip = ''; _carry_edge = ''
+        _carry_sl = ''; _carry_tp = ''; _carry_entry_px = ''; _carry_cloid = ''
         if not existing:
-            # Unknown trade — still record as orphan close
-            coin = ''
-            side = ''
-            engine = ''
             source = 'orphan_close'
         else:
             coin = existing.get('coin', '')
             side = existing.get('side', '')
             engine = existing.get('engine', '')   # inherit engine tag from entry
+            # Carry through entry-time diagnostic fields so the CLOSE row
+            # also surfaces them in /trades/recent and analyze_trades.
+            _carry_regime = existing.get('regime', '')
+            _carry_slip = existing.get('realized_slippage_pct', '')
+            _carry_edge = existing.get('expected_edge_at_entry', '')
+            _carry_sl = existing.get('sl_pct', '')
+            _carry_tp = existing.get('tp_pct', '')
+            _carry_entry_px = existing.get('entry_price', '')
+            _carry_cloid = existing.get('cloid', '')
 
         # Idempotency check — is this trade already closed?
         if trade_id not in _INDEX['open_trades'] and existing and existing.get('event_type') == 'CLOSE':
@@ -498,6 +534,17 @@ def append_close(trade_id, exit_price, pnl, close_reason,
             'entry': exit_price if exit_price is not None else '',  # legacy mirror (old schema put exit here)
             'funding_paid_pct': (funding_paid_pct
                                  if funding_paid_pct is not None else ''),
+            'mfe_pct': mfe_pct if mfe_pct is not None else '',
+            'mae_pct': mae_pct if mae_pct is not None else '',
+            # Carry through entry-time diagnostics so /trades/recent CLOSE
+            # rows show regime / slippage / edge alongside realized PnL.
+            'regime': _carry_regime,
+            'realized_slippage_pct': _carry_slip,
+            'expected_edge_at_entry': _carry_edge,
+            'sl_pct': _carry_sl,
+            'tp_pct': _carry_tp,
+            'entry_price': _carry_entry_px,
+            'cloid': _carry_cloid,
         })
 
         with open(_PATH, 'a', newline='') as f:
