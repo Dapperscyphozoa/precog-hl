@@ -640,6 +640,26 @@ def _cycle():
 
         ledger_stats = ledger.stats()
 
+        # 2026-04-26: auto-dedupe duplicate open trade_ids. The 3-source
+        # _in_position fix landed earlier this session, but pre-fix duplicate
+        # entries persist in the ledger and inflate open_trades_count, driving
+        # drift artificially high (4-8% degraded → entry_limiter='reduced' →
+        # all trades fire at 0.5x size). Auto-dedupe is safe: keeps earliest
+        # event_seq trade per coin, closes the rest with reason=
+        # 'reconcile_duplicate_entry'. No real divergence is hidden because
+        # exchange position count is the authoritative side; ledger duplicates
+        # are pure bookkeeping noise.
+        try:
+            if hasattr(ledger, 'dedupe_open_trades'):
+                _dd = ledger.dedupe_open_trades()
+                if _dd and _dd.get('dupes_closed', 0) > 0:
+                    _log(f"AUTO-DEDUPE: closed {_dd['dupes_closed']} duplicate open trades "
+                         f"across {_dd['coins_affected']} coins — {_dd.get('details', [])[:5]}")
+                    # Re-read stats so this cycle's drift reflects the cleanup
+                    ledger_stats = ledger.stats()
+        except Exception as _de:
+            _log(f"auto-dedupe err: {_de}")
+
         # 2. Compute drift + get intent backlog
         drift_pct = _compute_drift(snap, ledger_stats)
         intent_backlog = iq.status().get('queue_depth', 0)
