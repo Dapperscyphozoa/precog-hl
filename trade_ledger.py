@@ -294,7 +294,37 @@ def _rebuild_index():
             if coin:
                 _INDEX['by_coin_open'].setdefault(coin, set()).add(tid)
                 _INDEX['coin_to_latest_open'][coin] = tid
+        elif r.get('event_type') == 'ENTRY_UPDATE':
+            # Don't overwrite the ENTRY record — merge fields into it.
+            # This row carries post-fill protection params (sl_pct, tp_pct,
+            # expected_edge_at_entry) that should appear on the canonical
+            # ENTRY record after restart.
+            entry_row = None
+            for prior in rows:
+                if prior.get('trade_id') == tid and prior.get('event_type') == 'ENTRY':
+                    entry_row = prior
+                    break
+            if entry_row is not None:
+                for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry'):
+                    v = r.get(k)
+                    if v not in (None, ''):
+                        entry_row[k] = v
+                # Restore by_trade_id pointer to the merged ENTRY row
+                _INDEX['by_trade_id'][tid] = entry_row
         elif r.get('event_type') == 'CLOSE':
+            # Carry through entry-time fields (sl_pct, tp_pct, edge) from any
+            # prior ENTRY/ENTRY_UPDATE so post-close lookups see the full
+            # picture, not just the close row.
+            for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry', 'engine',
+                      'side', 'coin', 'cloid', 'entry_price'):
+                if r.get(k) in (None, ''):
+                    for prior in rows:
+                        if (prior.get('trade_id') == tid
+                                and prior.get('event_type') in ('ENTRY', 'ENTRY_UPDATE')
+                                and prior.get(k) not in (None, '')):
+                            r[k] = prior.get(k)
+                            break
+            _INDEX['by_trade_id'][tid] = r
             _INDEX['open_trades'].discard(tid)
             coin = r.get('coin') or ''
             if coin:
@@ -359,6 +389,65 @@ def append_entry(coin, side, entry_price, engine=None, source='precog_signal',
         _INDEX['coin_to_latest_open'][coin] = trade_id
 
         return trade_id
+
+
+def update_entry_fields(trade_id, sl_pct=None, tp_pct=None,
+                        expected_edge_at_entry=None):
+    """Record post-entry-fill protection params for an existing trade.
+
+    Appends an ENTRY_UPDATE event row and merges the fields into the
+    in-memory ENTRY record so subsequent get_by_trade_id calls see them.
+    Use this AFTER enforce_protection completes so sl_pct/tp_pct/edge are
+    captured on every trade — without this the original ENTRY row has
+    blank protection params (the bug we observed in /trades/recent where
+    every entry had empty sl_pct/tp_pct fields).
+
+    No-op (returns False) if trade_id is unknown.
+    """
+    if not trade_id:
+        return False
+    with _LOCK:
+        existing = _INDEX['by_trade_id'].get(trade_id)
+        if not existing:
+            return False
+
+        _write_header_if_missing()
+
+        # Inherit immutable fields from the ENTRY record
+        coin = existing.get('coin', '')
+        side = existing.get('side', '')
+        engine = existing.get('engine', '')
+
+        row = {k: '' for k in SCHEMA}
+        row.update({
+            'event_seq': _next_seq(),
+            'event_type': 'ENTRY_UPDATE',
+            'trade_id': trade_id,
+            'timestamp': _now_iso(),
+            'coin': coin,
+            'side': side,
+            'engine': engine,
+            'sl_pct': sl_pct if sl_pct is not None else '',
+            'tp_pct': tp_pct if tp_pct is not None else '',
+            'expected_edge_at_entry': (expected_edge_at_entry
+                                       if expected_edge_at_entry is not None else ''),
+            'source': 'protection_placed',
+            'direction': side,  # legacy mirror
+        })
+
+        with open(_PATH, 'a', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=SCHEMA)
+            w.writerow(row)
+
+        # Merge fields into the canonical ENTRY record so live readers see them.
+        if sl_pct is not None:
+            existing['sl_pct'] = sl_pct
+        if tp_pct is not None:
+            existing['tp_pct'] = tp_pct
+        if expected_edge_at_entry is not None:
+            existing['expected_edge_at_entry'] = expected_edge_at_entry
+
+        return True
 
 
 def append_close(trade_id, exit_price, pnl, close_reason,

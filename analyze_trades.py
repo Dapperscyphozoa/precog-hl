@@ -123,6 +123,17 @@ def load_trades(path):
                     'expected_edge_at_entry': to_float(r.get('expected_edge_at_entry')),
                     'entry_ts': ts,
                 }
+            elif ev == 'ENTRY_UPDATE':
+                # Post-fill protection params landing after enforce_protection.
+                # Merge into the canonical ENTRY record without disturbing
+                # entry_price / entry_ts (those are immutable post-fill).
+                e = entries.get(tid)
+                if e is None:
+                    continue
+                for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry'):
+                    v = to_float(r.get(k))
+                    if v is not None:
+                        e[k] = v
             elif ev == 'CLOSE':
                 e = entries.pop(tid, None)
                 if not e:
