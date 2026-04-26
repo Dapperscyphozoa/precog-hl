@@ -2281,6 +2281,14 @@ def health():
                         'tracked_coins': len(_LAST_ENFORCE),
                     },
                     'atomic_reconciler': atomic_reconciler.status(),
+                    'lifecycle_reconciler': (
+                        {k: _reconciler.status().get(k) for k in (
+                            'halt_flag', 'entry_limiter', 'drift_tier',
+                            'last_drift_pct', 'healthy_streak', 'unsafe_streak',
+                            'circuit_breaker_tripped', 'cycles_total',
+                            'last_cycle_ts', 'cycle_stale', 'reconciler_lag_s')}
+                        if (_RECONCILER_OK and _reconciler is not None) else {'enabled': False}
+                    ),
                     'wall_exhaustion': wall_exhaustion.status(),
                     'wall_absorption': wall_absorption.status(),
                     'wall_bounce': wall_bounce.status() if hasattr(wall_bounce, 'status') else {},
