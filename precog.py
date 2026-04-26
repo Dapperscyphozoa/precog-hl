@@ -500,13 +500,17 @@ def regime_blocks_side(coin, side):
 #
 # Constants exposed for tuning post-observation:
 PROFIT_LOCK_ENABLED   = os.environ.get('PROFIT_LOCK', '1') != '0'
-PROFIT_LOCK_CLOSE_PCT = float(os.environ.get('PROFIT_LOCK_CLOSE_PCT', '0.02'))  # 2% raw
+PROFIT_LOCK_CLOSE_PCT = float(os.environ.get('PROFIT_LOCK_CLOSE_PCT', '0.035'))  # 3.5% raw
 PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.005'))  # 0.5% raw
-# 2026-04-26: BE trigger 1% → 0.5%. Earlier breakeven move converts more
-# trades from "round-trip to loss" into "scratch at zero". JTO/RSR style
-# tail losses still hit the SL on instant-adverse moves (no MFE achieved),
-# but trades that briefly go positive now lock that gain. Increases
-# realized-WR over breakeven count without cutting any signals.
+# 2026-04-26 (later): CLOSE 0.02 → 0.035. The 2% force-close was killing
+# winners at half their target. Confluence engines have TP=4%, so a trade
+# that reached +2% MFE got force-closed before it could reach TP. Worse,
+# the close fires at trigger-time market price, so after retrace the
+# realized PnL was often near zero (saw NOT close at MFE=+2.1% / pnl=$0.00).
+# 0.035 sits just below the 4% TP — catches truly extreme wins (e.g. 5%+
+# spikes that would hit TP anyway) without capping confluence's realized
+# profit. BE-lock at 0.5% still protects against round-trip-to-loss.
+# Tunable via env without redeploy.
 
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
