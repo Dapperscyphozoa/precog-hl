@@ -121,19 +121,28 @@ def load_trades(path):
                     'sl_pct': to_float(r.get('sl_pct')),
                     'tp_pct': to_float(r.get('tp_pct')),
                     'expected_edge_at_entry': to_float(r.get('expected_edge_at_entry')),
+                    'regime': (r.get('regime') or '').strip() or None,
+                    'realized_slippage_pct': to_float(r.get('realized_slippage_pct')),
                     'entry_ts': ts,
                 }
             elif ev == 'ENTRY_UPDATE':
                 # Post-fill protection params landing after enforce_protection.
                 # Merge into the canonical ENTRY record without disturbing
-                # entry_price / entry_ts (those are immutable post-fill).
+                # entry_ts (immutable post-fill). entry_price IS updateable
+                # — confluence pre-writes signal entry, then ENTRY_UPDATE
+                # corrects it to the actual fill price.
                 e = entries.get(tid)
                 if e is None:
                     continue
-                for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry'):
+                for k in ('sl_pct', 'tp_pct', 'expected_edge_at_entry',
+                          'realized_slippage_pct', 'entry_price'):
                     v = to_float(r.get(k))
                     if v is not None:
                         e[k] = v
+                # regime is a string, not a float
+                _new_regime = (r.get('regime') or '').strip()
+                if _new_regime:
+                    e['regime'] = _new_regime
             elif ev == 'CLOSE':
                 e = entries.pop(tid, None)
                 if not e:
@@ -148,6 +157,8 @@ def load_trades(path):
                     'pnl': to_float(r.get('pnl'), 0.0),
                     'close_reason': r.get('close_reason', '') or 'unknown',
                     'funding_paid_pct': to_float(r.get('funding_paid_pct')),
+                    'mfe_pct': to_float(r.get('mfe_pct')),
+                    'mae_pct': to_float(r.get('mae_pct')),
                     'close_ts': close_ts,
                     'hold_sec': hold_sec,
                 })
@@ -248,6 +259,33 @@ def main():
     render('by_hour_utc', bucket_stats(trades, hour_of_day))
     render('by_expected_edge_band',
            bucket_stats(trades, lambda t: edge_bucket(t.get('expected_edge_at_entry'))))
+    render('by_regime', bucket_stats(trades, lambda t: t.get('regime') or 'unknown'))
+
+    # MFE/MAE excursion analysis — distinguishes "good entry / bad exit"
+    # from "bad entry". Critical diagnostic per user's refinement plan.
+    def _excursion_bucket(t):
+        mfe = t.get('mfe_pct')
+        mae = t.get('mae_pct')
+        pnl = t.get('pnl') or 0
+        if mfe is None and mae is None:
+            return 'no_data'
+        # Was trade ever in profit?
+        if mfe is not None and mfe > 0.005 and pnl <= 0:
+            # Hit MFE > 0.5% then closed flat or negative — exit-logic
+            # problem. Position WAS winning; bot didn't capture it.
+            return 'hit_mfe_then_reversed'
+        if mfe is not None and mfe < 0.001 and pnl < 0:
+            # Never in profit, closed at loss — entry was wrong direction
+            # or timing.
+            return 'bad_entry_no_mfe'
+        if mae is not None and mae < -0.01 and pnl > 0:
+            # Went deep against us but recovered to win — SL might be
+            # too tight; could have been stopped out unnecessarily.
+            return 'survived_deep_mae'
+        if pnl > 0:
+            return 'clean_win'
+        return 'clean_loss'
+    render('by_excursion_pattern', bucket_stats(trades, _excursion_bucket))
 
 
 if __name__ == '__main__':
