@@ -501,7 +501,12 @@ def regime_blocks_side(coin, side):
 # Constants exposed for tuning post-observation:
 PROFIT_LOCK_ENABLED   = os.environ.get('PROFIT_LOCK', '1') != '0'
 PROFIT_LOCK_CLOSE_PCT = float(os.environ.get('PROFIT_LOCK_CLOSE_PCT', '0.02'))  # 2% raw
-PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.01'))  # 1% raw
+PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.005'))  # 0.5% raw
+# 2026-04-26: BE trigger 1% → 0.5%. Earlier breakeven move converts more
+# trades from "round-trip to loss" into "scratch at zero". JTO/RSR style
+# tail losses still hit the SL on instant-adverse moves (no MFE achieved),
+# but trades that briefly go positive now lock that gain. Increases
+# realized-WR over breakeven count without cutting any signals.
 
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
@@ -4258,6 +4263,7 @@ def retune_exits_endpoint():
         cfg_sl = (cfg or {}).get('SL', 0.02)
         cfg_tp = (cfg or {}).get('TP', 0.06)
         sl_pct = float(new_sl) if new_sl else cfg_sl
+        sl_pct = _apply_sl_cap(sl_pct)
         tp_pct = float(new_tp) if new_tp else cfg_tp
 
         # Inspect existing triggers
@@ -6088,6 +6094,23 @@ def try_tier_bump(incoming_coin, state, live_positions):
 # race that was triggering the audit→enforce cascade. Falls back to legacy
 # place() if disabled or if atomic submission fails.
 
+MAX_SL_PCT = float(os.environ.get('MAX_SL_PCT', '0.025'))
+# 2026-04-26: global hard ceiling on SL distance. Per-coin OOS configs ranged
+# 1.5%-5% (RSR=4%, JTO=3%, etc.). At min notional, a 4% stop is bounded loss,
+# but observed RSR -$0.45 + JTO -$0.34 events drove the engine PnL deep into
+# the red. 2.5% cap halves the worst-case per-trade loss without changing
+# trade flow — same coins still trigger, just with smaller tail.
+# Disable cap entirely with MAX_SL_PCT=0.
+
+def _apply_sl_cap(sl_pct):
+    """Clamp SL distance to MAX_SL_PCT (env-tunable). 0 disables the cap."""
+    if not sl_pct or sl_pct <= 0:
+        return sl_pct
+    if MAX_SL_PCT > 0 and sl_pct > MAX_SL_PCT:
+        return MAX_SL_PCT
+    return sl_pct
+
+
 def _compute_sl_px(coin, is_long, entry):
     """Compute SL trigger price for atomic entry. Pure — no I/O.
     Returns (sl_px_rounded, sl_pct_used) or (None, None)."""
@@ -6098,6 +6121,7 @@ def _compute_sl_px(coin, is_long, entry):
             if cfg and 'SL' in cfg:
                 sl_pct = cfg['SL']
     except Exception: pass
+    sl_pct = _apply_sl_cap(sl_pct)
     if not sl_pct or sl_pct <= 0:
         return None, None
     entry = float(entry)
@@ -6163,11 +6187,12 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
            # unfavorable (paid more for buy / received less for sell).
            'expected_px': None, 'realized_slippage_pct': None}
 
-    # 2026-04-26: side filter — SELL bias confirmed in /trades/recent
-    # (BUY +$0.196 / SELL -$0.334 over 30 decided). Default BUY-only;
-    # override via ALLOWED_SIDES env ("BUY", "SELL", "BUY,SELL").
+    # 2026-04-26: side filter — defaults to BOTH sides. The earlier 30-trade
+    # SELL-bias signal dissipated by trade 33 (BUY 50% / SELL 54.5% over 40
+    # decided, Wilson CIs heavily overlap). Don't cut signals on weak evidence.
+    # Override explicitly via ALLOWED_SIDES=BUY or =SELL if needed.
     _side_label = 'BUY' if is_buy else 'SELL'
-    _sides_env = os.environ.get('ALLOWED_SIDES', 'BUY').upper()
+    _sides_env = os.environ.get('ALLOWED_SIDES', 'BUY,SELL').upper()
     _allowed = {s.strip() for s in _sides_env.split(',') if s.strip() in ('BUY', 'SELL')}
     if not _allowed:
         _allowed = {'BUY', 'SELL'}
@@ -7197,6 +7222,7 @@ def place_native_sl(coin, is_long, entry, size):
                 if cfg and 'SL' in cfg:
                     sl_pct = cfg['SL']  # OOS-validated per-coin SL
         except Exception: pass
+        sl_pct = _apply_sl_cap(sl_pct)
         # TUNER OVERRIDE REMOVED 2026-04-22. See place_native_tp for rationale.
         # SL bounds in postmortem/bounds.py allow 0.3%-5% drift from closures,
         # which the tuner was using to tighten stops down below swing structure.
@@ -7842,6 +7868,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     if _cfg and 'SL' in _cfg:
                         sl_pct = _cfg['SL']  # OOS-validated per-coin SL (typically 5%)
             except Exception: pass
+            sl_pct = _apply_sl_cap(sl_pct)
 
             if fav <= -sl_pct:
                 prev_pos = dict(cur)

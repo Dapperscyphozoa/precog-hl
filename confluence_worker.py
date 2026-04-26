@@ -56,10 +56,11 @@ SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '300'))
 MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
-# 2026-04-26: SELL directional bias confirmed in /trades/recent — BUY 60% / +$0.196
-# vs SELL 54.5% / -$0.334 over 30 decided. Default to BUY-only until SELL gets
-# tightened gating. Override via ALLOWED_SIDES env: "BUY", "SELL", "BUY,SELL".
-_sides_raw = os.environ.get('ALLOWED_SIDES', 'BUY').upper()
+# 2026-04-26: optional side filter. Default permissive (both BUY,SELL). The
+# earlier SELL-bias read dissipated once N grew from 30 to 40 decided.
+# Override explicitly via ALLOWED_SIDES=BUY (or =SELL) only if you want to
+# cut signals on directional evidence.
+_sides_raw = os.environ.get('ALLOWED_SIDES', 'BUY,SELL').upper()
 ALLOWED_SIDES = {s.strip() for s in _sides_raw.split(',') if s.strip() in ('BUY', 'SELL')}
 if not ALLOWED_SIDES:
     ALLOWED_SIDES = {'BUY', 'SELL'}
