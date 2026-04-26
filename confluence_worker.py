@@ -259,9 +259,13 @@ def _size_and_fire(coin, signal, equity):
     entry = signal['entry']
     size_coin = notional_usd / entry
 
-    # Slippage buffer on entry
+    # Slippage buffer on entry. Was hardcoded 0.08% — too tight for fast-moving
+    # alts; observed empirically as 29/29 yielded signals failing IOC match
+    # (with all gates passed, fires still 0). 30bps default gives much higher
+    # fill rate. Operator can tune via env CONFLUENCE_IOC_SLIP_BUFFER.
     is_buy = signal['side'] == 'BUY'
-    px = entry * (1.0008 if is_buy else 0.9992)
+    _slip_buf = float(os.environ.get('CONFLUENCE_IOC_SLIP_BUFFER', '0.003'))
+    px = entry * (1 + _slip_buf) if is_buy else entry * (1 - _slip_buf)
 
     # Compute TP/SL prices
     tp_px = entry * (1 + signal['tp_pct']) if is_buy else entry * (1 - signal['tp_pct'])
