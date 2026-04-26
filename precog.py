@@ -3723,20 +3723,96 @@ LOG_BUFFER = []
 
 @app.route('/trades', methods=['GET'])
 def get_trades():
-    """Return trade log CSV as JSON for analysis."""
+    """Return trade log CSV as JSON for analysis. Tolerates None/empty pnl values."""
     try:
         import csv
+        def safe_pnl(v):
+            if v is None or v == '': return None
+            try: return float(v)
+            except (ValueError, TypeError): return None
         trades = []
         with open(TRADE_LOG) as f:
             reader = csv.DictReader(f)
             for row in reader:
                 trades.append(row)
-        wins = sum(1 for t in trades if t.get('pnl','0') not in ('0','') and float(t['pnl']) > 0)
-        losses = sum(1 for t in trades if t.get('pnl','0') not in ('0','') and float(t['pnl']) < 0)
-        total_pnl = sum(float(t['pnl']) for t in trades if t.get('pnl','0') not in ('0',''))
-        return jsonify({'trades': trades[-50:], 'total': len(trades), 'wins': wins, 'losses': losses, 'total_pnl': round(total_pnl, 4)})
+        wins = sum(1 for t in trades if (p := safe_pnl(t.get('pnl'))) is not None and p > 0)
+        losses = sum(1 for t in trades if (p := safe_pnl(t.get('pnl'))) is not None and p < 0)
+        total_pnl = sum(p for t in trades if (p := safe_pnl(t.get('pnl'))) is not None)
+        return jsonify({'trades': trades[-50:], 'total': len(trades),
+                        'wins': wins, 'losses': losses, 'total_pnl': round(total_pnl, 4)})
     except Exception as e:
         return jsonify({'error': str(e), 'trades': []})
+
+@app.route('/trades/recent', methods=['GET'])
+def get_trades_recent():
+    """Trade log filtered to recent N hours (default 12), with per-engine/side breakdown."""
+    try:
+        import csv
+        from datetime import datetime, timedelta, timezone
+        hours = int(request.args.get('hours', '12'))
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        def safe_pnl(v):
+            if v is None or v == '': return None
+            try: return float(v)
+            except (ValueError, TypeError): return None
+        def parse_ts(s):
+            try:
+                # ISO format from datetime.utcnow().isoformat() — naive UTC
+                return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+            except Exception: return None
+        trades = []
+        with open(TRADE_LOG) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ts = parse_ts(row.get('timestamp', ''))
+                if not ts or ts < cutoff: continue
+                row['_ts'] = ts.isoformat()
+                row['_pnl_f'] = safe_pnl(row.get('pnl'))
+                trades.append(row)
+        # Aggregate
+        by_engine = {}
+        by_side = {}
+        by_coin = {}
+        by_hour = {}
+        for t in trades:
+            p = t.get('_pnl_f')
+            if p is None: continue
+            for bucket, key in [(by_engine, t.get('engine','?')),
+                                (by_side, t.get('direction','?')),
+                                (by_coin, t.get('coin','?')),
+                                (by_hour, t['_ts'][:13])]:
+                b = bucket.setdefault(key, {'n':0,'w':0,'l':0,'pnl':0.0})
+                b['n'] += 1
+                if p > 0: b['w'] += 1
+                elif p < 0: b['l'] += 1
+                b['pnl'] += p
+        def fmt(b):
+            for k,v in b.items():
+                v['wr'] = round(v['w']/max(1,v['n'])*100, 1)
+                v['pnl'] = round(v['pnl'], 4)
+            return b
+        closed = [t for t in trades if t.get('_pnl_f') is not None]
+        no_pnl = [t for t in trades if t.get('_pnl_f') is None]
+        return jsonify({
+            'window_hours': hours,
+            'cutoff_utc': cutoff.isoformat(),
+            'total_logged': len(trades),
+            'closed_with_pnl': len(closed),
+            'no_pnl_recorded': len(no_pnl),
+            'wins': sum(1 for t in closed if t['_pnl_f'] > 0),
+            'losses': sum(1 for t in closed if t['_pnl_f'] < 0),
+            'breakeven': sum(1 for t in closed if t['_pnl_f'] == 0),
+            'overall_wr_pct': round(sum(1 for t in closed if t['_pnl_f'] > 0)/max(1,len(closed))*100, 1),
+            'total_pnl': round(sum(t['_pnl_f'] for t in closed), 4),
+            'by_engine': fmt(by_engine),
+            'by_side': fmt(by_side),
+            'by_coin': fmt(by_coin),
+            'by_hour': fmt(by_hour),
+            'last_20': trades[-20:],
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()[:500]})
 
 @app.route('/reset', methods=['GET'])
 def reset_cb():
