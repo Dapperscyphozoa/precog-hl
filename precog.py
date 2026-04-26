@@ -2252,8 +2252,23 @@ def news_feed():
 def drift_diagnostic():
     """Identify the exchange/ledger mismatch driving the reconciler halt.
     Lists open trade_ids per side and flags the discrepancies.
+
+    Admin actions (require token=WEBHOOK_SECRET):
+      ?dedupe=1   — call trade_ledger.dedupe_open_trades() to close duplicates
     """
+    from flask import request
     try:
+        # Optional admin: dedupe duplicate-open trade_ids
+        dedupe_result = None
+        if request.args.get('dedupe') == '1':
+            if request.args.get('token') != WEBHOOK_SECRET:
+                return jsonify({'err': 'unauthorized — dedupe requires token'}), 401
+            try:
+                import trade_ledger as _tl
+                dedupe_result = _tl.dedupe_open_trades()
+            except Exception as e:
+                dedupe_result = {'err': str(e)}
+
         # Exchange positions
         us = _cached_user_state()
         exch_coins = set()
@@ -2274,41 +2289,51 @@ def drift_diagnostic():
                 'entry_px': float(p.get('entryPx', 0) or 0),
             }
 
-        # Trade ledger open trades
+        # Trade ledger open trades — group by coin to find duplicates
         ledger_open = []
         ledger_coins = set()
+        ledger_by_coin = {}  # coin -> list of trade dicts
         try:
             import trade_ledger as _tl
             for t in _tl.open_trades():
                 c = (t.get('coin') or '').upper()
-                ledger_open.append({
+                rec = {
                     'trade_id': t.get('trade_id'),
                     'coin': c,
                     'side': t.get('side'),
                     'engine': t.get('engine'),
                     'entry_price': t.get('entry_price'),
                     'timestamp': t.get('timestamp'),
-                })
+                    'event_seq': t.get('event_seq'),
+                }
+                ledger_open.append(rec)
                 if c:
                     ledger_coins.add(c)
+                    ledger_by_coin.setdefault(c, []).append(rec)
         except Exception as e:
             ledger_open = [{'err': str(e)}]
 
         # Discrepancies
-        only_exchange = sorted(exch_coins - ledger_coins)  # orphans
-        only_ledger = sorted(ledger_coins - exch_coins)    # phantoms
+        only_exchange = sorted(exch_coins - ledger_coins)
+        only_ledger = sorted(ledger_coins - exch_coins)
+        # Duplicates: coins with >1 open trade_id in ledger
+        duplicates_in_ledger = {c: ts for c, ts in ledger_by_coin.items() if len(ts) > 1}
 
         return jsonify({
             'exchange_count': len(exch_coins),
             'ledger_open_count': len(ledger_open),
+            'ledger_unique_coins': len(ledger_coins),
             'drift_pct': abs(len(exch_coins) - len(ledger_open)) / max(len(exch_coins), 1),
-            'orphans_on_exchange': only_exchange,   # exchange has, ledger doesn't
+            'orphans_on_exchange': only_exchange,
             'orphan_details': {c: exch_details[c] for c in only_exchange},
-            'phantoms_in_ledger': only_ledger,      # ledger has, exchange doesn't
+            'phantoms_in_ledger': only_ledger,
             'phantom_details': [t for t in ledger_open if (t.get('coin') or '').upper() in only_ledger],
+            'duplicates_in_ledger': duplicates_in_ledger,
+            'duplicate_count': len(duplicates_in_ledger),
             'all_exchange_coins': sorted(exch_coins),
             'all_ledger_coins': sorted(ledger_coins),
             'reconciler_state': (_reconciler.status() if (_RECONCILER_OK and _reconciler is not None) else {}),
+            'dedupe_result': dedupe_result,
         })
     except Exception as e:
         import traceback as _tb
