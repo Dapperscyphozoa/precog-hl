@@ -458,7 +458,16 @@ def _detect_orphans(snap, ledger_stats):
 
 
 def _detect_missing_closes(snap, authoritative):
-    """Trades open in ledger but position absent on exchange."""
+    """Trades open in ledger but position absent on exchange.
+
+    Min-age guard: skip trades opened in the last MIN_AGE_TO_CLOSE_SEC seconds.
+    HL exchange snapshot can lag the ledger by 30-60s after entry — closing
+    immediately would cause the false 'missing close → orphan adopt' churn
+    pattern that was polluting the trade log.
+    """
+    import os
+    from datetime import datetime, timezone
+    MIN_AGE_TO_CLOSE_SEC = int(os.environ.get('RECONCILE_MIN_CLOSE_AGE_SEC', '60'))
     ledger = _deps['ledger']
     close_trade_fn = _deps['close_trade_fn']
     if not ledger:
@@ -468,6 +477,7 @@ def _detect_missing_closes(snap, authoritative):
     except Exception:
         return
     exch_coins = set(snap.get('positions', {}).keys())
+    now_dt = datetime.now(timezone.utc)
     for trade in ledger_opens:
         coin = trade.get('coin', '')
         tid = trade.get('trade_id', '')
@@ -475,6 +485,21 @@ def _detect_missing_closes(snap, authoritative):
             continue
         if coin in exch_coins:
             continue
+        # Min-age guard — newly-entered trades may not yet be in exchange snapshot
+        try:
+            ts_str = trade.get('timestamp', '')
+            if ts_str:
+                trade_dt = datetime.fromisoformat(ts_str)
+                if trade_dt.tzinfo is None:
+                    trade_dt = trade_dt.replace(tzinfo=timezone.utc)
+                age_sec = (now_dt - trade_dt).total_seconds()
+                if age_sec < MIN_AGE_TO_CLOSE_SEC:
+                    with _LOCK:
+                        _METRICS['missing_close_too_fresh'] = \
+                            _METRICS.get('missing_close_too_fresh', 0) + 1
+                    continue
+        except Exception:
+            pass  # fall through if timestamp parse fails
         # Ledger says open, exchange says closed → missing close event
         fill = _find_recent_fill(coin, snap.get('fills', []))
         if not authoritative:
@@ -489,6 +514,7 @@ def _detect_missing_closes(snap, authoritative):
             exit_price=float(fill['px']) if fill else None,
             exchange_fill_id=fill.get('oid') if fill else None,
             source='reconcile_missing_close',
+            close_size=float(fill['sz']) if fill and fill.get('sz') else None,
         )
         with _LOCK:
             if ok:
