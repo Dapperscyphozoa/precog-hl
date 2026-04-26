@@ -557,6 +557,12 @@ def _monitor_exits():
     PROFIT_LOCK_PCT = 0.015          # raw ≥ 1.5% → close
     PROFIT_LOCK_BE_PCT = 0.008       # raw ≥ 0.8% → move SL to entry
 
+    # 2026-04-26: stale-flat eviction. Catches the SUSHI/UMA pattern
+    # (drifted -1% MAE, MFE 0%, sitting for hours blocking cap).
+    STALE_FLAT_AGE_S    = 90 * 60   # 1h30 — older than this is candidate
+    STALE_FLAT_MFE_MAX  = 0.003     # never crossed +0.3% MFE
+    STALE_FLAT_RAW_MIN  = -0.004    # currently below -0.4% raw move
+
     now = int(time.time())
     with _state_lock:
         to_check = list(_state['open_positions'].items())
@@ -647,6 +653,24 @@ def _monitor_exits():
             if age >= NO_PROGRESS_AGE_S and abs(raw_move) < NO_PROGRESS_THRESHOLD:
                 _log(f"{coin} NO_PROGRESS {age/3600:.1f}h raw={raw_move*100:+.2f}% — flat")
                 _close_position(coin, 'no_progress', raw_move)
+                continue
+
+            # 5b: stale-flat eviction — opportunity-cost cleanup
+            # 2026-04-26: SUSHI/UMA pattern observed in live data — trades
+            # that go directionally wrong from entry, drift to ~-1% MAE,
+            # never reach MFE 0.3%, then sit holding cap for hours. They
+            # don't trigger NO_PROGRESS (raw isn't < 0.3%) and don't hit
+            # SL (above -1.5%). Result: 4-12h hold bucket = -$1.47 / 12 trades.
+            #
+            # Rule: if old enough AND never went positive AND currently
+            # underwater, evict. The signal was wrong; cap slot is more
+            # valuable to a fresh signal.
+            if (age >= STALE_FLAT_AGE_S
+                    and (pos.get('mfe_pct') or 0) < STALE_FLAT_MFE_MAX
+                    and raw_move < STALE_FLAT_RAW_MIN):
+                _log(f"{coin} STALE_FLAT {age/60:.0f}min mfe={(pos.get('mfe_pct') or 0)*100:.2f}% "
+                     f"raw={raw_move*100:+.2f}% — evicting (signal directionally wrong, freeing cap)")
+                _close_position(coin, 'stale_flat', raw_move)
                 continue
 
             # 6: hard timeout (age ≥ 6h)
