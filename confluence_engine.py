@@ -73,7 +73,14 @@ SYSTEMS = {
 #   - Less noise on SWING: SWING+FUNDING (n_sys=2) is a higher-quality fire
 #     than SWING-alone. The additional signal lets us prefer 2-sys combos
 #     when both are available.
-FUNDING_THRESHOLD_HR_PCT = 0.0001  # 1bp/hr = 24bp/day. Mirrors FUNDING_MR.
+#
+# 2026-04-26 (later): threshold lowered 1bp/hr → 0.5bp/hr (12bp/day).
+# precog's FUNDING_MR /health showed below_threshold: 163/168 (97% of universe
+# below 1bp/hr) — funding regime is mild, so 1bp/hr was effectively dormant.
+# 0.5bp/hr captures real (if smaller) positioning bias while keeping funding
+# noise below the floor. Tunable via env to revert/adjust without redeploy.
+import os as _os
+FUNDING_THRESHOLD_HR_PCT = float(_os.environ.get('CONF_FUNDING_THRESHOLD_HR_PCT', '0.00005'))
 HTF_MULT_FOR_F6 = 16  # 4h context from 15m base
 
 # ─── Per-filter rejection counters (instrumentation, no logic change) ────
