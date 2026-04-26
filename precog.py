@@ -5138,6 +5138,65 @@ def _rate_limited_cancel(*args, **kwargs):
     return _orig_exchange_cancel(*args, **kwargs)
 
 exchange.cancel = _rate_limited_cancel
+
+# 2026-04-26: update_leverage was bypassing the rate limiter entirely. Live
+# logs showed `lev set err HBAR: (429, ...)` cascading into failed entries
+# because set_isolated_leverage runs immediately before exchange.order.
+# Wrap it through the same global window + flight_guard, and add a small
+# 429-retry so transient throttles don't kill the whole entry.
+def _retry_on_429(fn, *args, max_retries=3, base_delay=0.4, **kwargs):
+    """Call fn with up to max_retries on HTTP 429, exponential backoff with jitter."""
+    import random as _rand
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            msg = str(e)
+            if '429' not in msg and 'rate' not in msg.lower():
+                raise
+            if attempt >= max_retries:
+                raise
+            wait = base_delay * (2 ** attempt) + _rand.uniform(0, 0.2)
+            time.sleep(wait)
+    if last_exc:
+        raise last_exc
+
+_orig_exchange_update_leverage = exchange.update_leverage
+def _rate_limited_update_leverage(*args, **kwargs):
+    """Rate-limit + 429-retry wrapper around exchange.update_leverage.
+    update_leverage runs in the same per-IP write window as orders/cancels,
+    so it must share the global token bucket and per-coin spacing."""
+    # update_leverage(leverage, coin, is_cross) — coin is positional arg[1]
+    coin = args[1] if len(args) >= 2 else kwargs.get('coin')
+    if coin:
+        flight_guard.acquire(coin)
+    with _order_lock:
+        now = time.time()
+        gap = now - _last_order_ts[0]
+        if gap < _ORDER_MIN_INTERVAL:
+            time.sleep(_ORDER_MIN_INTERVAL - gap)
+            now = time.time()
+        _last_order_ts[0] = now
+        _order_times.append(now)
+        cutoff = now - _ORDER_BURST_WINDOW
+        while _order_times and _order_times[0] < cutoff: _order_times.pop(0)
+    return _retry_on_429(_orig_exchange_update_leverage, *args, **kwargs)
+
+exchange.update_leverage = _rate_limited_update_leverage
+
+# Also wrap the existing order/cancel with 429-retry. The rate limiter
+# itself prevents most 429s but transient bursts still leak through;
+# without retry, a single 429 turns into a missing SL/TP placement.
+def _rate_limited_order_with_retry(*args, **kwargs):
+    return _retry_on_429(_rate_limited_order, *args, **kwargs)
+
+def _rate_limited_cancel_with_retry(*args, **kwargs):
+    return _retry_on_429(_rate_limited_cancel, *args, **kwargs)
+
+exchange.order = _rate_limited_order_with_retry
+exchange.cancel = _rate_limited_cancel_with_retry
 # ───────────────────────────────────────────────────────────────────────
 
 _META_CACHE = None
