@@ -286,34 +286,34 @@ def _size_and_fire(coin, signal, equity):
     _trade_id = (_ledger.new_trade_id()
                  if (_LEDGER_OK and _ledger) else None)
 
-    try:
-        # IOC limit into slip price
-        r = _precog.exchange.order(
-            coin, is_buy, size_coin, px,
-            {'limit': {'tif': 'Ioc'}}, reduce_only=False
-        )
-        _log(f"{coin} order result: {str(r)[:200]}")
+    # Build a precog-compatible cloid so the reconciler can match fills
+    # back to this trade_id (same scheme precog uses at its entry sites).
+    _cloid = None
+    if _trade_id:
+        _suffix = 'L' if is_buy else 'S'
+        _cloid = f"{_trade_id[:8]}{coin[:4]}{_suffix}"[:16]
 
-        # ─── FIX 4: record actual slippage vs expected ───
-        actual_px = _extract_avg_fill_px(r)
-        if not actual_px:
-            # IOC didn't match (price drifted past slip buffer) or order rejected.
-            # Do NOT register a position we don't have on exchange — that creates
-            # a phantom in open_positions that blocks future fires AND has no
-            # ledger trail. Returning None ensures _register_position is skipped
-            # and total_fires doesn't increment for unfilled orders.
-            _log(f"{coin} NO_FILL — IOC unmatched or rejected, skipping registration")
+    try:
+        # 2026-04-26: Route through _precog.place() instead of direct
+        # exchange.order. precog's place() implements MAKER (post-only Alo)
+        # → TAKER (IOC) fallback with a 10s window — we previously fired
+        # pure IOC at 30bps and got 0/29 fills because price drift past
+        # 30bps in the order-placement window blew through every IOC.
+        # place() returns the fill price on success, None on no-fill.
+        fill_px = _precog.place(coin, is_buy, size_coin, cloid=_cloid)
+        if fill_px is None:
+            _log(f"{coin} NO_FILL — precog.place returned None (maker+taker both failed)")
             return None
+        actual_px = float(fill_px)
+        _log(f"{coin} FILLED via precog.place: {actual_px:.6f} (signal_entry={entry:.6f})")
 
         if entry > 0:
             slip_pct = abs(actual_px - entry) / entry * 100
             _record_slippage(coin, slip_pct)
-            _log(f"{coin} slip: expected={entry:.4f} actual={actual_px:.4f} "
-                 f"delta={slip_pct:.3f}%")
-            if isinstance(r, dict):
-                r['expected_px'] = entry
-                r['actual_px'] = actual_px
-                r['slip_pct'] = slip_pct
+        # Synthesize a result dict for callers that expect the legacy shape.
+        r = {'expected_px': entry, 'actual_px': actual_px,
+             'slip_pct': abs(actual_px - entry) / entry * 100 if entry > 0 else 0.0}
+
         # Record ENTRY in the unified ledger so /trades/recent and
         # analyze_trades see confluence trades alongside legacy precog ones.
         # tp_pct/sl_pct are known at signal time (no ENTRY_UPDATE needed).
@@ -327,10 +327,9 @@ def _size_and_fire(coin, signal, equity):
                     engine=_engine_tag, source='confluence_signal',
                     sl_pct=signal['sl_pct'], tp_pct=signal['tp_pct'],
                     expected_edge_at_entry=_edge,
-                    trade_id=_trade_id,
+                    trade_id=_trade_id, cloid=_cloid,
                 )
-                if isinstance(r, dict):
-                    r['trade_id'] = _trade_id
+                r['trade_id'] = _trade_id
             except Exception as _le:
                 _log(f"[ledger] confluence append_entry err {coin}: {_le}")
         return r

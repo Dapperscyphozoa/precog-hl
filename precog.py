@@ -6064,6 +6064,7 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
             mark_px=mark_px, sl_px=sl_px, tp_px=tp_px,
             trade_id=tid,
             log_fn=log,
+            price_rounder=round_price,  # fixes float_to_wire on small-tick coins
         )
 
         if result.get('success'):
