@@ -48,10 +48,19 @@ def wilson_ci(wins, n, z=1.96):
 
 
 def parse_iso(s):
+    """Parse ISO timestamp, always returning a timezone-aware datetime in UTC.
+
+    Mixed-tz CSVs (some rows tz-aware, others naive) caused subtraction errors.
+    Normalize every parse to UTC so timedelta math always works.
+    """
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace('Z', '+00:00'))
+        from datetime import timezone
+        dt = datetime.fromisoformat(s.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except Exception:
         return None
 
@@ -430,7 +439,8 @@ def analyze_to_dict(path='/var/data/trades.csv', since_ts=None):
     """
     trades = load_trades(path)
     if since_ts is not None:
-        cutoff = datetime.fromtimestamp(float(since_ts))
+        from datetime import timezone
+        cutoff = datetime.fromtimestamp(float(since_ts), tz=timezone.utc)
         trades = [t for t in trades if t.get('entry_ts') and t['entry_ts'] >= cutoff]
     real_trades = [t for t in trades if not is_noise_engine(t.get('engine'))]
     noise_trades = [t for t in trades if is_noise_engine(t.get('engine'))]
