@@ -504,13 +504,33 @@ def _monitor_exits():
     with _state_lock:
         to_check = list(_state['open_positions'].items())
     
-    # Single shared mid-price fetch (rate-limit safety)
-    try:
-        mids = _precog.info.all_mids() if hasattr(_precog.info, 'all_mids') else {}
-    except Exception as e:
-        _log(f"mids fetch err: {e}")
+    # Single shared mid-price fetch (rate-limit safety) with 429 retry.
+    # 2026-04-26: live log showed `[CONFLUENCE] mids fetch err: (429, ...)`
+    # which on bare exception aborted the WHOLE monitor cycle — no TP-lock,
+    # BE-shift, or no-progress check ran for any open position. Brief retry
+    # with backoff + jitter keeps the cycle alive through transient 429s.
+    mids = {}
+    if hasattr(_precog.info, 'all_mids'):
+        import random as _r
+        for _attempt in range(3):
+            try:
+                mids = _precog.info.all_mids() or {}
+                break
+            except Exception as e:
+                _es = str(e)
+                if '429' not in _es and 'rate' not in _es.lower() and _attempt < 2:
+                    _log(f"mids fetch err (non-429, no retry): {_es[:120]}")
+                    return
+                if _attempt >= 2:
+                    _log(f"mids fetch err after 3 attempts ({_es[:120]}) — skipping monitor cycle")
+                    return
+                _wait = 0.5 * (2 ** _attempt) + _r.uniform(0, 0.2)
+                _log(f"mids fetch 429 attempt {_attempt+1}/3 — retry in {_wait:.1f}s")
+                time.sleep(_wait)
+    if not mids:
+        _log("mids fetch returned empty — skipping monitor cycle")
         return
-    
+
     for coin, pos in to_check:
         try:
             age = now - pos['ts']
@@ -578,7 +598,20 @@ def _close_position(coin, reason, pnl=None):
             if hasattr(_precog, 'close_position'):
                 _precog.close_position(coin, reason)
             else:
-                mids = _precog.info.all_mids()
+                # 2026-04-26: same 429 retry logic as _monitor_exits.
+                import random as _r2
+                _mids = {}
+                for _att in range(3):
+                    try:
+                        _mids = _precog.info.all_mids() or {}
+                        break
+                    except Exception as _ce:
+                        _ces = str(_ce)
+                        if ('429' not in _ces and 'rate' not in _ces.lower()) or _att >= 2:
+                            _log(f"{coin} close mids fetch err: {_ces[:120]}")
+                            break
+                        time.sleep(0.5 * (2 ** _att) + _r2.uniform(0, 0.2))
+                mids = _mids
                 px = float(mids.get(coin, 0))
                 _exit_px_for_ledger = px or None
                 if px:
