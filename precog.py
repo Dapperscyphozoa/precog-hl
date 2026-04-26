@@ -3749,7 +3749,7 @@ def get_trades_recent():
     try:
         import csv
         from datetime import datetime, timedelta, timezone
-        hours = int(request.args.get('hours', '12'))
+        hours = int(flask_request.args.get('hours', '12'))
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         def safe_pnl(v):
             if v is None or v == '': return None
