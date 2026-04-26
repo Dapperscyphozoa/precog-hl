@@ -6513,13 +6513,18 @@ def _close_direct(coin, state_ref=None):
 # Purpose: single-writer authority for trade close events.
 # ═══════════════════════════════════════════════════════
 def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
-                pnl=None, source='reconcile'):
+                pnl=None, source='reconcile', close_size=None):
     """Single-writer close. Idempotent. Returns True on recorded close, False on duplicate.
 
     Contract: THIS FUNCTION WILL EVENTUALLY BE THE ONLY WRITER OF CLOSE STATE.
     All other close paths must route through here via the reconciler.
 
-    Step 1: defined but unused. All existing close() call sites continue to work.
+    PnL computation:
+      - If `pnl` is supplied, used as-is (USD).
+      - Else if `close_size` and `exit_price` and entry_price are all known,
+        pnl = (exit - entry) * size_with_sign  (USD, signed by side).
+      - Else falls back to position_ledger.get_size() lookup.
+      - Last resort: legacy price-delta approximation (small but nonzero).
     """
     if not _LEDGER_OK or _ledger is None:
         log(f'[close_trade] LEDGER UNAVAILABLE trade_id={trade_id}')
@@ -6540,14 +6545,32 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
         entry_price_f = 0
     side = trade.get('side', '')
 
-    # Compute PnL if not supplied (best-effort — reconciler should pass USD from fills)
+    # Compute PnL if not supplied — prefer USD via size, fall back to price-delta
     if pnl is None and exit_price is not None and entry_price_f > 0:
         try:
             exit_f = float(exit_price)
-            move_pct = (exit_f - entry_price_f) / entry_price_f
-            if side == 'SELL' or side == 'S':
-                move_pct = -move_pct
-            pnl = round(move_pct * entry_price_f, 4)
+            # Resolve size: explicit param > position_ledger lookup > None
+            size_f = None
+            if close_size is not None:
+                try: size_f = float(close_size)
+                except Exception: pass
+            if size_f is None:
+                try:
+                    import position_ledger as _pl
+                    size_f = abs(float(_pl.get_size(coin) or 0))
+                except Exception: pass
+            if size_f and size_f > 0:
+                # USD pnl: (exit - entry) * size, signed by side
+                price_delta = exit_f - entry_price_f
+                if side in ('SELL', 'S'):
+                    price_delta = -price_delta
+                pnl = round(price_delta * size_f, 4)
+            else:
+                # Fallback: legacy price-delta approximation (logging only — not USD)
+                move_pct = (exit_f - entry_price_f) / entry_price_f
+                if side in ('SELL', 'S'):
+                    move_pct = -move_pct
+                pnl = round(move_pct * entry_price_f, 4)
         except Exception:
             pnl = 0
 
