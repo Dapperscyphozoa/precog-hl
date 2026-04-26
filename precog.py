@@ -2248,6 +2248,73 @@ def news_feed():
     state = news_filter.get_state() if hasattr(news_filter, 'get_state') else {}
     return jsonify({'items': items, 'state': state})
 
+@app.route('/drift', methods=['GET'])
+def drift_diagnostic():
+    """Identify the exchange/ledger mismatch driving the reconciler halt.
+    Lists open trade_ids per side and flags the discrepancies.
+    """
+    try:
+        # Exchange positions
+        us = _cached_user_state()
+        exch_coins = set()
+        exch_details = {}
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            try:
+                sz = float(p.get('szi', 0))
+            except Exception:
+                sz = 0
+            if sz == 0:
+                continue
+            c = (p.get('coin', '') or '').upper()
+            exch_coins.add(c)
+            exch_details[c] = {
+                'size': sz,
+                'side': 'BUY' if sz > 0 else 'SELL',
+                'entry_px': float(p.get('entryPx', 0) or 0),
+            }
+
+        # Trade ledger open trades
+        ledger_open = []
+        ledger_coins = set()
+        try:
+            import trade_ledger as _tl
+            for t in _tl.open_trades():
+                c = (t.get('coin') or '').upper()
+                ledger_open.append({
+                    'trade_id': t.get('trade_id'),
+                    'coin': c,
+                    'side': t.get('side'),
+                    'engine': t.get('engine'),
+                    'entry_price': t.get('entry_price'),
+                    'timestamp': t.get('timestamp'),
+                })
+                if c:
+                    ledger_coins.add(c)
+        except Exception as e:
+            ledger_open = [{'err': str(e)}]
+
+        # Discrepancies
+        only_exchange = sorted(exch_coins - ledger_coins)  # orphans
+        only_ledger = sorted(ledger_coins - exch_coins)    # phantoms
+
+        return jsonify({
+            'exchange_count': len(exch_coins),
+            'ledger_open_count': len(ledger_open),
+            'drift_pct': abs(len(exch_coins) - len(ledger_open)) / max(len(exch_coins), 1),
+            'orphans_on_exchange': only_exchange,   # exchange has, ledger doesn't
+            'orphan_details': {c: exch_details[c] for c in only_exchange},
+            'phantoms_in_ledger': only_ledger,      # ledger has, exchange doesn't
+            'phantom_details': [t for t in ledger_open if (t.get('coin') or '').upper() in only_ledger],
+            'all_exchange_coins': sorted(exch_coins),
+            'all_ledger_coins': sorted(ledger_coins),
+            'reconciler_state': (_reconciler.status() if (_RECONCILER_OK and _reconciler is not None) else {}),
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     eq = 0
