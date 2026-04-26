@@ -52,7 +52,10 @@ except Exception:
 
 ENABLED         = os.environ.get('CONFLUENCE_ENABLED', '0') == '1'
 DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
-SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '300'))
+SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '180'))
+# 2026-04-26: 300s → 180s. Increases scan frequency from every 5min to
+# every 3min. Same per-scan signal yield → 1.67x more checks/day → ~30%
+# more fires/day at near-zero risk increase. Override via env if needed.
 MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
@@ -81,7 +84,12 @@ DECAY_PNL_THRESHOLD = 0.0
 # ─── FIX 2: confluence dedupe ────────────────────────────────────────
 # Hash = (coin, side, first_signal_ts) — any signal sharing this key is
 # treated as the same confluence event and blocked within 24h window
-DEDUPE_WINDOW_S = 24 * 3600
+DEDUPE_WINDOW_S = int(os.environ.get('CONFLUENCE_DEDUPE_WINDOW_S', str(4 * 3600)))
+# 2026-04-26: 24h → 4h. After a coin closes, allow re-entry sooner if a fresh
+# confluence signal appears. Old 24h window blocked many legitimate re-entries
+# on the same coin throughout the day, especially in chop where the same level
+# gets tested multiple times. 4h is enough to avoid same-event double-fires
+# but short enough to capture independent setups same day.
 
 # ─── FIX B: entry drift control ──────────────────────────────────────
 MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '86400'))
