@@ -906,6 +906,32 @@ def _scan_once():
         _log("no coin universe defined, skip")
         return
 
+    # 2026-04-26: SHADOW_UNIVERSE — candidates for the next tier (60-69% WR
+    # band, not currently in PURE_14/NINETY_99/EIGHTY_89/SEVENTY_79).
+    # Eval'd every scan but NEVER fired. Hypothetical TP/SL outcomes tracked
+    # via shadow_trades.record_rejection so we can measure WR over time and
+    # promote winners to live tiers when sample size is sufficient.
+    #
+    # Default: HL perp universe (from info.meta) MINUS coins already live.
+    # Override via env CONFLUENCE_SHADOW_COINS for a curated list.
+    _shadow_env = os.environ.get('CONFLUENCE_SHADOW_COINS', '').strip()
+    if _shadow_env:
+        SHADOW_UNIVERSE = [c.strip().upper() for c in _shadow_env.split(',') if c.strip()]
+    else:
+        try:
+            # Pull full HL perp universe from info.meta and subtract live coins.
+            _meta = _precog.info.meta() if hasattr(_precog, 'info') else {}
+            _all_hl_perps = {u.get('name', '').upper() for u in _meta.get('universe', []) if u.get('name')}
+            _live_set = set(CONFLUENCE_UNIVERSE)
+            # Skip k-prefix (still buggy) and known blocked coins
+            SHADOW_UNIVERSE = sorted([
+                c for c in _all_hl_perps
+                if c and c not in _live_set
+                and not (c.startswith('k') and len(c) >= 4 and c[1].isupper())
+            ])[:30]  # cap at 30 to bound scan cost
+        except Exception:
+            SHADOW_UNIVERSE = []
+
     try:
         equity = _precog.get_balance()
     except Exception as e:
@@ -1057,10 +1083,64 @@ def _scan_once():
         except Exception as e:
             _log(f"{coin} fire err: {e}")
 
+    # 2026-04-26: SHADOW EVAL — same engine, no fires.
+    # Run confluence_engine.eval_coin against next-tier candidates and
+    # record any signals via shadow_trades.record_rejection. Outcomes
+    # resolve over time as candles advance. /shadow endpoint surfaces
+    # per-coin WR for promotion decisions.
+    _shadow_signals = 0
+    try:
+        import shadow_trades as _shadow
+        for shadow_coin in SHADOW_UNIVERSE:
+            try:
+                bars = _fetch_15m_bars(shadow_coin, 800)
+                if not bars:
+                    continue
+                sig = _ce.eval_coin(shadow_coin, bars, now_ts=now_ts)
+                if not sig:
+                    continue
+                # Skip if signal too stale (same gate as live)
+                latest_sig_ts = sig.get('latest_signal_ts') or sig.get('ts')
+                if (now_ts - latest_sig_ts) > MAX_SIGNAL_AGE_S:
+                    continue
+                _shadow.record_rejection(
+                    coin=shadow_coin,
+                    side=sig['side'],
+                    entry_price=sig['entry'],
+                    tp_pct=sig.get('tp_pct') or 0.04,
+                    sl_pct=sig.get('sl_pct') or 0.015,
+                    reason='shadow_screen_tier',
+                    meta={
+                        'n_sys': sig.get('n_sys'),
+                        'systems': sig.get('systems'),
+                        'tier_candidate': True,
+                    },
+                )
+                _shadow_signals += 1
+            except Exception as _se:
+                # Fail-soft per coin
+                pass
+        # Also resolve any pending shadow trades using current mids
+        try:
+            def _price_fn(c):
+                try:
+                    return float(_precog.info.all_mids().get(c, 0))
+                except Exception:
+                    return None
+            _shadow.resolve_pending(_price_fn)
+        except Exception:
+            pass
+    except ImportError:
+        pass
+    if _shadow_signals > 0:
+        _log(f"SHADOW: {_shadow_signals} signal(s) recorded across {len(SHADOW_UNIVERSE)} candidate coins")
+
     # Snapshot per-scan counters into state so /confluence can show
     # the most recent scan's gate distribution in isolation.
     with _state_lock:
         _state['rejects_last_scan'] = _scan_rejects
+        _state['shadow_signals_last_scan'] = _shadow_signals
+        _state['shadow_universe_size'] = len(SHADOW_UNIVERSE)
         _state['last_scan_at'] = now_ts
         _state['last_scan_signals'] = _scan_signals
         _state['last_scan_fires'] = fires_this_scan
