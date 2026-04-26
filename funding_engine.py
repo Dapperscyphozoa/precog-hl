@@ -80,7 +80,13 @@ _STATS = {
     'on_cooldown':           0,
     'fires_hl_only':         0,
     'fires_confirmed':       0,
+    'errors':                0,
 }
+
+
+import sys as _sys
+def _log_err(msg):
+    print(f"[funding_engine ERR] {msg}", file=_sys.stderr, flush=True)
 
 
 def check(coin, regime='unknown'):
@@ -114,7 +120,9 @@ def check(coin, regime='unknown'):
         with fa._LOCK:
             hl_rate = fa._CACHE['hl'].get(coin)
             bn_rate_8h = fa._CACHE['binance'].get(coin)
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"funding_arb access ({coin}): {type(e).__name__}: {e}")
         return None, None
 
     if hl_rate is None:
@@ -166,6 +174,8 @@ def check(coin, regime='unknown'):
 
 def status():
     out = dict(_STATS)
+    n = max(1, out['check_calls'])
+    out['success_rate_pct'] = round((1 - out['errors']/n) * 100, 2)
     out.update({
         'enabled':              ENABLED,
         'extreme_threshold_hr_pct': EXTREME_THRESHOLD * 100,
@@ -192,7 +202,9 @@ def get_top_funding_extremes(n=10, universe=None):
         with fa._LOCK:
             hl = dict(fa._CACHE['hl'])
             bn = dict(fa._CACHE['binance'])
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"diagnostics funding_arb snapshot: {type(e).__name__}: {e}")
         return []
     universe_set = set(universe) if universe else None
     rows = []
