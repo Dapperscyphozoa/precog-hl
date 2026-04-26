@@ -138,7 +138,14 @@ _STATS = {
     'skipped_no_approach':   0,
     'funding_overlap':       0,
     'fires':                 0,
+    'errors':                0,
 }
+
+
+import sys as _sys
+def _log_err(msg):
+    """Visible error logger — replaces silent except: pass anti-pattern."""
+    print(f"[wall_absorption ERR] {msg}", file=_sys.stderr, flush=True)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
@@ -206,7 +213,9 @@ def _compute_bb(coin):
         return None
     try:
         bars = okx.fetch_klines(coin, '15m', BB_LENGTH + 5)
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"fetch_klines({coin}): {type(e).__name__}: {e}")
         return None
     if not bars or len(bars) < BB_LENGTH:
         return None
@@ -214,7 +223,9 @@ def _compute_bb(coin):
     mid = sum(closes) / len(closes)
     try:
         sd = statistics.pstdev(closes)
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"pstdev({coin}): {type(e).__name__}: {e}")
         return None
     if sd <= 0:
         return None
@@ -238,7 +249,9 @@ def _funding_overlap(coin):
     try:
         with fa._LOCK:
             r = fa._CACHE['hl'].get(coin)
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"funding_arb access ({coin}): {type(e).__name__}: {e}")
         return False
     if r is None:
         return False
@@ -291,7 +304,9 @@ def check(coin, current_px, regime='unknown', active_absorption_count=0):
     # Pull verified walls
     try:
         verified = ob.get_walls(coin) or []
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"get_walls({coin}): {type(e).__name__}: {e}")
         return None, None
     if not verified:
         _STATS['no_walls'] += 1
@@ -314,7 +329,9 @@ def check(coin, current_px, regime='unknown', active_absorption_count=0):
     try:
         history_dict = ob._WALLS_HISTORY
         ob_lock = ob._LOCK
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"orderbook_ws internals ({coin}): {type(e).__name__}: {e}")
         return None, None
 
     candidates = []  # (decay, side, wall_dict, dist_pct)
@@ -393,6 +410,8 @@ def check(coin, current_px, regime='unknown', active_absorption_count=0):
 
 def status():
     out = dict(_STATS)
+    n = max(1, out['check_calls'])
+    out['success_rate_pct'] = round((1 - out['errors']/n) * 100, 2)
     out.update({
         'enabled':                ENABLED,
         'proximity_pct':          PROXIMITY_PCT * 100,
