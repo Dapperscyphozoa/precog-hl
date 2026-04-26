@@ -730,7 +730,16 @@ def start(precog_module):
 def status():
     """Expose state for /health or /confluence endpoint."""
     with _state_lock:
-        return dict(_state)
+        out = dict(_state)
+    # Surface per-filter rejection counters from the engine — surgical
+    # diagnosis for "why 0 fires"
+    try:
+        import confluence_engine as ce
+        if hasattr(ce, 'status'):
+            out['engine_stats'] = ce.status()
+    except Exception as e:
+        out['engine_stats_err'] = f"{type(e).__name__}: {e}"
+    return out
 
 
 def reset(preserve_history=False):
