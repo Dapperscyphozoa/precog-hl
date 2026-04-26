@@ -292,7 +292,16 @@ def _size_and_fire(coin, signal, equity):
 
         # ─── FIX 4: record actual slippage vs expected ───
         actual_px = _extract_avg_fill_px(r)
-        if actual_px and entry > 0:
+        if not actual_px:
+            # IOC didn't match (price drifted past slip buffer) or order rejected.
+            # Do NOT register a position we don't have on exchange — that creates
+            # a phantom in open_positions that blocks future fires AND has no
+            # ledger trail. Returning None ensures _register_position is skipped
+            # and total_fires doesn't increment for unfilled orders.
+            _log(f"{coin} NO_FILL — IOC unmatched or rejected, skipping registration")
+            return None
+
+        if entry > 0:
             slip_pct = abs(actual_px - entry) / entry * 100
             _record_slippage(coin, slip_pct)
             _log(f"{coin} slip: expected={entry:.4f} actual={actual_px:.4f} "
@@ -304,7 +313,7 @@ def _size_and_fire(coin, signal, equity):
         # Record ENTRY in the unified ledger so /trades/recent and
         # analyze_trades see confluence trades alongside legacy precog ones.
         # tp_pct/sl_pct are known at signal time (no ENTRY_UPDATE needed).
-        if _trade_id and _LEDGER_OK and _ledger and actual_px:
+        if _trade_id and _LEDGER_OK and _ledger:
             try:
                 _edge = (_gates.compute_expected_edge(signal['tp_pct'], signal['sl_pct'])
                          if _GATES_OK else None)
