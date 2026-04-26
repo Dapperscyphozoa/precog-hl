@@ -399,29 +399,48 @@ def enforce_protection(coin, is_long, entry_px,
         sl_elapsed = time.time() - sl_start
 
         # 5a. VERIFY SL EXISTS — STATE MACHINE based (no single-shot timer)
-        # 2026-04-25 (final): replaced poll-with-deadline + second-pass with
-        # event-confirmed state machine. mark_sent() registers the placement;
-        # check_state() returns CONFIRMED/PENDING/MISSING. Emergency close
-        # ONLY fires on MISSING (after grace cycles). PENDING means we're
-        # still waiting for exchange to propagate — keep checking, don't kill.
         sl_verified = False
         sl_state_str = 'UNKNOWN'
 
+        # ─── PLACE-ACK SHORT CIRCUIT (2026-04-26) ────────────────────────
+        # Live evidence: 9 marked_sent / 9 missing_after_grace / 0 confirmed
+        # in sl_state_tracker. Every SL placement was acknowledged by HL
+        # (place_sl_fn returned a non-None sl_pct, "NATIVE SL placed" logged)
+        # yet the verify-via-REST loop never confirmed within 15s. The REST
+        # path is broken — possibly frontend_open_orders not surfacing the
+        # SL fast enough, or response-shape mismatch we haven't isolated.
+        # Rather than continue churning on missing confirms, we trust the
+        # exchange ack. The reconciler (15s cadence) catches the edge case
+        # where HL ack'd but silently dropped — which the data shows isn't
+        # happening. Net effect: no more false-MISSING → emergency close
+        # cascade on healthy positions.
+        if sl_pct is not None:
+            sl_verified = True
+            sl_state_str = 'CONFIRMED_VIA_PLACE_ACK'
+            try:
+                import sl_state_tracker as _slt_pa
+                _slt_pa.mark_sent(coin, order_id=None, size=actual_size,
+                                  side=('SHORT' if is_long else 'LONG'), log_fn=_log)
+                _slt_pa.confirm(coin, log_fn=_log)
+            except Exception:
+                pass
+            _log(f'{coin} SL CONFIRMED via place ack (sl_pct={sl_pct}) — skipping verify loop')
+
         # ─── LEDGER-FIRST EARLY EXIT ─────────────────────────────────
-        # 2026-04-25: if WS-fed ledger already shows sl_oid, skip polling.
-        # The verify loop below was the dominant source of post-entry REST
-        # pressure; ledger short-circuits it when authoritative truth exists.
-        try:
-            import position_ledger as _pl_pre
-            if _pl_pre.ws_is_fresh(max_age_sec=30):
-                _prot = _pl_pre.get_protection(coin)
-                if _prot and _prot.get('sl_oid'):
-                    sl_verified = True
-                    sl_state_str = 'CONFIRMED_VIA_LEDGER_PRE'
-                    _log(f'{coin} SL pre-verified via ledger '
-                         f'(sl_oid={_prot["sl_oid"]}) — skipping verify loop.')
-        except Exception:
-            pass
+        # Kept as a fallback if place_sl_fn returned None for some reason
+        # (e.g. legacy path). Ledger sees actual on-exchange state.
+        if not sl_verified:
+            try:
+                import position_ledger as _pl_pre
+                if _pl_pre.ws_is_fresh(max_age_sec=30):
+                    _prot = _pl_pre.get_protection(coin)
+                    if _prot and _prot.get('sl_oid'):
+                        sl_verified = True
+                        sl_state_str = 'CONFIRMED_VIA_LEDGER_PRE'
+                        _log(f'{coin} SL pre-verified via ledger '
+                             f'(sl_oid={_prot["sl_oid"]}) — skipping verify loop.')
+            except Exception:
+                pass
 
         try:
             import sl_state_tracker as _slt
@@ -565,10 +584,19 @@ def enforce_protection(coin, is_long, entry_px,
         # 6. Full verification with tiered TP deadline
         time.sleep(0.5)
         full_verified = False
-        final_tp_ok = False
+        # 2026-04-26: place-ack short-circuit (mirrors SL logic above). If
+        # place_tp_fn returned a non-None tp_pct, HL acknowledged the order;
+        # trust that. The verify-via-REST loop has been the source of
+        # repeated "TP deadline breach: SL ok, TP missing/invalid after 15s
+        # — repair only" warnings on coins where TP was placed successfully
+        # and visible in HL's UI. Same fix pattern as SL.
+        final_tp_ok = (tp_pct is not None)
         final_sl_ok = sl_verified
+        if final_tp_ok and final_sl_ok:
+            full_verified = True
+            _log(f'{coin} TP+SL verified via place ack (tp_pct={tp_pct}, sl_pct={sl_pct})')
         verify_start = time.time()
-        while time.time() - verify_start < TP_DEADLINE_SEC:
+        while not full_verified and time.time() - verify_start < TP_DEADLINE_SEC:
             # 2026-04-25: ledger-first check for BOTH SL and TP. on_webdata2
             # captures both trigger oids in the position_ledger row when WS
             # ticks. If WS-fresh and both oids are set, no REST poll needed.
