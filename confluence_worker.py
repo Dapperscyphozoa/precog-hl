@@ -43,6 +43,12 @@ try:
 except Exception:
     _gates = None
     _GATES_OK = False
+try:
+    import funding_accrual as _funding_accrual
+    _FA_OK = True
+except Exception:
+    _funding_accrual = None
+    _FA_OK = False
 
 ENABLED         = os.environ.get('CONFLUENCE_ENABLED', '0') == '1'
 DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
@@ -175,6 +181,20 @@ def _load_state():
                     _state[k] = v
             _log(f"state loaded: {len(_state.get('last_fire_ts', {}))} cooldowns, "
                  f"{len(_state.get('open_positions', {}))} open positions")
+            # 2026-04-26: cleanup phantom entries with trade_id=null. These
+            # are pre-race-fix orphans (e.g. PROVE) where an order placed
+            # but the ledger wasn't bound yet. Without trade_id we can't
+            # write a CLOSE to the unified ledger, so the position lingers
+            # forever and blocks future fires on that coin via _in_position.
+            _phantoms = []
+            with _state_lock:
+                for _c, _p in list(_state.get('open_positions', {}).items()):
+                    if _p.get('trade_id') is None:
+                        _phantoms.append(_c)
+                        _state['open_positions'].pop(_c, None)
+            if _phantoms:
+                _log(f"startup cleanup: dropped {len(_phantoms)} trade_id=null phantom positions: {_phantoms}")
+                _save_state()
     except Exception as e:
         _log(f"state load err: {e}")
 
@@ -638,6 +658,17 @@ def _close_position(coin, reason, pnl=None):
     # passed through unchanged to match the existing /trades/recent shape.
     _tid = pos.get('trade_id')
     if _tid and _LEDGER_OK and _ledger and not DRY_RUN:
+        # Funding accrual: signed cost on notional from entry_ts to now.
+        # Best-effort — pos['ts'] is unix int set at _register_position.
+        _fp = None
+        if _FA_OK and _funding_accrual is not None:
+            try:
+                _entry_ts = pos.get('ts')
+                if _entry_ts:
+                    _fp, _src = _funding_accrual.compute_funding_paid_pct(
+                        coin, pos.get('side', ''), float(_entry_ts), time.time())
+            except Exception:
+                _fp = None
         try:
             _ledger.append_close(
                 trade_id=_tid,
@@ -645,6 +676,7 @@ def _close_position(coin, reason, pnl=None):
                 pnl=(pnl if pnl is not None else 0.0),
                 close_reason=reason,
                 source='confluence_close',
+                funding_paid_pct=_fp,
             )
         except Exception as _le:
             _log(f"[ledger] confluence append_close err {coin}: {_le}")

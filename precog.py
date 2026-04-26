@@ -310,6 +310,37 @@ except Exception as _e:
     _GATES_OK = False
     print(f'[gates] import failed (non-fatal): {_e}', flush=True)
 
+# Funding accrual — used at close to record signed funding cost on notional.
+try:
+    import funding_accrual as _funding_accrual
+    _FA_OK = True
+except Exception as _e:
+    _funding_accrual = None
+    _FA_OK = False
+    print(f'[funding_accrual] import failed (non-fatal): {_e}', flush=True)
+
+
+def _funding_for_close(trade_record):
+    """Best-effort funding accrual for a closing trade. Returns signed pct on
+    notional (positive = paid, negative = received), or None if uncomputable.
+    Never raises — funding tracking failure must not block a close.
+    """
+    if not _FA_OK or _funding_accrual is None or not trade_record:
+        return None
+    try:
+        coin = trade_record.get('coin', '')
+        side = trade_record.get('side', '')
+        ts_iso = trade_record.get('timestamp', '')
+        if not coin or not side or not ts_iso:
+            return None
+        from datetime import datetime as _dt
+        entry_ts = _dt.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+        pct, _src = _funding_accrual.compute_funding_paid_pct(
+            coin, side, entry_ts, time.time())
+        return pct
+    except Exception:
+        return None
+
 try:
     import exchange_snapshot as _snapshot
     _SNAPSHOT_OK = True
@@ -6705,6 +6736,10 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
         except Exception:
             pnl = 0
 
+    # Funding accrual: signed cost on notional from entry_ts to now.
+    # Best-effort — doesn't block close on failure.
+    _funding_pct = _funding_for_close(trade)
+
     ok = _ledger.append_close(
         trade_id=trade_id,
         exit_price=exit_price,
@@ -6712,6 +6747,7 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
         close_reason=close_reason,
         exchange_fill_id=exchange_fill_id,
         source=source,
+        funding_paid_pct=_funding_pct,
     )
     if not ok:
         return False
@@ -8882,12 +8918,14 @@ def main():
                     if _phantom_tid and _LEDGER_OK and _ledger is not None:
                         try:
                             if not _ledger.is_closed(_phantom_tid):
+                                _phantom_funding = _funding_for_close(_ledger.get_by_trade_id(_phantom_tid))
                                 _ledger.append_close(
                                     trade_id=_phantom_tid,
                                     exit_price=None,
                                     pnl=None,
                                     close_reason='reconcile_phantom_clear',
                                     source='reconcile',
+                                    funding_paid_pct=_phantom_funding,
                                 )
                                 log(f"[ledger] phantom {k} trade_id={_phantom_tid[:8]} marked closed")
                         except Exception as _le:

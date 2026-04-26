@@ -45,6 +45,46 @@ def _save():
 
 _load()
 
+
+# 2026-04-26: per-coin expected_wr lookup from all_grid_results.json.
+# Default callers fall back to hardcoded 75 (legacy), but if the grid
+# results file is present, it provides per-coin baselines (typically
+# 50-75% from honest backtests). README claims the active strategy
+# averages 80.2% — using a per-coin baseline instead of one-size-fits-all
+# tightens the trigger from 55%-WR-drop to coin-specific.
+_EXPECTED_WR_CACHE = None
+_EXPECTED_WR_PATH = os.environ.get('GRID_RESULTS_PATH', 'all_grid_results.json')
+
+def _load_expected_wr_map():
+    """Load coin -> base_wr from grid results. Cached. Best-effort."""
+    global _EXPECTED_WR_CACHE
+    if _EXPECTED_WR_CACHE is not None:
+        return _EXPECTED_WR_CACHE
+    out = {}
+    try:
+        with open(_EXPECTED_WR_PATH, 'r') as f:
+            arr = json.load(f)
+        for item in (arr or []):
+            t = (item.get('ticker') or '').upper()
+            wr = item.get('base_wr')
+            if t and wr is not None:
+                try:
+                    out[t] = float(wr)
+                except (TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+    _EXPECTED_WR_CACHE = out
+    return out
+
+
+def get_expected_wr(coin, default=75.0):
+    """Per-coin expected WR%. Returns default if not in grid results."""
+    if not coin:
+        return default
+    return _load_expected_wr_map().get(coin.upper(), default)
+
+
 def _prune(coin):
     cutoff = time.time() - ROLLING_WINDOW_SEC
     _state[coin]['trades'] = [t for t in _state[coin]['trades'] if t[0] >= cutoff]
@@ -53,8 +93,16 @@ def _ensure(coin):
     if coin not in _state:
         _state[coin] = {'trades':[], 'disabled':False, 'disabled_at':0, 'reason':'', 'consec_losses':0}
 
-def record_trade_close(coin, pnl_pct, expected_wr_pct=75):
-    """Record a close. Evaluates disable conditions. Returns True if just disabled."""
+def record_trade_close(coin, pnl_pct, expected_wr_pct=None):
+    """Record a close. Evaluates disable conditions. Returns True if just disabled.
+
+    If `expected_wr_pct` is None, looks up per-coin baseline from
+    all_grid_results.json (falling back to 75% if coin missing). This makes
+    the WR-drop trigger coin-aware: a coin with backtest 60% WR triggers at
+    40%, not at the legacy hardcoded 55%.
+    """
+    if expected_wr_pct is None:
+        expected_wr_pct = get_expected_wr(coin, default=75.0)
     now = time.time()
     win = pnl_pct > 0
     with LOCK:
