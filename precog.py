@@ -2265,6 +2265,8 @@ def confluence_status():
             'last_bar_coins': len(last_bars),
             'last_bar_sample': dict(list(last_bars.items())[:5]),
             'killed_coins': list(st.get('killed_coins', {}).keys())[:20],
+            # Per-filter rejection counters (surgical diagnosis for "why 0 fires")
+            'engine_stats': st.get('engine_stats', {}),
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
