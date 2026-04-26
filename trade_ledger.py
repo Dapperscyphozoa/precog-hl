@@ -487,7 +487,35 @@ def append_close(trade_id, exit_price, pnl, close_reason,
     favour during the hold; mae_pct=-0.008 = went -0.8% against us).
 
     Returns True if close was recorded, False if already closed (duplicate).
+
+    2026-04-26: PnL sanity guard. If |pnl| > $50 OR |mfe_pct/mae_pct| > 0.5
+    (50%), the trade has a unit-conversion bug (most likely a k-prefix coin
+    where entry vs fill prices got reported in mismatched scales). Set the
+    bogus values to None rather than poison the ledger; log the trade_id
+    for investigation.
     """
+    # ─── PnL sanity guard ────────────────────────────────────
+    try:
+        if pnl is not None and abs(float(pnl)) > 50.0:
+            print(f"[ledger] WARN bogus pnl on close trade_id={trade_id} "
+                  f"pnl={pnl} reason={close_reason} — DISCARDING (probable unit bug)",
+                  flush=True)
+            pnl = None
+    except (TypeError, ValueError):
+        pass
+    try:
+        if mfe_pct is not None and abs(float(mfe_pct)) > 0.5:
+            print(f"[ledger] WARN bogus mfe_pct={mfe_pct} on trade_id={trade_id} — clearing", flush=True)
+            mfe_pct = None
+    except (TypeError, ValueError):
+        pass
+    try:
+        if mae_pct is not None and abs(float(mae_pct)) > 0.5:
+            print(f"[ledger] WARN bogus mae_pct={mae_pct} on trade_id={trade_id} — clearing", flush=True)
+            mae_pct = None
+    except (TypeError, ValueError):
+        pass
+
     with _LOCK:
         existing = _INDEX['by_trade_id'].get(trade_id)
         # Defaults for orphan close (no prior ENTRY)

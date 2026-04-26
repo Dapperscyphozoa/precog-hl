@@ -6312,6 +6312,15 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
            # unfavorable (paid more for buy / received less for sell).
            'expected_px': None, 'realized_slippage_pct': None}
 
+    # 2026-04-26: k-prefix coin block. HL's k-coins (kFLOKI/kPEPE/kSHIB/kBONK/
+    # kNEIRO) report prices in mismatched scales between get_mid() and order
+    # fill paths, producing 1000x-off PnL math (saw kFLOKI fake +$998 on $11
+    # trade). Skip until the unit handling is properly normalized.
+    if coin and coin.startswith('k') and len(coin) >= 4 and coin[1].isupper():
+        out['reason'] = 'k_coin_blocked'
+        log(f"{coin} blocked: k-prefix coin (1000x scale mismatch — see TODO)")
+        return out
+
     # 2026-04-26: side filter — defaults to BOTH sides. The earlier 30-trade
     # SELL-bias signal dissipated by trade 33 (BUY 50% / SELL 54.5% over 40
     # decided, Wilson CIs heavily overlap). Don't cut signals on weak evidence.
