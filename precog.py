@@ -8864,7 +8864,7 @@ def main():
                                         if _pl_entry > 0 and _pl_size > 0:
                                             modify_sl_to_breakeven(_pl_coin, _pl_entry,
                                                                    _pl_size, _pl_is_long,
-                                                                   buffer_pct=0.0)
+                                                                   buffer_pct=0.002)
                                             _pl_state['sl_at_be'] = True
                                             state.setdefault('positions', {})[_pl_coin] = _pl_state
                                             log(f"{_pl_coin} PROFIT_LOCK BE: raw move ≥{PROFIT_LOCK_BE_PCT*100:.1f}% — SL moved to entry")
