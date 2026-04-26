@@ -19,6 +19,22 @@ _LAST_FIRED = {}           # coin -> ts
 _PULL_HISTORY = {}         # coin -> [(ts, px, wall_price, wall_side)]
 _LOCK = threading.Lock()
 
+_STATS = {
+    'check_calls':       0,
+    'fires':             0,
+    'errors':            0,
+}
+
+import sys as _sys
+def _log_err(msg):
+    print(f"[wall_bounce ERR] {msg}", file=_sys.stderr, flush=True)
+
+def status():
+    out = dict(_STATS)
+    n = max(1, out['check_calls'])
+    out['success_rate_pct'] = round((1 - out['errors']/n) * 100, 2)
+    return out
+
 def _record_price(coin, px):
     """Track price for pullback detection."""
     with _LOCK:
@@ -32,6 +48,7 @@ def check(coin, current_px, v3_direction):
     """Returns ('BUY'|'SELL', wall_dict) if retest entry fires. v3_direction: +1 up, -1 dn, 0 neutral."""
     if not current_px or current_px <= 0:
         return None, None
+    _STATS['check_calls'] += 1
     _record_price(coin, current_px)
     # Cooldown
     if time.time() - _LAST_FIRED.get(coin, 0) < COOLDOWN_SEC:
@@ -40,7 +57,9 @@ def check(coin, current_px, v3_direction):
     for wall_side, trade_side, dir_req in [('bid', 'BUY', 1), ('ask', 'SELL', -1)]:
         try:
             wall = orderbook_ws.get_nearest_wall(coin, wall_side)
-        except Exception:
+        except Exception as e:
+            _STATS['errors'] += 1
+            _log_err(f"get_nearest_wall({coin},{wall_side}): {type(e).__name__}: {e}")
             continue
         if not wall or wall.get('usd', 0) < MIN_WALL_USD:
             continue
@@ -70,6 +89,7 @@ def check(coin, current_px, v3_direction):
         if not pulled:
             continue
         _LAST_FIRED[coin] = now
+        _STATS['fires'] += 1
         return trade_side, wall
     return None, None
 
@@ -81,7 +101,9 @@ def wall_broken(coin, side, original_wall_price, current_px):
     if not current_px or not original_wall_price: return False
     try:
         wall = orderbook_ws.get_nearest_wall(coin, 'bid' if side == 'BUY' else 'ask')
-    except Exception:
+    except Exception as e:
+        _STATS['errors'] += 1
+        _log_err(f"wall_broken get_nearest_wall({coin}): {type(e).__name__}: {e}")
         return False
     # If wall gone from tracked verified list OR moved >0.5% from original = broken
     if not wall: return True
