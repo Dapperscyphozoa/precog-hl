@@ -231,12 +231,17 @@ def _find_recent_fill(coin, fills, since_ts=None, max_age_sec=30):
 
 
 def _compute_drift(snap, ledger_stats):
-    """drift = |exch_open - ledger_open| / max(exch_open, 1)"""
+    """drift = |exch_open - ledger_open| / max(exch_open, 1).
+
+    2026-04-26: also returns abs_diff so callers can apply a small-N guard.
+    With ~25 open positions, off-by-one is 4% — falsely tripping the halt.
+    """
     try:
         exch = len(snap.get('positions', {}))
         led = ledger_stats.get('open_trades_count', 0)
+        abs_diff = abs(exch - led)
         denom = max(exch, 1)
-        return abs(exch - led) / denom
+        return abs_diff / denom
     except Exception:
         return None
 
@@ -248,6 +253,12 @@ def _update_drift_tier(drift_pct, intent_backlog=0):
     degraded (1-5%)   → reduce entries, skip high-risk coins, faster reconcile
     unsafe   (≥5%)    → halt new entries
     critical (unsafe sustained for N cycles) → emergency flatten authorized
+
+    2026-04-26: degraded tier no longer RESETS healthy_streak. Original logic
+    deadlocked the halt: at our position count (~25 concurrent), any 1-position
+    discrepancy puts drift at 4% (degraded), which reset the streak and prevented
+    halt recovery. Halt clear now requires 3 consecutive NON-UNSAFE cycles.
+    Degraded counts as non-unsafe → recovery accumulates.
     """
     if drift_pct is None:
         return
@@ -268,10 +279,16 @@ def _update_drift_tier(drift_pct, intent_backlog=0):
                 _log(f"✓ HALT CLEARED after {_METRICS['healthy_streak']} healthy cycles")
         elif drift_pct < _DRIFT_UNSAFE_THRESHOLD:
             tier = 'degraded'
-            _METRICS['healthy_streak'] = 0
+            # Recovery counter still ticks while degraded — only unsafe resets it.
+            _METRICS['healthy_streak'] += 1
             _METRICS['unsafe_streak'] = 0
             _METRICS['entry_limiter'] = 'reduced'
             _METRICS['skip_high_risk_coins'] = True
+            if _METRICS['halt_flag'] and _METRICS['healthy_streak'] >= _DRIFT_HALT_RECOVERY_CYCLES:
+                _METRICS['halt_flag'] = False
+                _METRICS['halt_since_ts'] = 0.0
+                _METRICS['emergency_flatten_authorized'] = False
+                _log(f"✓ HALT CLEARED after {_METRICS['healthy_streak']} non-unsafe cycles (last drift {drift_pct*100:.2f}%)")
             _log(f"drift DEGRADED: {drift_pct*100:.2f}% — reduce_entries=on, skip_high_risk=on, faster_reconcile=on")
         else:
             tier = 'unsafe'
