@@ -537,6 +537,46 @@ def _register_position(coin, signal, fill_result):
         _state['last_fire_ts'][coin] = int(time.time())
     _save_state()
 
+def _try_rotate_stale_flat():
+    """Find the worst stale-flat-eligible position and close it. Returns
+    coin name on successful eviction, None if no candidate exists.
+
+    Worst = lowest MFE first, then most negative raw_move, then oldest.
+    Only positions previously marked stale_flat_eligible by _monitor_exits
+    qualify — that means: age >= 90min AND mfe < +0.3% AND raw < -0.7%.
+    """
+    with _state_lock:
+        candidates = [
+            (coin, dict(pos)) for coin, pos in _state['open_positions'].items()
+            if pos.get('stale_flat_eligible')
+        ]
+    if not candidates:
+        return None
+    # Rank: lowest MFE first (most directionally wrong), then most negative
+    # raw, then oldest. Goal: kick out the deadest position.
+    def _badness(item):
+        _, pos = item
+        mfe = pos.get('mfe_pct') or 0
+        # We don't have current raw here; use stale_flat_marked_ts as proxy
+        # for staleness (more recent mark = fresher data, prefer to evict
+        # ones that have been marked longest)
+        marked_ts = pos.get('stale_flat_marked_ts') or 0
+        return (mfe, -marked_ts)  # ascending mfe (lowest first), oldest mark first
+    candidates.sort(key=_badness)
+    coin_to_evict, pos = candidates[0]
+    # Compute current raw for the close log line
+    try:
+        mids = _precog.info.all_mids()
+        mark = float(mids.get(coin_to_evict, 0))
+        entry = float(pos.get('entry') or 0)
+        is_buy = pos.get('side') == 'BUY'
+        raw_move = ((mark - entry) / entry) if is_buy else ((entry - mark) / entry)
+    except Exception:
+        raw_move = pos.get('mfe_pct') or 0  # best-effort
+    _close_position(coin_to_evict, 'stale_flat_rotated', raw_move)
+    return coin_to_evict
+
+
 def _monitor_exits():
     """Walk open positions. LIFECYCLE ENGINE — every position must exit cleanly.
     
@@ -557,11 +597,14 @@ def _monitor_exits():
     PROFIT_LOCK_PCT = 0.015          # raw ≥ 1.5% → close
     PROFIT_LOCK_BE_PCT = 0.008       # raw ≥ 0.8% → move SL to entry
 
-    # 2026-04-26: stale-flat eviction. Catches the SUSHI/UMA pattern
-    # (drifted -1% MAE, MFE 0%, sitting for hours blocking cap).
+    # 2026-04-26: stale-flat eviction.
+    # v2: tightened raw threshold (-0.7%) and changed from auto-close to
+    # rotation. Marks positions as eviction-eligible; _scan_once evicts only
+    # when a fresh signal needs the slot. Avoids replacing one loss with
+    # another when no better signal is queued.
     STALE_FLAT_AGE_S    = 90 * 60   # 1h30 — older than this is candidate
     STALE_FLAT_MFE_MAX  = 0.003     # never crossed +0.3% MFE
-    STALE_FLAT_RAW_MIN  = -0.004    # currently below -0.4% raw move
+    STALE_FLAT_RAW_MIN  = -0.007    # currently below -0.7% raw move (tightened from -0.4%)
 
     now = int(time.time())
     with _state_lock:
@@ -655,23 +698,28 @@ def _monitor_exits():
                 _close_position(coin, 'no_progress', raw_move)
                 continue
 
-            # 5b: stale-flat eviction — opportunity-cost cleanup
-            # 2026-04-26: SUSHI/UMA pattern observed in live data — trades
-            # that go directionally wrong from entry, drift to ~-1% MAE,
-            # never reach MFE 0.3%, then sit holding cap for hours. They
-            # don't trigger NO_PROGRESS (raw isn't < 0.3%) and don't hit
-            # SL (above -1.5%). Result: 4-12h hold bucket = -$1.47 / 12 trades.
+            # 5b: stale-flat MARKING (rotation-gated eviction)
+            # 2026-04-26 v2: per user feedback, time-based auto-eviction
+            # could replace one loss with another. Smarter: MARK eligible,
+            # but only EVICT when a new signal needs the slot (rotation in
+            # _scan_once). HARD_TIMEOUT (#6) remains as backstop.
             #
-            # Rule: if old enough AND never went positive AND currently
-            # underwater, evict. The signal was wrong; cap slot is more
-            # valuable to a fresh signal.
+            # Tightened threshold: raw < -0.7% (was -0.4%) — gives recovery
+            # more rope. Trade must be both old enough AND clearly underwater
+            # AND never went meaningfully positive to be eviction candidate.
             if (age >= STALE_FLAT_AGE_S
                     and (pos.get('mfe_pct') or 0) < STALE_FLAT_MFE_MAX
                     and raw_move < STALE_FLAT_RAW_MIN):
-                _log(f"{coin} STALE_FLAT {age/60:.0f}min mfe={(pos.get('mfe_pct') or 0)*100:.2f}% "
-                     f"raw={raw_move*100:+.2f}% — evicting (signal directionally wrong, freeing cap)")
-                _close_position(coin, 'stale_flat', raw_move)
-                continue
+                if not pos.get('stale_flat_eligible'):
+                    with _state_lock:
+                        if coin in _state['open_positions']:
+                            _state['open_positions'][coin]['stale_flat_eligible'] = True
+                            _state['open_positions'][coin]['stale_flat_marked_ts'] = now
+                    _state.setdefault('stale_flat_marked', 0)
+                    _state['stale_flat_marked'] += 1
+                    _log(f"{coin} STALE_FLAT_MARKED {age/60:.0f}min mfe={(pos.get('mfe_pct') or 0)*100:.2f}% "
+                         f"raw={raw_move*100:+.2f}% — eviction-eligible (will close if better signal queued)")
+                # Don't auto-close. Let _scan_once rotate when new signal comes.
 
             # 6: hard timeout (age ≥ 6h)
             if age >= HARD_TIMEOUT_S:
@@ -967,19 +1015,29 @@ def _scan_once():
             with _state_lock:
                 n_open = len(_state['open_positions'])
             if n_open >= MAX_POSITIONS:
-                # Queue it; older queued entries drop off if stale
-                with _state_lock:
-                    _state['pending_queue'].append({
-                        'coin': coin, 'signal': sig, 'queued_ts': now_ts
-                    })
-                    # Keep queue bounded + fresh
-                    cutoff = now_ts - MAX_SIGNAL_AGE_S
-                    _state['pending_queue'] = [
-                        q for q in _state['pending_queue'] if q['queued_ts'] >= cutoff
-                    ][-50:]
-                queued_this_scan += 1
-                _bump('cap_queued')
-                continue
+                # 2026-04-26: ROTATION — try to evict a stale-flat position
+                # to make room for this fresh signal. Only fires if a marked
+                # eviction-candidate exists. If none, queue as before.
+                evicted = _try_rotate_stale_flat()
+                if evicted:
+                    _state.setdefault('stale_flat_rotated', 0)
+                    _state['stale_flat_rotated'] += 1
+                    _log(f"ROTATION: evicted {evicted} to make room for {coin} {sig['side']} "
+                         f"n={sig['n_sys']} {'+'.join(sig['systems'])}")
+                    # Slot freed — fall through to fire path below
+                else:
+                    # Queue it; older queued entries drop off if stale
+                    with _state_lock:
+                        _state['pending_queue'].append({
+                            'coin': coin, 'signal': sig, 'queued_ts': now_ts
+                        })
+                        cutoff = now_ts - MAX_SIGNAL_AGE_S
+                        _state['pending_queue'] = [
+                            q for q in _state['pending_queue'] if q['queued_ts'] >= cutoff
+                        ][-50:]
+                    queued_this_scan += 1
+                    _bump('cap_queued')
+                    continue
             # Fire
             fill = _size_and_fire(coin, sig, equity)
             if fill is not None:

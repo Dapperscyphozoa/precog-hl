@@ -2470,6 +2470,9 @@ def confluence_status():
             'place_filled':   st.get('place_filled', 0),
             'place_no_fill':  st.get('place_no_fill', 0),
             'place_error':    st.get('place_error', 0),
+            # 2026-04-26: stale-flat rotation diagnostics
+            'stale_flat_marked':  st.get('stale_flat_marked', 0),    # times marked eligible
+            'stale_flat_rotated': st.get('stale_flat_rotated', 0),   # times actually evicted
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
