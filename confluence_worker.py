@@ -91,6 +91,22 @@ _state = {
     'killed_coins': {},          # coin -> {reason, ts}
     # fix 5: per-coin live perf
     'coin_stats': {},            # coin -> {n, w, l, pnl_pct}
+    # 2026-04-26: per-gate reject counters — empirical "why 0 fires" diagnosis.
+    # Cumulative since boot. `rejects_last_scan` resets each scan so we can
+    # see the current scan's gate distribution in isolation.
+    'rejects': {
+        'killed': 0, 'cooldown': 0, 'in_position': 0, 'no_bars': 0,
+        'no_signal': 0, 'stale': 0, 'dedupe': 0, 'entry_gate_v3': 0,
+        'cap_queued': 0,
+    },
+    'rejects_last_scan': {
+        'killed': 0, 'cooldown': 0, 'in_position': 0, 'no_bars': 0,
+        'no_signal': 0, 'stale': 0, 'dedupe': 0, 'entry_gate_v3': 0,
+        'cap_queued': 0,
+    },
+    'last_scan_at': 0,
+    'last_scan_signals': 0,        # signals_yielded contributed by THIS scan
+    'last_scan_fires': 0,
     # ─── TELEMETRY 2026-04-25: per-trade close log ───
     # Ring buffer of last N closed trades. Used for downstream eval:
     # which scores actually work, which coins are dead weight, exit-reason mix.
@@ -599,6 +615,10 @@ def _scan_once():
     candidates = []  # list of (signal_dict, first_ts) — queued by newness
     now_ts = int(time.time())
 
+    # Reset per-scan reject counters; cumulative ones in _state['rejects'] keep going.
+    _scan_rejects = {k: 0 for k in _state['rejects_last_scan']}
+    _scan_signals = 0
+
     with _state_lock:
         killed = set(_state['killed_coins'].keys())
         fired_events = dict(_state['fired_events'])
@@ -609,34 +629,40 @@ def _scan_once():
             with _state_lock:
                 _state['fired_events'].pop(k, None)
 
+    def _bump(reason):
+        _scan_rejects[reason] += 1
+        with _state_lock:
+            _state['rejects'][reason] = _state['rejects'].get(reason, 0) + 1
+
     for coin in coins:
         try:
             # Fix 4/5 kill filter
             if coin in killed:
-                continue
+                _bump('killed'); continue
             # Cooldown
             if not _ce.should_enter(coin, _state['last_fire_ts'], now_ts):
-                continue
+                _bump('cooldown'); continue
             # Already in position?
             if _in_position(coin):
-                continue
+                _bump('in_position'); continue
             # Fetch + evaluate (Fix 1: only fully-closed bars)
             bars = _fetch_15m_bars(coin, 800)
             if not bars:
-                continue
+                _bump('no_bars'); continue
             sig = _ce.eval_coin(coin, bars, now_ts=now_ts)
             # Mark bar as processed even if no signal
             with _state_lock:
                 _state['last_bar_ts'][coin] = bars[-1]['t']
             if not sig:
-                continue
+                _bump('no_signal'); continue
+            _scan_signals += 1
 
             # ─── Fix B: entry drift control ───
             latest_sig_ts = sig.get('latest_signal_ts') or sig.get('ts')
             sig_age = now_ts - latest_sig_ts
             if sig_age > MAX_SIGNAL_AGE_S:
                 _log(f"{coin} {sig['side']} stale ({sig_age}s > {MAX_SIGNAL_AGE_S}s) — skip")
-                continue
+                _bump('stale'); continue
 
             # ─── Fix 2: confluence event dedupe ───
             # Use first signal ts across the agreeing systems as the event anchor
@@ -645,13 +671,13 @@ def _scan_once():
             ts_bucket = (first_ts // DEDUPE_WINDOW_S) * DEDUPE_WINDOW_S
             evt_key = f"{coin}|{sig['side']}|{ts_bucket}"
             if evt_key in fired_events:
-                continue  # already fired this event
+                _bump('dedupe'); continue  # already fired this event
 
             # Entry gate
             ok, why = _entry_gate_ok(coin, sig['side'])
             if not ok:
                 _log(f"{coin} {sig['side']} n={sig['n_sys']} — gated by {why}")
-                continue
+                _bump('entry_gate_v3'); continue
 
             sig['_evt_key'] = evt_key
             sig['_first_ts'] = first_ts
@@ -681,6 +707,7 @@ def _scan_once():
                         q for q in _state['pending_queue'] if q['queued_ts'] >= cutoff
                     ][-50:]
                 queued_this_scan += 1
+                _bump('cap_queued')
                 continue
             # Fire
             fill = _size_and_fire(coin, sig, equity)
@@ -692,6 +719,14 @@ def _scan_once():
             time.sleep(0.1)
         except Exception as e:
             _log(f"{coin} fire err: {e}")
+
+    # Snapshot per-scan counters into state so /confluence can show
+    # the most recent scan's gate distribution in isolation.
+    with _state_lock:
+        _state['rejects_last_scan'] = _scan_rejects
+        _state['last_scan_at'] = now_ts
+        _state['last_scan_signals'] = _scan_signals
+        _state['last_scan_fires'] = fires_this_scan
 
     _monitor_exits()
 
