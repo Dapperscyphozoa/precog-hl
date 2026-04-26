@@ -55,6 +55,50 @@ SYSTEMS = {
 }
 HTF_MULT_FOR_F6 = 16  # 4h context from 15m base
 
+# ─── Per-filter rejection counters (instrumentation, no logic change) ────
+# Diagnose the "0 fires" problem: which filter rejects most? Each scan walks
+# bars in `_recent_signals` and bumps the appropriate counter on rejection.
+# Order-sensitive: a bar that would fail f1 AND f3 is only counted in f1_fail
+# (filters return early). That's fine for "which is the dominant choke?"
+_STATS = {
+    'eval_calls':         0,
+    'short_history':      0,   # bars_15m < 100
+    'ctx_build_fail':     0,   # _build_ctx returned None
+    'bars_scanned':       0,   # total (bar × system) evals
+    'no_cross':           0,   # EMA cloud not crossed at this bar
+    'f1_fail':            0,
+    'f2_fail':            0,
+    'f3_fail':            0,
+    'f4_fail':            0,
+    'f5_fail':            0,
+    'f6_fail':            0,
+    'cross_passed_all':   0,   # cross + all 6 filters → counted as candidate
+    'no_candidate_24h':   0,   # eval_coin returned None: no system candidate in window
+    'signals_yielded':    0,   # eval_coin returned a signal dict
+    'errors':             0,
+}
+
+import sys as _sys
+def _log_err(msg):
+    """Visible error logger — replaces silent except patterns."""
+    print(f"[confluence_engine ERR] {msg}", file=_sys.stderr, flush=True)
+
+def status():
+    """Diagnostics: per-filter rejection breakdown for /confluence endpoint."""
+    s = dict(_STATS)
+    n = max(1, s['bars_scanned'])
+    s['cross_rate_pct'] = round((s['bars_scanned'] - s['no_cross']) / n * 100, 2)
+    crosses = s['bars_scanned'] - s['no_cross']
+    if crosses > 0:
+        s['f1_reject_pct_of_crosses'] = round(s['f1_fail'] / crosses * 100, 1)
+        s['f2_reject_pct_of_crosses'] = round(s['f2_fail'] / crosses * 100, 1)
+        s['f3_reject_pct_of_crosses'] = round(s['f3_fail'] / crosses * 100, 1)
+        s['f4_reject_pct_of_crosses'] = round(s['f4_fail'] / crosses * 100, 1)
+        s['f5_reject_pct_of_crosses'] = round(s['f5_fail'] / crosses * 100, 1)
+        s['f6_reject_pct_of_crosses'] = round(s['f6_fail'] / crosses * 100, 1)
+    return s
+
+
 # ─── INDICATORS ──────────────────────────────────────────────────────
 def _ema(vals, period):
     out = np.zeros(len(vals))
@@ -223,7 +267,10 @@ def _check_system(ctx, ctx_htf, sys_name):
     return sig
 
 def _recent_signals(ctx, ctx_htf, sys_name, window_s):
-    """Scan last N bars for signals. Returns list of (ts, side)."""
+    """Scan last N bars for signals. Returns list of (ts, side).
+    Bumps _STATS counters on rejection so /confluence can show which filter
+    chokes. Filter order is fixed (f1→f6); a bar dies at the first failure.
+    """
     cfg = SYSTEMS[sys_name]
     bars = ctx['bars']
     out = []
@@ -234,15 +281,30 @@ def _recent_signals(ctx, ctx_htf, sys_name, window_s):
     for i in range(30, len(bars)):
         if bars[i]['t'] < cutoff:
             continue
+        _STATS['bars_scanned'] += 1
         sig = _detect_cross(ctx, i)
-        if sig is None: continue
-        if not _f1_rb(ctx, i, sig): continue
-        if not _f2_struct(ctx, i, sig, cfg['lookback']): continue
-        if not _f3_dist(ctx, i, sig, cfg['max_pct']): continue
-        if not _f4_rsi(ctx, i, sig, cfg['buy_max'], cfg['sell_min']): continue
-        if not _f5_vol(ctx, i, cfg['vol_mult']): continue
-        if ctx_htf is not None and not _f6_htf(ctx_htf, bars[i]['t'], sig):
+        if sig is None:
+            _STATS['no_cross'] += 1
             continue
+        if not _f1_rb(ctx, i, sig):
+            _STATS['f1_fail'] += 1
+            continue
+        if not _f2_struct(ctx, i, sig, cfg['lookback']):
+            _STATS['f2_fail'] += 1
+            continue
+        if not _f3_dist(ctx, i, sig, cfg['max_pct']):
+            _STATS['f3_fail'] += 1
+            continue
+        if not _f4_rsi(ctx, i, sig, cfg['buy_max'], cfg['sell_min']):
+            _STATS['f4_fail'] += 1
+            continue
+        if not _f5_vol(ctx, i, cfg['vol_mult']):
+            _STATS['f5_fail'] += 1
+            continue
+        if ctx_htf is not None and not _f6_htf(ctx_htf, bars[i]['t'], sig):
+            _STATS['f6_fail'] += 1
+            continue
+        _STATS['cross_passed_all'] += 1
         out.append((bars[i]['t'], sig))
     return out
 
@@ -267,7 +329,10 @@ def eval_coin(coin, bars_15m, now_ts=None):
       }
     """
     if not bars_15m or len(bars_15m) < 100:
+        _STATS['eval_calls'] += 1
+        _STATS['short_history'] += 1
         return None
+    _STATS['eval_calls'] += 1
     now_ts = now_ts or int(time.time())
 
     # Build per-TF contexts
@@ -276,6 +341,7 @@ def eval_coin(coin, bars_15m, now_ts=None):
     ctx_60 = _build_ctx(bars_15m, tf_multiplier=4)
     ctx_4h = _build_ctx(bars_15m, tf_multiplier=HTF_MULT_FOR_F6)
     if ctx_15 is None or ctx_30 is None or ctx_60 is None:
+        _STATS['ctx_build_fail'] += 1
         return None
 
     # Collect recent signals per system within 24h window
@@ -304,8 +370,10 @@ def eval_coin(coin, bars_15m, now_ts=None):
             best_side = side
 
     if best_side is None:
+        _STATS['no_candidate_24h'] += 1
         return None
 
+    _STATS['signals_yielded'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {
         'coin': coin,
