@@ -424,19 +424,28 @@ def eval_coin(coin, bars_15m, now_ts=None):
         _STATS['no_candidate_24h'] += 1
         return None
 
-    # 2026-04-26: SWING-alone gate. CONFLUENCE_SWING bucket consistently the
-    # worst confluence engine (16.7% WR / 9 trades / -$0.028 in lifetime data),
-    # while SWING+SNIPER is 50% WR. SWING-alone is the failure mode — too
-    # many trend-cont signals on stale 1h bars that don't pan out short-term.
-    # Require any signal containing SWING to also have at least one other
-    # system agreeing. SWING+anything still fires; SWING-alone gets dropped.
-    # Tunable via env CONF_SWING_REQUIRE_COMBINE (default 1, set 0 to disable).
-    _swing_combine_required = (_os.environ.get('CONF_SWING_REQUIRE_COMBINE', '1') == '1')
-    if _swing_combine_required:
+    # 2026-04-26: SWING gate — require FUNDING confirmation specifically.
+    # Lifetime data showed CONFLUENCE_SWING the worst confluence engine
+    # (16.7% WR / 9 trades / -$0.028) and even CONFLUENCE_SNIPER+SWING was
+    # only 50% WR / 5 trades — not a meaningful endorsement.
+    #
+    # SWING is the slow 1h-frame trend-cont signal. Pairing it with another
+    # price-action system (SNIPER/DAY) is correlated information — both are
+    # looking at price. Pairing with FUNDING is orthogonal information
+    # (positioning/microstructure agreeing with structural reversal). Only
+    # the orthogonal combination is allowed for SWING.
+    #
+    # Drops: SWING-alone, SWING+SNIPER, SWING+DAY
+    # Allows: SWING+FUNDING (and SWING+FUNDING+anything)
+    # Unaffected: SNIPER, DAY, FUNDING individually or in any non-SWING combo
+    #
+    # Tunable via CONF_SWING_REQUIRE_FUNDING (default 1).
+    _swing_requires_funding = (_os.environ.get('CONF_SWING_REQUIRE_FUNDING', '1') == '1')
+    if _swing_requires_funding:
         _systems_set = by_side[best_side]
-        if 'SWING' in _systems_set and len(_systems_set) == 1:
-            _STATS.setdefault('swing_alone_dropped', 0)
-            _STATS['swing_alone_dropped'] += 1
+        if 'SWING' in _systems_set and 'FUNDING' not in _systems_set:
+            _STATS.setdefault('swing_no_funding_dropped', 0)
+            _STATS['swing_no_funding_dropped'] += 1
             return None
 
     _STATS['signals_yielded'] += 1
