@@ -3883,13 +3883,25 @@ def get_trades_recent():
         by_side = {}
         by_coin = {}
         by_hour = {}
+        # 2026-04-26: noise engines (RECONCILED + untagged_legacy) are
+        # bookkeeping artifacts, not strategy decisions. They still get
+        # bucketed but flagged so the user can ignore them when judging
+        # engine quality. RECONCILED = adopted from exchange or
+        # missing-close cleanup. untagged_legacy = pre-attribution-fix
+        # rows that didn't carry engine through CLOSE.
+        NOISE_ENGINES = {'RECONCILED', 'untagged_legacy'}
+        def _engine_label(raw):
+            r = (raw or '').strip()
+            if not r:
+                return 'untagged_legacy'
+            return r
         for t in trades:
             p = t.get('_pnl_f')
             if p is None: continue
             # 2026-04-26: by_side was using `direction` which is always
             # 'CLOSE' on close events — gave a single useless bucket.
             # Use `side` (BUY/SELL preserved through close) instead.
-            for bucket, key in [(by_engine, t.get('engine','?')),
+            for bucket, key in [(by_engine, _engine_label(t.get('engine'))),
                                 (by_side, t.get('side','?')),
                                 (by_coin, t.get('coin','?')),
                                 (by_hour, t['_ts'][:13])]:
@@ -3913,7 +3925,7 @@ def get_trades_recent():
                     if _mae not in (None, ''):
                         b['mae_sum'] += float(_mae); b['mae_count'] += 1
                 except Exception: pass
-        def fmt(b):
+        def fmt(b, mark_noise=False):
             # 2026-04-26: WR = w / (w+l). Breakevens excluded from denominator
             # — a breakeven is not a loss. Without this, a 1W/1L/1BE trade set
             # showed wr=33% which made the engine look much worse than it is.
@@ -3928,6 +3940,10 @@ def get_trades_recent():
                 # Cleanup raw sums from response
                 v.pop('mfe_sum', None); v.pop('mae_sum', None)
                 v.pop('mfe_count', None); v.pop('mae_count', None)
+                # Flag noise engines so the user can ignore them when judging
+                # actual strategy quality.
+                if mark_noise:
+                    v['_is_noise'] = (k in NOISE_ENGINES)
             return b
         closed = [t for t in trades if t.get('_pnl_f') is not None]
         no_pnl = [t for t in trades if t.get('_pnl_f') is None]
@@ -3935,6 +3951,11 @@ def get_trades_recent():
         losses = sum(1 for t in closed if t['_pnl_f'] < 0)
         be = sum(1 for t in closed if t['_pnl_f'] == 0)
         decided = wins + losses
+        # Real-engine subtotals (excluding RECONCILED + untagged_legacy)
+        real_closed = [t for t in closed if _engine_label(t.get('engine')) not in NOISE_ENGINES]
+        real_wins = sum(1 for t in real_closed if t['_pnl_f'] > 0)
+        real_losses = sum(1 for t in real_closed if t['_pnl_f'] < 0)
+        real_decided = real_wins + real_losses
         return jsonify({
             'window_hours': hours,
             'cutoff_utc': cutoff.isoformat(),
@@ -3946,7 +3967,14 @@ def get_trades_recent():
             'breakeven': be,
             'overall_wr_pct': round(wins/decided*100, 1) if decided else None,
             'total_pnl': round(sum(t['_pnl_f'] for t in closed), 4),
-            'by_engine': fmt(by_engine),
+            # Strategy quality view — RECONCILED/untagged excluded so engine
+            # judgement isn't polluted by bookkeeping artifacts.
+            'real_engines_wins': real_wins,
+            'real_engines_losses': real_losses,
+            'real_engines_wr_pct': round(real_wins/real_decided*100, 1) if real_decided else None,
+            'real_engines_pnl': round(sum(t['_pnl_f'] for t in real_closed), 4),
+            'noise_engines': sorted(list(NOISE_ENGINES)),
+            'by_engine': fmt(by_engine, mark_noise=True),
             'by_side': fmt(by_side),
             'by_coin': fmt(by_coin),
             'by_hour': fmt(by_hour),

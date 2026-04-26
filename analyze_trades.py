@@ -115,7 +115,7 @@ def load_trades(path):
                 entries[tid] = {
                     'trade_id': tid,
                     'coin': r.get('coin', ''),
-                    'engine': r.get('engine', '') or 'UNKNOWN',
+                    'engine': r.get('engine', '') or 'untagged_legacy',
                     'side': r.get('side', ''),
                     'entry_price': to_float(r.get('entry_price')),
                     'sl_pct': to_float(r.get('sl_pct')),
@@ -273,6 +273,20 @@ def header_summary(trades):
     print("=" * 64)
 
 
+# RECONCILED + untagged_legacy = bookkeeping artifacts, not strategy decisions.
+# Excluded from strategy-quality analysis. Reported separately.
+NOISE_ENGINES = {'RECONCILED', 'untagged_legacy', 'UNKNOWN', ''}
+
+def _engine_label(raw):
+    r = (raw or '').strip()
+    if not r:
+        return 'untagged_legacy'
+    return r
+
+def is_noise_engine(name):
+    return _engine_label(name) in NOISE_ENGINES
+
+
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else '/var/data/trades.csv'
     trades = load_trades(path)
@@ -280,16 +294,24 @@ def main():
         print(f"No completed trades in {path}", file=sys.stderr)
         sys.exit(0 if os.path.exists(path) else 1)
 
-    header_summary(trades)
-    render('by_engine', bucket_stats(trades, lambda t: t.get('engine') or 'UNKNOWN'))
-    render('by_coin', bucket_stats(trades, lambda t: t.get('coin') or '?'))
-    render('by_side', bucket_stats(trades, lambda t: t.get('side') or '?'))
-    render('by_close_reason', bucket_stats(trades, lambda t: t.get('close_reason') or '?'))
-    render('by_hold_bucket', bucket_stats(trades, lambda t: hold_bucket(t.get('hold_sec'))))
-    render('by_hour_utc', bucket_stats(trades, hour_of_day))
-    render('by_expected_edge_band',
-           bucket_stats(trades, lambda t: edge_bucket(t.get('expected_edge_at_entry'))))
-    render('by_regime', bucket_stats(trades, lambda t: t.get('regime') or 'unknown'))
+    # 2026-04-26: split real-engine signals from bookkeeping noise so
+    # engine quality isn't polluted by reconciler/untagged trades.
+    real_trades = [t for t in trades if not is_noise_engine(t.get('engine'))]
+    noise_trades = [t for t in trades if is_noise_engine(t.get('engine'))]
+
+    print("\n" + "█" * 64)
+    print("  REAL ENGINES — strategy quality (excludes RECONCILED + untagged)")
+    print("█" * 64)
+    header_summary(real_trades)
+    render('by_engine (real)', bucket_stats(real_trades, lambda t: _engine_label(t.get('engine'))))
+    render('by_coin (real)', bucket_stats(real_trades, lambda t: t.get('coin') or '?'))
+    render('by_side (real)', bucket_stats(real_trades, lambda t: t.get('side') or '?'))
+    render('by_close_reason (real)', bucket_stats(real_trades, lambda t: t.get('close_reason') or '?'))
+    render('by_hold_bucket (real)', bucket_stats(real_trades, lambda t: hold_bucket(t.get('hold_sec'))))
+    render('by_hour_utc (real)', bucket_stats(real_trades, hour_of_day))
+    render('by_expected_edge_band (real)',
+           bucket_stats(real_trades, lambda t: edge_bucket(t.get('expected_edge_at_entry'))))
+    render('by_regime (real)', bucket_stats(real_trades, lambda t: t.get('regime') or 'unknown'))
 
     # MFE/MAE excursion analysis — distinguishes "good entry / bad exit"
     # from "bad entry". Critical diagnostic per user's refinement plan.
@@ -315,7 +337,18 @@ def main():
         if pnl > 0:
             return 'clean_win'
         return 'clean_loss'
-    render('by_excursion_pattern', bucket_stats(trades, _excursion_bucket))
+    render('by_excursion_pattern (real)', bucket_stats(real_trades, _excursion_bucket))
+
+    if noise_trades:
+        print("\n" + "─" * 64)
+        print(f"  NOISE / BOOKKEEPING ({len(noise_trades)} trades) — RECONCILED + untagged_legacy")
+        print(f"  These are reconciler-driven closes, adopted positions, and")
+        print(f"  pre-attribution-fix legacy rows. NOT strategy decisions.")
+        print(f"  PnL counts toward equity but not toward engine evaluation.")
+        print("─" * 64)
+        render('by_engine (noise)', bucket_stats(noise_trades, lambda t: _engine_label(t.get('engine'))))
+        noise_pnl = sum(t['pnl'] for t in noise_trades if t.get('pnl') is not None)
+        print(f"\n  noise total PnL: {noise_pnl:.4f}  (informational — don't use to judge engines)\n")
 
 
 if __name__ == '__main__':
