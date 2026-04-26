@@ -340,6 +340,87 @@ def _summary_dict(trades):
     }
 
 
+def tp_optimization(trades, sl_pct=0.015, fee_round_trip=0.0009, slip=0.001):
+    """Backtest hypothetical TPs against recorded MFE distribution.
+
+    For each TP threshold T:
+      - WIN: trade if mfe_pct >= T → realized = T - fees - slip
+      - SL : trade if mae_pct <= -sl_pct → realized = -sl_pct - fees - slip
+      - OTHER: closed early via no_progress, profit_lock, etc → use actual pnl_pct
+        (which we approximate from realized pnl / notional)
+
+    Conservative ordering: assume MAE came first if both MFE and MAE could
+    have hit thresholds. So SL takes precedence over TP when a trade had
+    both extreme MFE and extreme MAE.
+
+    Notional defaults to $11 (current FORCE_NOTIONAL). Effective per-trade
+    profit at TP T = (T - fees - slip) * notional. SL = (-sl_pct - fees - slip) * notional.
+    """
+    notional = 11.0
+    thresholds = [0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05, 0.06, 0.08]
+    results = {}
+    # Filter to trades with usable MFE/MAE telemetry
+    usable = [t for t in trades if t.get('mfe_pct') is not None or t.get('mae_pct') is not None]
+    n = len(usable)
+    if n == 0:
+        return {'note': 'no trades with MFE/MAE telemetry yet', 'samples': 0}
+
+    for T in thresholds:
+        wins = 0
+        sl_hits = 0
+        other = 0
+        sum_pnl_usd = 0.0
+        for t in usable:
+            mfe = t.get('mfe_pct') or 0.0
+            mae = t.get('mae_pct') or 0.0
+            # Assume MAE first if it would have triggered SL
+            if mae <= -sl_pct:
+                sl_hits += 1
+                sum_pnl_usd += (-sl_pct - fee_round_trip - slip) * notional
+            elif mfe >= T:
+                wins += 1
+                sum_pnl_usd += (T - fee_round_trip - slip) * notional
+            else:
+                other += 1
+                # Use actual realized pnl for non-triggered trades
+                actual = t.get('pnl')
+                if actual is not None:
+                    # actual is in USD already; assume it represents the trade's realized
+                    sum_pnl_usd += float(actual)
+                # else contribute 0 (unknown)
+        decided = wins + sl_hits
+        wr = (wins / decided) if decided else None
+        results[f"TP_{int(T*1000)}bp"] = {
+            'tp_pct': round(T * 100, 2),
+            'wins_at_tp': wins,
+            'sl_hits': sl_hits,
+            'other_exits': other,
+            'projected_wr_pct': round(wr * 100, 1) if wr is not None else None,
+            'projected_total_pnl_usd': round(sum_pnl_usd, 4),
+            'projected_pnl_per_trade_usd': round(sum_pnl_usd / n, 4) if n else 0.0,
+        }
+
+    # Also: raw MFE distribution — what % of trades reached each level?
+    mfe_dist = {}
+    for T in thresholds:
+        reached = sum(1 for t in usable if (t.get('mfe_pct') or 0) >= T)
+        mfe_dist[f"reached_{int(T*1000)}bp"] = {
+            'count': reached,
+            'pct_of_telemetered': round(reached / n * 100, 1) if n else 0.0,
+        }
+
+    return {
+        'samples': n,
+        'sl_pct_assumed': sl_pct,
+        'fee_round_trip': fee_round_trip,
+        'slip_assumed': slip,
+        'notional_assumed_usd': notional,
+        'mfe_reach_distribution': mfe_dist,
+        'tp_threshold_backtest': results,
+        'note': 'projected_total_pnl_usd assumes SL takes precedence when both MAE and MFE would have triggered',
+    }
+
+
 def analyze_to_dict(path='/var/data/trades.csv', since_ts=None):
     """Programmatic entrypoint — returns the same analysis the CLI prints,
     structured as a dict ready for JSON serialization.
@@ -371,6 +452,11 @@ def analyze_to_dict(path='/var/data/trades.csv', since_ts=None):
         'real_by_regime':         bucket_stats(real_trades, lambda t: t.get('regime') or 'unknown'),
         'real_by_excursion_pattern': bucket_stats(real_trades, _excursion_bucket),
         'noise_by_engine':        bucket_stats(noise_trades, lambda t: _engine_label(t.get('engine'))),
+        # 2026-04-26: TP optimization backtest. Uses recorded MFE/MAE
+        # distribution to project "what would total PnL look like at
+        # TP=2%, 3%, 4%, 5%, 6%, etc?" Conservative — SL takes precedence
+        # when both extremes would have triggered.
+        'tp_optimization': tp_optimization(real_trades),
     }
 
 
