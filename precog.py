@@ -3890,28 +3890,37 @@ def get_trades_recent():
                                 (by_side, t.get('direction','?')),
                                 (by_coin, t.get('coin','?')),
                                 (by_hour, t['_ts'][:13])]:
-                b = bucket.setdefault(key, {'n':0,'w':0,'l':0,'pnl':0.0})
+                b = bucket.setdefault(key, {'n':0,'w':0,'l':0,'b':0,'pnl':0.0})
                 b['n'] += 1
                 if p > 0: b['w'] += 1
                 elif p < 0: b['l'] += 1
+                else: b['b'] += 1   # exact 0 = breakeven, distinct from null/unknown
                 b['pnl'] += p
         def fmt(b):
-            for k,v in b.items():
-                v['wr'] = round(v['w']/max(1,v['n'])*100, 1)
+            # 2026-04-26: WR = w / (w+l). Breakevens excluded from denominator
+            # — a breakeven is not a loss. Without this, a 1W/1L/1BE trade set
+            # showed wr=33% which made the engine look much worse than it is.
+            for k, v in b.items():
+                decided = v['w'] + v['l']
+                v['wr'] = round(v['w']/decided*100, 1) if decided else None
                 v['pnl'] = round(v['pnl'], 4)
             return b
         closed = [t for t in trades if t.get('_pnl_f') is not None]
         no_pnl = [t for t in trades if t.get('_pnl_f') is None]
+        wins = sum(1 for t in closed if t['_pnl_f'] > 0)
+        losses = sum(1 for t in closed if t['_pnl_f'] < 0)
+        be = sum(1 for t in closed if t['_pnl_f'] == 0)
+        decided = wins + losses
         return jsonify({
             'window_hours': hours,
             'cutoff_utc': cutoff.isoformat(),
             'total_logged': len(trades),
             'closed_with_pnl': len(closed),
             'no_pnl_recorded': len(no_pnl),
-            'wins': sum(1 for t in closed if t['_pnl_f'] > 0),
-            'losses': sum(1 for t in closed if t['_pnl_f'] < 0),
-            'breakeven': sum(1 for t in closed if t['_pnl_f'] == 0),
-            'overall_wr_pct': round(sum(1 for t in closed if t['_pnl_f'] > 0)/max(1,len(closed))*100, 1),
+            'wins': wins,
+            'losses': losses,
+            'breakeven': be,
+            'overall_wr_pct': round(wins/decided*100, 1) if decided else None,
             'total_pnl': round(sum(t['_pnl_f'] for t in closed), 4),
             'by_engine': fmt(by_engine),
             'by_side': fmt(by_side),
