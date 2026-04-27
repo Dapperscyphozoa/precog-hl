@@ -42,6 +42,15 @@ import os as _os_minsys
 CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '2'))
 CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
 
+# 2026-04-27: Event-based systems that may fire alone, bypassing CONF_MIN_SYS
+# and CONF_MIN_DOMAINS. These are DISCRETE EVENTS where the event itself IS
+# the trade thesis — requiring confirmation from price-action or other state
+# is structurally backwards. Cascade IS the signal. Wall pull IS the signal.
+#
+# Continuous-state systems (CVD, OI, FUND_ARB, NEWS) describe ongoing
+# conditions and DO need confirmation — they remain combine-required.
+EVENT_ALONE_ALLOWED = {'LIQ', 'SPOOF', 'WHALE', 'WALL_ABS'}
+
 # Domain map — groups correlated inputs.
 # Only cross-domain agreement counts as TRUE confluence.
 SYSTEM_DOMAIN = {
@@ -582,37 +591,55 @@ def eval_coin(coin, bars_15m, now_ts=None):
             if ts > latest_ts_by_side[side]:
                 latest_ts_by_side[side] = ts
 
-    # Prefer side with most systems agreeing
+    # Prefer side with most systems agreeing.
+    # 2026-04-27: also pick best side even if n=1 — event-alone fires
+    # bypass CONF_MIN_SYS below, so we need the side info regardless.
     best_side = None
     best_n = 0
     for side in ('BUY', 'SELL'):
         n = len(by_side[side])
-        if n >= CONF_MIN_SYS and n > best_n:
+        if n > best_n:
             best_n = n
             best_side = side
 
-    if best_side is None:
+    if best_side is None or best_n == 0:
         _STATS['no_candidate_24h'] += 1
         return None
 
-    # 2026-04-27: DOMAIN-COVERAGE GATE — true high-conviction filter.
-    # CONF_MIN_SYS counts SYSTEMS, but two systems in the same data domain
-    # are correlated, not independent. Real confluence = signals from
-    # different DATA DOMAINS agreeing.
-    #
-    # Examples that previously passed CONF_MIN_SYS=2 but are LOW-conviction:
-    #   SNIPER + DAY      (both price_action — same data, different timeframes)
-    #   OI + CVD          (both position_count — measuring the same thing)
-    #   LIQ + SPOOF       (both order_flow_event — correlated within domain)
-    #
-    # Now require 2+ DOMAINS in the agreeing system set. This is the
-    # actual "orthogonal confluence" filter the user has been pushing for.
     _systems_set = by_side[best_side]
     _domains_in_set = {SYSTEM_DOMAIN.get(s, '_unknown') for s in _systems_set}
-    if len(_domains_in_set) < CONF_MIN_DOMAINS:
-        _STATS.setdefault('low_domain_dropped', 0)
-        _STATS['low_domain_dropped'] += 1
-        return None
+
+    # 2026-04-27: EVENT-ALONE BYPASS.
+    # If the agreeing-side set is exactly ONE event-based system (LIQ, SPOOF,
+    # WHALE, WALL_ABS), let it fire alone — bypass CONF_MIN_SYS and
+    # CONF_MIN_DOMAINS. The event itself is the trade thesis; requiring
+    # corroboration from a different timeframe or different domain misses
+    # the point. Cascade IS the signal.
+    _is_event_alone = (best_n == 1 and len(_systems_set & EVENT_ALONE_ALLOWED) == 1)
+
+    if not _is_event_alone:
+        # Standard gate: require CONF_MIN_SYS systems agreeing
+        if best_n < CONF_MIN_SYS:
+            _STATS.setdefault('below_min_sys', 0)
+            _STATS['below_min_sys'] += 1
+            return None
+
+        # 2026-04-27: DOMAIN-COVERAGE GATE — true high-conviction filter.
+        # CONF_MIN_SYS counts SYSTEMS, but two systems in the same data domain
+        # are correlated, not independent. Real confluence = signals from
+        # different DATA DOMAINS agreeing.
+        #
+        # Examples that previously passed CONF_MIN_SYS=2 but are LOW-conviction:
+        #   SNIPER + DAY      (both price_action — same data, different timeframes)
+        #   OI + CVD          (both position_count — measuring the same thing)
+        #   LIQ + SPOOF       (both order_flow_event — correlated within domain)
+        #
+        # Now require 2+ DOMAINS in the agreeing system set. This is the
+        # actual "orthogonal confluence" filter the user has been pushing for.
+        if len(_domains_in_set) < CONF_MIN_DOMAINS:
+            _STATS.setdefault('low_domain_dropped', 0)
+            _STATS['low_domain_dropped'] += 1
+            return None
 
     # 2026-04-26: SWING gate — require FUNDING confirmation specifically.
     # Lifetime data showed CONFLUENCE_SWING the worst confluence engine
