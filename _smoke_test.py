@@ -39,6 +39,7 @@ CORE_MODULES = [
     'percoin_configs',
     'shadow_trades',
     'trade_ledger',
+    'profit_mgmt',
     'confluence_engine',
     # 'precog' and 'confluence_worker' have side effects on import
     # (start threads, open ports). Don't smoke-test those — verify
