@@ -1049,6 +1049,9 @@ async function loadConfluence() {
             <div class="metric-cell"><div class="metric-val">${pf}/${pa}</div><div class="metric-lbl">Filled/Attempts</div></div>
             <div class="metric-cell"><div class="metric-val">${pn}</div><div class="metric-lbl">No-Fill</div></div>
             <div class="metric-cell"><div class="metric-val">${pe}</div><div class="metric-lbl">Errors</div></div>
+            <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${d.partial_tp_fires||0}</div><div class="metric-lbl">Partial-TP</div></div>
+            <div class="metric-cell"><div class="metric-val">${d.stale_flat_marked||0}/${d.stale_flat_rotated||0}</div><div class="metric-lbl">Stale Mark/Rot</div></div>
+            <div class="metric-cell"><div class="metric-val" style="color:var(--cyan)">${d.engine_stats?.signals_yielded||0}</div><div class="metric-lbl">Sigs/Scan</div></div>
         `;
 
         // Open positions table
@@ -1100,13 +1103,30 @@ async function loadConfluence() {
         const rl = d.rejects_last_scan || {};
         const nonzero = Object.entries(rl).filter(([k,v]) => v > 0);
         const rejDiv = document.getElementById('confluence-rejects');
+        let rejHtml = '';
         if (nonzero.length > 0) {
             const total = nonzero.reduce((s,[,v]) => s+v, 0);
-            rejDiv.innerHTML = '// last scan rejects (' + total + ' total): ' +
+            rejHtml = '// last scan rejects (' + total + ' total): ' +
                 nonzero.map(([k,v]) => `<span style="color:var(--blood)">${k}=${v}</span>`).join(' · ');
         } else {
-            rejDiv.innerHTML = '// last scan: no rejects';
+            rejHtml = '// last scan: no rejects';
         }
+        // Engine gate drops (lifetime — shows the new combine-required filters working)
+        const es = d.engine_stats || {};
+        const gateDrops = [];
+        if (es.swing_no_funding_dropped) gateDrops.push(`swing_no_funding=${es.swing_no_funding_dropped}`);
+        if (es.day_alone_dropped) gateDrops.push(`day_alone=${es.day_alone_dropped}`);
+        if (es.funding_alone_dropped) gateDrops.push(`funding_alone=${es.funding_alone_dropped}`);
+        if (gateDrops.length > 0) {
+            rejHtml += `<br>// gate drops (lifetime): <span style="color:var(--oxide)">${gateDrops.join(' · ')}</span>`;
+        }
+        // Shadow tier (next-tier candidates evaluated without firing)
+        const shadowSize = d.shadow_universe_size;
+        const shadowSigs = d.shadow_signals_last_scan;
+        if (shadowSize !== undefined) {
+            rejHtml += `<br>// shadow tier: <span style="color:var(--cyan)">${shadowSize||0} candidates · ${shadowSigs||0} signals last scan</span> → <a href="/shadow" style="color:var(--cyan)" target="_blank">/shadow</a>`;
+        }
+        rejDiv.innerHTML = rejHtml;
     } catch(e) {
         console.error('confluence load err', e);
         document.getElementById('conf-meta').textContent = 'fetch failed';
