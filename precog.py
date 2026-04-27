@@ -979,6 +979,95 @@ def _confirm_5m(coin, side):
     except Exception:
         return True  # fail-soft, allow
 
+
+# 2026-04-27: orthogonal-domain confirmation gate for System A signals.
+# System A engines (PIVOT, BB_REJ, etc.) fire alone — no confluence requirement.
+# That's structural noise: a pure price-action signal can be wrong even when
+# the technical pattern looks right. Require ≥1 orthogonal-domain agreement
+# from System B's stack (BTC_WALL, OBI, CVD, WHALE, LIQ) before letting the
+# System A fire reach the dispatcher.
+#
+# Effectively makes System A behave more like System B: signals only fire
+# when independent data domains corroborate.
+#
+# Tunable:
+#   SA_ORTHOGONAL_MIN_CONFIRMS — minimum confirms (default 1)
+#   SA_ORTHOGONAL_GATE_ENABLED — set 0 to disable
+_SA_ORTHO_GATE_ENABLED = os.environ.get('SA_ORTHOGONAL_GATE_ENABLED', '1') == '1'
+def _sa_orthogonal_min():
+    try:
+        return int(os.environ.get('SA_ORTHOGONAL_MIN_CONFIRMS', '1'))
+    except Exception:
+        return 1
+
+
+def _orthogonal_confirms(coin, side):
+    """Count orthogonal-domain signals agreeing with `side` for `coin`.
+
+    Returns int — number of independent domains that confirm. Used by
+    System A signal-quality gate. Each domain check is fail-soft.
+
+    Domains checked:
+      macro_structure  — BTC near support (for BUY) / resistance (for SELL)
+      order_book       — OBI imbalance signal
+      position_count   — CVD signal
+      whale_flow       — large-print bias
+      order_flow_event — recent LIQ cascade fade direction
+    """
+    if not coin or side not in ('BUY', 'SELL'):
+        return 0
+    confirms = 0
+
+    # macro_structure (BTC walls)
+    try:
+        import btc_macro as _bm
+        s = _bm.near_wall_summary()
+        if side == 'BUY' and s.get('near_support') and not s.get('recent_break_down'):
+            confirms += 1
+        elif side == 'SELL' and s.get('near_resistance') and not s.get('recent_break_up'):
+            confirms += 1
+    except Exception:
+        pass
+
+    # order_book (OBI)
+    try:
+        import orderbook_ws as _ob
+        sig = _ob.imbalance_signal(coin)
+        if sig == side:
+            confirms += 1
+    except Exception:
+        pass
+
+    # position_count (CVD)
+    try:
+        import cvd_ws as _cvd
+        sig = _cvd.cvd_signal(coin)
+        if sig == side:
+            confirms += 1
+    except Exception:
+        pass
+
+    # whale_flow
+    try:
+        import whale_filter as _wf
+        if hasattr(_wf, 'whale_signal'):
+            sig = _wf.whale_signal(coin)
+            if sig == side:
+                confirms += 1
+    except Exception:
+        pass
+
+    # order_flow_event (LIQ cascade fade)
+    try:
+        import liquidation_ws as _lq
+        casc = _lq.get_cascade(coin, max_age_sec=300) if hasattr(_lq, 'get_cascade') else None
+        if casc and casc.get('fade_direction') == side:
+            confirms += 1
+    except Exception:
+        pass
+
+    return confirms
+
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
     import mtf_context as _mtf
@@ -8624,6 +8713,21 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     if sig and signal_engine and _engine_disabled(signal_engine, coin=coin):
         log(f"{coin} {sig} {signal_engine} dropped: engine_disabled (manual/auto-pause/coin-pair)")
         sig = None
+
+    # 2026-04-27: orthogonal-domain confirmation gate (System A signal quality).
+    # Require ≥N independent-domain agreements before firing. Catches bare
+    # price-action signals that lack microstructure/macro confirmation —
+    # those are noise. Mirrors System B's confluence requirement.
+    if sig and signal_engine and _SA_ORTHO_GATE_ENABLED and coin not in ('BTC', 'ETH'):
+        try:
+            _confirms = _orthogonal_confirms(coin, sig)
+            _need = _sa_orthogonal_min()
+            if _confirms < _need:
+                log(f"{coin} {sig} {signal_engine} dropped: orthogonal_confirms={_confirms}<{_need}")
+                sig = None
+                signal_engine = None
+        except Exception:
+            pass  # fail-open on confirmation system error
         signal_engine = None
 
     # 2026-04-27: 5m confirmation gate. Drop signal if recent 5m momentum
