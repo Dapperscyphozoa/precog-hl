@@ -756,6 +756,113 @@ def engine_rolling_wr(engine, n_window=5, hours=24.0):
     return (wins / decided * 100.0), decided, recent[0][0]
 
 
+def system_aggregate(system='a', hours=12.0):
+    """Aggregate trade stats for System A (precog engines) or System B
+    (confluence engines = engine name starts with 'CONFLUENCE_').
+
+    Returns dict shape mirroring /confluence response so System A and
+    System B can be displayed uniformly:
+      {
+        'system': 'a' | 'b',
+        'window_hours': float,
+        'closed_count': int,
+        'wins': int, 'losses': int, 'breakevens': int,
+        'wr_pct': float | None,
+        'total_pnl_usd': float, 'total_pnl_pct': float,
+        'avg_win_usd': float, 'avg_loss_usd': float,
+        'by_engine': { engine: {n, w, l, wr_pct, pnl_usd} },
+        'by_coin': { coin: {n, w, l, wr_pct, pnl_usd} },
+      }
+    """
+    cutoff = time.time() - hours * 3600.0
+    closes = []
+    with _LOCK:
+        for tid, row in _INDEX['by_trade_id'].items():
+            if row.get('event_type') != 'CLOSE':
+                continue
+            ts_iso = row.get('timestamp', '')
+            if not ts_iso:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if ts < cutoff:
+                continue
+            engine = (row.get('engine') or '').strip()
+            is_b = engine.startswith('CONFLUENCE_')
+            if (system == 'b' and not is_b) or (system == 'a' and (is_b or not engine)):
+                continue
+            try:
+                pnl_raw = row.get('pnl', '')
+                pnl = float(pnl_raw) if pnl_raw not in (None, '') else None
+            except (TypeError, ValueError):
+                pnl = None
+            closes.append({
+                'ts': ts,
+                'engine': engine,
+                'coin': (row.get('coin') or '').upper(),
+                'pnl': pnl,
+            })
+
+    n_closed = len(closes)
+    decided = [c for c in closes if c['pnl'] is not None]
+    wins = [c for c in decided if c['pnl'] > 0]
+    losses = [c for c in decided if c['pnl'] < 0]
+    breakevens = [c for c in decided if c['pnl'] == 0]
+    n_dec = len(wins) + len(losses)
+
+    total_usd = sum(c['pnl'] for c in decided)
+    avg_win = (sum(c['pnl'] for c in wins) / len(wins)) if wins else 0.0
+    avg_loss = (sum(c['pnl'] for c in losses) / len(losses)) if losses else 0.0
+    wr_pct = (len(wins) / n_dec * 100) if n_dec else None
+
+    by_engine = {}
+    for c in closes:
+        e = c['engine'] or '_untagged'
+        by_engine.setdefault(e, {'n': 0, 'w': 0, 'l': 0, 'b': 0, 'pnl_usd': 0.0})
+        by_engine[e]['n'] += 1
+        if c['pnl'] is not None:
+            by_engine[e]['pnl_usd'] += c['pnl']
+            if c['pnl'] > 0: by_engine[e]['w'] += 1
+            elif c['pnl'] < 0: by_engine[e]['l'] += 1
+            else: by_engine[e]['b'] += 1
+    for e, v in by_engine.items():
+        dec = v['w'] + v['l']
+        v['wr_pct'] = round(v['w'] / dec * 100, 1) if dec else None
+        v['pnl_usd'] = round(v['pnl_usd'], 4)
+
+    by_coin = {}
+    for c in closes:
+        ck = c['coin'] or '_unknown'
+        by_coin.setdefault(ck, {'n': 0, 'w': 0, 'l': 0, 'b': 0, 'pnl_usd': 0.0})
+        by_coin[ck]['n'] += 1
+        if c['pnl'] is not None:
+            by_coin[ck]['pnl_usd'] += c['pnl']
+            if c['pnl'] > 0: by_coin[ck]['w'] += 1
+            elif c['pnl'] < 0: by_coin[ck]['l'] += 1
+            else: by_coin[ck]['b'] += 1
+    for ck, v in by_coin.items():
+        dec = v['w'] + v['l']
+        v['wr_pct'] = round(v['w'] / dec * 100, 1) if dec else None
+        v['pnl_usd'] = round(v['pnl_usd'], 4)
+
+    return {
+        'system': system,
+        'window_hours': hours,
+        'closed_count': n_closed,
+        'wins': len(wins),
+        'losses': len(losses),
+        'breakevens': len(breakevens),
+        'wr_pct': round(wr_pct, 1) if wr_pct is not None else None,
+        'total_pnl_usd': round(total_usd, 4),
+        'avg_win_usd': round(avg_win, 4),
+        'avg_loss_usd': round(avg_loss, 4),
+        'by_engine': by_engine,
+        'by_coin': by_coin,
+    }
+
+
 def coin_engine_rolling_wr(coin, engine, n_window=5, hours=24.0):
     """Rolling WR for a (coin, engine) pair. Returns (wr_pct, n_decided,
     last_close_ts). Used by per-coin x per-engine gate to block fires on
