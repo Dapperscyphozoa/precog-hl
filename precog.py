@@ -7353,67 +7353,93 @@ def run_profit_management(state, live_positions):
     #   - In profit (MFE >= 0.5%): tighten SL to entry+0.1% (lock BE+)
     #   - Underwater: force close (cap loss before SL hit)
     # Idempotent via pos_state['btc_macro_locked'] flag.
-    if os.environ.get('BTC_MACRO_POSMGMT_ENABLED', '1') == '1':
+    # 2026-04-27 (later): MOVED to run_btc_macro_position_mgmt — caller
+    # must invoke separately. Was dead code here when profit_mgmt module
+    # is missing (function early-returns before reaching this block).
+
+
+def run_btc_macro_position_mgmt(state, live_positions):
+    """Independent per-tick hook for BTC-wall-aware position management.
+
+    Distinct from run_profit_management (which depends on profit_mgmt
+    module that may not be present). This function only depends on
+    btc_macro + modify_sl_to_breakeven + close_one_position — all
+    in-process.
+
+    For each open position OPPOSING a nearby BTC wall:
+      - In profit (MFE ≥0.5%): tighten SL to entry+0.1% (lock BE+)
+      - Underwater (MFE ≤0%): force close (cap loss before SL hit)
+    Idempotent via pos_state['btc_macro_locked'] flag.
+    Tunable via BTC_MACRO_POSMGMT_ENABLED (default 1).
+    """
+    if os.environ.get('BTC_MACRO_POSMGMT_ENABLED', '1') != '1':
+        return
+    try:
+        import btc_macro as _bm
+        _summary = _bm.near_wall_summary()
+    except Exception:
+        return
+
+    _opposing_side_for_position = None
+    if _summary.get('near_resistance') and not _summary.get('recent_break_up'):
+        _opposing_side_for_position = 'BUY'   # BUYs oppose sell-wall
+    elif _summary.get('near_support') and not _summary.get('recent_break_down'):
+        _opposing_side_for_position = 'SELL'  # SELLs oppose buy-wall
+
+    if not _opposing_side_for_position:
+        return
+
+    _wall_info = (_summary.get('resistance_wall')
+                  if _opposing_side_for_position == 'BUY'
+                  else _summary.get('support_wall'))
+    _wall_px = (_wall_info or {}).get('price', 0)
+    _wall_usd = (_wall_info or {}).get('usd', 0)
+
+    for coin, lp in live_positions.items():
+        if coin in ('BTC', 'ETH'):
+            continue
+        pos_state = state.get('positions', {}).get(coin, {})
+        if not pos_state or pos_state.get('btc_macro_locked'):
+            continue
+        is_long = lp.get('size', 0) > 0
+        pos_side = 'BUY' if is_long else 'SELL'
+        if pos_side != _opposing_side_for_position:
+            continue
+
         try:
-            import btc_macro as _bm
-            _summary = _bm.near_wall_summary()
-            _opposing_side_for_position = None
-            if _summary.get('near_resistance') and not _summary.get('recent_break_up'):
-                _opposing_side_for_position = 'BUY'   # BUYs oppose sell-wall
-            elif _summary.get('near_support') and not _summary.get('recent_break_down'):
-                _opposing_side_for_position = 'SELL'  # SELLs oppose buy-wall
+            entry = float(pos_state.get('entry', 0))
+        except (TypeError, ValueError):
+            continue
+        if entry <= 0:
+            continue
+        mark = get_mid(coin)
+        if not mark or mark <= 0:
+            continue
+        fav_pct = ((mark - entry) / entry) if is_long else ((entry - mark) / entry)
+        size_abs = abs(lp.get('size', 0))
+        if size_abs <= 0:
+            continue
 
-            if _opposing_side_for_position:
-                _wall_info = (_summary.get('resistance_wall')
-                              if _opposing_side_for_position == 'BUY'
-                              else _summary.get('support_wall'))
-                _wall_px = (_wall_info or {}).get('price', 0)
-                _wall_usd = (_wall_info or {}).get('usd', 0)
-
-                for coin, lp in live_positions.items():
-                    if coin in ('BTC', 'ETH'):
-                        continue
-                    pos_state = state.get('positions', {}).get(coin, {})
-                    if not pos_state or pos_state.get('btc_macro_locked'):
-                        continue
-                    is_long = lp['size'] > 0
-                    pos_side = 'BUY' if is_long else 'SELL'
-                    if pos_side != _opposing_side_for_position:
-                        continue
-
-                    entry = float(pos_state.get('entry', 0))
-                    if entry <= 0:
-                        continue
-                    mark = get_mid(coin)
-                    if not mark or mark <= 0:
-                        continue
-                    fav_pct = ((mark - entry) / entry) if is_long else ((entry - mark) / entry)
-                    size_abs = abs(lp.get('size', 0))
-                    if size_abs <= 0:
-                        continue
-
-                    if fav_pct >= 0.005:
-                        # In profit ≥0.5% — tighten SL to BE+0.1%
-                        try:
-                            new_sl = modify_sl_to_breakeven(coin, entry, size_abs, is_long, buffer_pct=0.001)
-                            if new_sl:
-                                pos_state['btc_macro_locked'] = True
-                                pos_state['sl_pct'] = 0.001
-                                log(f"{coin} {pos_side} BTC-macro tighten: SL→BE+0.1% "
-                                    f"(BTC at ${_wall_px:.0f} ${_wall_usd/1e6:.1f}M, mfe={fav_pct*100:.2f}%)")
-                        except Exception as _e_sl:
-                            log(f"{coin} BTC-macro SL tighten err: {_e_sl}")
-                    elif fav_pct <= 0:
-                        # Underwater — force close before regime move plays out
-                        try:
-                            log(f"{coin} {pos_side} BTC-macro force-close: underwater "
-                                f"(fav={fav_pct*100:.2f}%, BTC at ${_wall_px:.0f} ${_wall_usd/1e6:.1f}M)")
-                            pos_state['btc_macro_locked'] = True
-                            close_one_position(coin)
-                        except Exception as _e_fc:
-                            log(f"{coin} BTC-macro force-close err: {_e_fc}")
-        except Exception as _e_bm:
-            pass
+        if fav_pct >= 0.005:
+            # In profit ≥0.5% — tighten SL to BE+0.1%
+            try:
+                new_sl = modify_sl_to_breakeven(coin, entry, size_abs, is_long, buffer_pct=0.001)
+                if new_sl:
+                    pos_state['btc_macro_locked'] = True
+                    pos_state['sl_pct'] = 0.001
+                    log(f"{coin} {pos_side} BTC-macro tighten: SL→BE+0.1% "
+                        f"(BTC at ${_wall_px:.0f} ${_wall_usd/1e6:.1f}M, mfe={fav_pct*100:.2f}%)")
+            except Exception as _e_sl:
+                log(f"{coin} BTC-macro SL tighten err: {_e_sl}")
+        elif fav_pct <= 0:
+            # Underwater — force close before regime move plays out
+            try:
+                log(f"{coin} {pos_side} BTC-macro force-close: underwater "
+                    f"(fav={fav_pct*100:.2f}%, BTC at ${_wall_px:.0f} ${_wall_usd/1e6:.1f}M)")
+                pos_state['btc_macro_locked'] = True
+                close_one_position(coin)
+            except Exception as _e_fc:
+                log(f"{coin} BTC-macro force-close err: {_e_fc}")
 
 
 def close(coin, state_ref=None, reason=None):
@@ -10037,6 +10063,14 @@ def main():
                 run_profit_management(state, live_positions)
             except Exception as _pme:
                 log(f"profit_mgmt loop err: {_pme}")
+
+            # 2026-04-27: BTC macro position management — independent of
+            # profit_mgmt (which may be missing). Tightens SL or force-closes
+            # positions opposing nearby BTC walls.
+            try:
+                run_btc_macro_position_mgmt(state, live_positions)
+            except Exception as _bme:
+                log(f"btc_macro_posmgmt err: {_bme}")
 
             # DUST-SWEEP — DISABLED 2026-04-22.
             # POSTMORTEM AUDIT of 51 trades: 45 dust_sweep exits, ZERO TP hits, 1 SL hit.
