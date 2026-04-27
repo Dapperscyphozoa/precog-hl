@@ -71,11 +71,16 @@ SYSTEM_DOMAIN = {
     'LIQ': 'order_flow_event', 'SPOOF': 'order_flow_event',
     'OI': 'position_count', 'CVD': 'position_count',
     'WHALE': 'whale_flow',
-    'WALL_ABS': 'order_book',
+    'WALL_ABS': 'order_book', 'OBI': 'order_book',  # OBI = order book imbalance
     'NEWS': 'sentiment',
 }
 CONF_WINDOW_S       = 24 * 3600
-COIN_COOLDOWN_S     = 24 * 3600
+# 2026-04-27: tunable per-coin cooldown. Default 1h matches dedupe window.
+# Engines with proven >70% rolling WR get a HALF cooldown (30min) via the
+# adaptive logic in should_enter — increases trade volume on winning combos.
+COIN_COOLDOWN_S     = int(_os.environ.get('CONF_COIN_COOLDOWN_S', str(1 * 3600)))
+COIN_COOLDOWN_FAST_S = int(_os.environ.get('CONF_COIN_COOLDOWN_FAST_S', str(30 * 60)))
+COIN_COOLDOWN_FAST_WR = float(_os.environ.get('CONF_COIN_COOLDOWN_FAST_WR', '70'))
 TP_PCT              = 0.04
 SL_PCT              = 0.015
 MAX_HOLD_S          = 72 * 3600
@@ -597,6 +602,21 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # OBI as 9th system — order book imbalance.
+    # 2026-04-27: derived from aggregated multi-venue depth in
+    # orderbook_ws.py (Bybit/Binance/OKX/Coinbase/Bitget/Kraken). When
+    # near-mid bid/ask USD ratio crosses threshold, signals directional
+    # liquidity dominance. Threshold and min_usd tunable.
+    try:
+        import orderbook_ws as _ob
+        _obi_thresh = float(_os.environ.get('CONF_OBI_THRESHOLD', '0.30'))
+        _obi_min_usd = float(_os.environ.get('CONF_OBI_MIN_USD', '50000'))
+        _obi_signal = _ob.imbalance_signal(coin, threshold=_obi_thresh, min_usd=_obi_min_usd)
+        if _obi_signal in ('BUY', 'SELL'):
+            recents['OBI'] = [(now_ts, _obi_signal)]
+    except Exception:
+        pass
+
     # Tally per side
     by_side = {'BUY': set(), 'SELL': set()}
     latest_ts_by_side = {'BUY': 0, 'SELL': 0}
@@ -755,6 +775,18 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['cvd_alone_dropped'] += 1
             return None
 
+    # 2026-04-27: OBI-alone gate. Order book imbalance is continuous state
+    # — same logic as OI/CVD. Must combine to avoid firing in sustained
+    # one-sided liquidity (which is a TREND, not a SIGNAL).
+    # Tunable via CONF_OBI_REQUIRE_COMBINE (default 1).
+    _obi_requires_combine = (_os.environ.get('CONF_OBI_REQUIRE_COMBINE', '1') == '1')
+    if _obi_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'OBI' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('obi_alone_dropped', 0)
+            _STATS['obi_alone_dropped'] += 1
+            return None
+
     _STATS['signals_yielded'] += 1
     # 2026-04-27: track per-system contribution to confluence signals
     if 'LIQ' in by_side[best_side]:
@@ -772,6 +804,9 @@ def eval_coin(coin, bars_15m, now_ts=None):
     if 'WHALE' in by_side[best_side]:
         _STATS.setdefault('whale_contributed', 0)
         _STATS['whale_contributed'] += 1
+    if 'OBI' in by_side[best_side]:
+        _STATS.setdefault('obi_contributed', 0)
+        _STATS['obi_contributed'] += 1
     if 'WALL_ABS' in by_side[best_side]:
         _STATS.setdefault('wall_abs_contributed', 0)
         _STATS['wall_abs_contributed'] += 1
@@ -800,10 +835,55 @@ def eval_coin(coin, bars_15m, now_ts=None):
     }
 
 def should_enter(coin, last_fire_ts_by_coin, now_ts=None):
-    """Per-coin 24h cooldown check."""
+    """Per-coin cooldown check with adaptive fast-track for winning engines.
+
+    Default cooldown: COIN_COOLDOWN_S (1h).
+    Fast cooldown: COIN_COOLDOWN_FAST_S (30min) — applied when this coin's
+    most recently-closing engine has rolling WR >= COIN_COOLDOWN_FAST_WR
+    (70%). High-WR engines earn the right to fire more often.
+    """
     now_ts = now_ts or int(time.time())
     last = last_fire_ts_by_coin.get(coin, 0)
-    return (now_ts - last) >= COIN_COOLDOWN_S
+    elapsed = now_ts - last
+
+    # Fast path: already past the slow cooldown — always allow
+    if elapsed >= COIN_COOLDOWN_S:
+        return True
+
+    # Adaptive: check if the last fire's engine has earned a fast cooldown
+    if elapsed < COIN_COOLDOWN_FAST_S:
+        return False  # within fast cooldown, never allow
+    try:
+        import trade_ledger as _tl_cd
+        # Find the engine of the most recent close on this coin
+        coin_u = coin.upper()
+        last_engine = None
+        last_ts_seen = 0.0
+        with _tl_cd._LOCK:
+            for tid, row in _tl_cd._INDEX['by_trade_id'].items():
+                if (row.get('coin') or '').upper() != coin_u:
+                    continue
+                if row.get('event_type') != 'CLOSE':
+                    continue
+                ts_iso = row.get('timestamp', '')
+                if not ts_iso:
+                    continue
+                try:
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+                except Exception:
+                    continue
+                if ts > last_ts_seen:
+                    last_ts_seen = ts
+                    last_engine = row.get('engine')
+        if not last_engine:
+            return False  # no history; respect slow cooldown
+        wr, n_dec, _ = _tl_cd.engine_rolling_wr(last_engine, n_window=5, hours=24)
+        if wr is not None and n_dec >= 3 and wr >= COIN_COOLDOWN_FAST_WR:
+            return True  # fast-cooldown earned
+    except Exception:
+        pass
+    return False
 
 def mark_fired(coin, last_fire_ts_by_coin, now_ts=None):
     now_ts = now_ts or int(time.time())

@@ -707,6 +707,105 @@ def recent_consecutive_losses(coin, hours=4.0):
     return consec, closes[0][0]
 
 
+def engine_rolling_wr(engine, n_window=5, hours=24.0):
+    """Compute rolling WR for a given engine over the last N closed trades
+    within `hours`. Returns (wr_pct, n_decided, last_close_ts) where:
+      wr_pct: percentage 0-100, or None if n_decided < 2
+      n_decided: count of W+L trades (excludes b/breakeven and unrecorded pnl)
+      last_close_ts: unix seconds of most recent close (None if no trades)
+
+    Used by auto engine-pause: if WR drops below threshold over last N
+    trades, engine is disabled for cooldown period.
+    """
+    if not engine:
+        return None, 0, None
+    cutoff = time.time() - hours * 3600.0
+    closes = []
+    with _LOCK:
+        for tid, row in _INDEX['by_trade_id'].items():
+            if (row.get('engine') or '') != engine:
+                continue
+            if row.get('event_type') != 'CLOSE':
+                continue
+            ts_iso = row.get('timestamp', '')
+            if not ts_iso:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if ts < cutoff:
+                continue
+            try:
+                pnl_raw = row.get('pnl', '')
+                if pnl_raw == '' or pnl_raw is None:
+                    continue
+                pnl = float(pnl_raw)
+            except (TypeError, ValueError):
+                continue
+            closes.append((ts, pnl))
+    if not closes:
+        return None, 0, None
+    closes.sort(key=lambda x: -x[0])
+    recent = closes[:n_window]
+    wins = sum(1 for _, p in recent if p > 0)
+    losses = sum(1 for _, p in recent if p < 0)
+    decided = wins + losses
+    if decided < 2:
+        return None, decided, recent[0][0]
+    return (wins / decided * 100.0), decided, recent[0][0]
+
+
+def coin_engine_rolling_wr(coin, engine, n_window=5, hours=24.0):
+    """Rolling WR for a (coin, engine) pair. Returns (wr_pct, n_decided,
+    last_close_ts). Used by per-coin x per-engine gate to block fires on
+    pairs that have a proven negative edge.
+
+    Conservative: returns None for n<3 so new pairs aren't blocked from
+    establishing a sample. Caller treats None as "allow".
+    """
+    if not coin or not engine:
+        return None, 0, None
+    coin_u = coin.upper()
+    cutoff = time.time() - hours * 3600.0
+    closes = []
+    with _LOCK:
+        for tid, row in _INDEX['by_trade_id'].items():
+            if (row.get('coin') or '').upper() != coin_u:
+                continue
+            if (row.get('engine') or '') != engine:
+                continue
+            if row.get('event_type') != 'CLOSE':
+                continue
+            ts_iso = row.get('timestamp', '')
+            if not ts_iso:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if ts < cutoff:
+                continue
+            try:
+                pnl_raw = row.get('pnl', '')
+                if pnl_raw == '' or pnl_raw is None:
+                    continue
+                pnl = float(pnl_raw)
+            except (TypeError, ValueError):
+                continue
+            closes.append((ts, pnl))
+    if not closes:
+        return None, 0, None
+    closes.sort(key=lambda x: -x[0])
+    recent = closes[:n_window]
+    wins = sum(1 for _, p in recent if p > 0)
+    losses = sum(1 for _, p in recent if p < 0)
+    decided = wins + losses
+    if decided < 3:
+        return None, decided, recent[0][0]
+    return (wins / decided * 100.0), decided, recent[0][0]
+
+
 def is_closed(trade_id: str) -> bool:
     with _LOCK:
         return trade_id not in _INDEX['open_trades']
