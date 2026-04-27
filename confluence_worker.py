@@ -986,7 +986,11 @@ def _scan_once():
     #
     # Default: HL perp universe (from info.meta) MINUS coins already live.
     # Override via env CONFLUENCE_SHADOW_COINS for a curated list.
+    # Cap controls scan cost vs coverage tradeoff. Each shadow eval = 1 REST
+    # call for bars. At HL rate limit (1200/min), 150 shadow + 50 live every
+    # 120s = 75 calls/min. Safe headroom. Override via CONF_SHADOW_MAX env.
     _shadow_env = os.environ.get('CONFLUENCE_SHADOW_COINS', '').strip()
+    _shadow_cap = int(os.environ.get('CONF_SHADOW_MAX', '150'))
     if _shadow_env:
         SHADOW_UNIVERSE = [c.strip().upper() for c in _shadow_env.split(',') if c.strip()]
     else:
@@ -1000,7 +1004,7 @@ def _scan_once():
                 c for c in _all_hl_perps
                 if c and c not in _live_set
                 and not (c.startswith('k') and len(c) >= 4 and c[1].isupper())
-            ])[:30]  # cap at 30 to bound scan cost
+            ])[:_shadow_cap]
         except Exception:
             SHADOW_UNIVERSE = []
 
