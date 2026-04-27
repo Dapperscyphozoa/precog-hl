@@ -476,15 +476,27 @@ def _process_intent(intent, snap, authoritative):
 
 def _detect_orphans(snap, ledger_stats):
     """Spec §5: Orphan repair engine.
-    If exchange has position but ledger doesn't, reconciler ADOPTS (authoritatively).
-    Prevents ghost exposure and untracked risk.
+    If exchange has position but ledger doesn't, reconciler handles it.
 
-    Note: precog.py main loop also does adoption; both paths now use
-    latest_open_trade_id_for_coin() first to prevent duplicates (Step 4 fix).
+    2026-04-27: behavior change. Previously ALWAYS adopted orphans —
+    that produced -$5.41/24h losses across 66 RECONCILED trades because
+    adopted positions have no engine logic, no entry edge, just "we
+    found a position, let's manage it." They lose at 50% WR.
+
+    New default: EMERGENCY CLOSE orphans. They have no signal edge,
+    no proper SL/TP entry config — they shouldn't exist. Closing them
+    immediately stops the bleed.
+
+    Tunable via env:
+      ORPHAN_ACTION=close    (default — emergency close)
+      ORPHAN_ACTION=adopt    (legacy behavior — adopt and manage)
+      ORPHAN_ACTION=skip     (ignore — neither adopt nor close)
     """
+    import os as _os_orph
     ledger = _deps['ledger']
     if not ledger:
         return
+    action = _os_orph.environ.get('ORPHAN_ACTION', 'close').lower()
     exch_coins = set(snap.get('positions', {}).keys())
     try:
         ledger_open_coins = set(
@@ -499,7 +511,29 @@ def _detect_orphans(snap, ledger_stats):
             _log(f"ORPHAN SKIP: {coin} was closed in last {_RECENT_CLOSED_COIN_TTL_SEC}s — snapshot lag")
             continue
         pos = snap['positions'].get(coin, {})
-        side_char = pos.get('side', 'L')  # 'L' or 'S' from snapshot
+        side_char = pos.get('side', 'L')
+
+        if action == 'skip':
+            _log(f"ORPHAN SKIP: {coin} (ORPHAN_ACTION=skip)")
+            continue
+
+        if action == 'close':
+            # Emergency close — these positions have no signal edge.
+            try:
+                _close_fn = _deps.get('execute_close_fn')
+                if _close_fn:
+                    fill = _close_fn(coin)
+                    _log(f"ORPHAN EMERGENCY CLOSE: {coin} side={side_char} fill={fill}")
+                    with _LOCK:
+                        _METRICS.setdefault('orphans_emergency_closed', 0)
+                        _METRICS['orphans_emergency_closed'] += 1
+                else:
+                    _log(f"ORPHAN CLOSE FAILED: {coin} no execute_close_fn registered — skipping")
+            except Exception as e:
+                _log(f"orphan close err {coin}: {e}")
+            continue
+
+        # action == 'adopt' (legacy)
         entry_px = pos.get('entry', 0) or 0
         try:
             new_tid = ledger.new_trade_id()
