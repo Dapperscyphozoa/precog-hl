@@ -423,6 +423,38 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # OI as 6th system — open-interest direction confirmation.
+    # oi_tracker polls Binance OI every 5min and tracks 15min deltas.
+    # Logic (oi_bias()):
+    #   Rising OI + price up = new longs entering = bullish continuation
+    #   Rising OI + price down = new shorts entering = bearish continuation
+    #   Falling OI = position covering = no signal (don't fade exhaustion
+    #     since LIQ already covers that thesis)
+    #
+    # Why this is also orthogonal: OI is the COUNT of open positions,
+    # measured directly from the exchange. Independent of bar patterns
+    # (SNIPER/DAY/SWING), funding rates (FUNDING), and liquidation flow
+    # (LIQ). When OI agrees with another system, you have crowd flow +
+    # technical signal aligning.
+    #
+    # Coverage: oi_tracker.COINS = ~23 majors. Coins not in that list
+    # silently get no OI signal. Fail-soft.
+    try:
+        import oi_tracker as _oi
+        # Compute recent 3-bar price direction from ctx_15
+        _bars = ctx_15.get('bars', [])
+        if len(_bars) >= 3:
+            _recent_close = float(_bars[-1]['c'])
+            _ref_close = float(_bars[-4]['c']) if len(_bars) >= 4 else float(_bars[-3]['c'])
+            _price_dir = 1 if _recent_close > _ref_close else (-1 if _recent_close < _ref_close else 0)
+            _oi_signal = _oi.oi_bias(coin, _price_dir)
+            if _oi_signal == 1:
+                recents['OI'] = [(now_ts, 'BUY')]    # rising OI + rising price = continuation up
+            elif _oi_signal == -1:
+                recents['OI'] = [(now_ts, 'SELL')]   # rising OI + falling price = continuation down
+    except Exception:
+        pass
+
     # Tally per side
     by_side = {'BUY': set(), 'SELL': set()}
     latest_ts_by_side = {'BUY': 0, 'SELL': 0}
@@ -500,12 +532,28 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['funding_alone_dropped'] += 1
             return None
 
+    # 2026-04-27: OI-alone gate. OI is a continuous state ("OI rising +
+    # price moving"), not a discrete event like LIQ_CASCADE. In a sustained
+    # trend it could fire constantly. Require combination — OI confirms
+    # another signal has flow behind it, but doesn't generate trades alone.
+    # LIQ remains alone-allowed (rare event with high conviction).
+    # Tunable via CONF_OI_REQUIRE_COMBINE (default 1).
+    _oi_requires_combine = (_os.environ.get('CONF_OI_REQUIRE_COMBINE', '1') == '1')
+    if _oi_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'OI' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('oi_alone_dropped', 0)
+            _STATS['oi_alone_dropped'] += 1
+            return None
+
     _STATS['signals_yielded'] += 1
-    # 2026-04-27: track LIQ contribution to confluence signals — see how
-    # often the cascade fade is actually agreeing with other systems.
+    # 2026-04-27: track per-system contribution to confluence signals
     if 'LIQ' in by_side[best_side]:
         _STATS.setdefault('liq_contributed', 0)
         _STATS['liq_contributed'] += 1
+    if 'OI' in by_side[best_side]:
+        _STATS.setdefault('oi_contributed', 0)
+        _STATS['oi_contributed'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {
         'coin': coin,
