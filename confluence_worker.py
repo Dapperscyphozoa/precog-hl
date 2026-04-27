@@ -724,17 +724,17 @@ def _monitor_exits():
 
             # 3: profit lock — at +1.5% raw, hand off to CONTINUOUS TRAIL
             # 2026-04-27: was force-close at +1.5%. Now ratchets SL to
-            # max(1.5%, MFE - TRAIL_DISTANCE) every tick. Captures breakouts
-            # to 3-5% while protecting +1.5% floor on reversal.
-            # Tunable: PROFIT_LOCK_FORCE_CLOSE=1 to revert to old behavior.
-            # Tunable: CONTINUOUS_TRAIL_DISTANCE (default 0.005 = 0.5%).
+            # max(1.5%, MFE - TRAIL_DISTANCE) every tick. Hard floor at 1.5%.
+            # Captures breakouts to 3-5% while never giving back below 1.5%.
+            # Tunable: PROFIT_LOCK_FORCE_CLOSE=1 to revert.
+            # Tunable: CONTINUOUS_TRAIL_DISTANCE (default 0.002 = 0.2% / 20bp).
             if raw_move >= PROFIT_LOCK_PCT:
                 if os.environ.get('PROFIT_LOCK_FORCE_CLOSE', '0') == '1':
                     _log(f"{coin} PROFIT_LOCK pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat (force_close)")
                     _close_position(coin, 'tp_lock', raw_move)
                     continue
                 # Continuous trail: SL = max(1.5%, MFE - distance)
-                _trail_dist = float(os.environ.get('CONTINUOUS_TRAIL_DISTANCE', '0.005'))
+                _trail_dist = float(os.environ.get('CONTINUOUS_TRAIL_DISTANCE', '0.002'))
                 _cur_mfe = pos.get('mfe_pct', raw_move) or raw_move
                 _target_sl_pct = max(PROFIT_LOCK_PCT, _cur_mfe - _trail_dist)
                 _current_sl = float(pos.get('sl_pct', 0) or 0)
