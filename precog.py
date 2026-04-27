@@ -773,6 +773,28 @@ FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '44'))
 # Comma-separated. Override via env.
 COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,JTO').split(',') if c.strip()}
 
+# 2026-04-27: engine kill switch. DISABLE_ENGINES is a comma-separated list of
+# engine names to skip. Supports exact match (TREND_CONT) or prefix wildcard
+# (CONFLUENCE_*). Used to shut bleeders fast without code change.
+# Examples:
+#   DISABLE_ENGINES=TREND_CONT          → skip TREND_CONT engine
+#   DISABLE_ENGINES=TREND_CONT,WALL_BNC → skip both
+#   DISABLE_ENGINES=CONFLUENCE_*        → skip all confluence engines
+_DISABLED_ENGINES_RAW = os.environ.get('DISABLE_ENGINES', '')
+
+def _engine_disabled(name):
+    if not name or not _DISABLED_ENGINES_RAW:
+        return False
+    for tok in _DISABLED_ENGINES_RAW.split(','):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if tok == name:
+            return True
+        if tok.endswith('*') and name.startswith(tok[:-1]):
+            return True
+    return False
+
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
     import mtf_context as _mtf
@@ -2481,7 +2503,16 @@ def health():
         import regime_detector
         cur_regime = regime_detector.get_regime()
     except Exception: pass
-    return jsonify({'status':'ok','version':'v8.28','equity':eq,
+    # 2026-04-27: expose Render's git commit SHA for deploy verification.
+    # Lets us confirm a push has actually shipped vs queued/failed build.
+    _commit_live = (os.environ.get('RENDER_GIT_COMMIT')
+                    or os.environ.get('GIT_COMMIT')
+                    or os.environ.get('COMMIT_SHA') or '')
+    _commit_short = _commit_live[:7] if _commit_live else None
+    return jsonify({'status':'ok','version':'v8.28',
+                    'commit_live': _commit_short,
+                    'disabled_engines': _DISABLED_ENGINES_RAW or None,
+                    'equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
                     'coins':len(COINS),
@@ -8160,6 +8191,15 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                                 log(f"TREND_CONT {coin} {sig}: 1h={b1}({d1.get('dist_pct','?')}%) 4h={b4}({d4.get('dist_pct','?')}%) dist_ema20={dist_to_ema*100:+.2f}% rsi={r_now:.0f}")
         except Exception as _tce:
             log(f"trend_cont err {coin}: {_tce}")
+
+    # 2026-04-27: engine kill switch. Nullify signal if engine is disabled
+    # via DISABLE_ENGINES env. Single post-generation check covers all
+    # engines (PIVOT, BB_REJ, INSIDE_BAR, PULLBACK, WALL_BNC, WALL_EXH,
+    # WALL_ABSORB, FUNDING_MR, LIQ_CSCD, SPOOF, TREND_CONT, etc.).
+    if sig and signal_engine and _engine_disabled(signal_engine):
+        log(f"{coin} {sig} {signal_engine} dropped: engine in DISABLE_ENGINES={_DISABLED_ENGINES_RAW}")
+        sig = None
+        signal_engine = None
 
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)
