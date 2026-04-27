@@ -40,7 +40,14 @@ from collections import defaultdict
 # CONF_MIN_DOMAINS forces fires to span 2+ distinct domains.
 import os as _os_minsys
 CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '2'))
-CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
+CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '1'))
+# 2026-04-27 (later): CONF_MIN_DOMAINS 2 → 1. Quiet chop + tight gate
+# = signal starvation (4-6 fires/hour). With 12 systems, requiring 2+
+# in different domains is the conviction ideal but produces too few trades
+# to compound at the user's target rate. Dropping to 1 lets multi-system
+# same-domain combos fire (SNIPER+DAY, OI+CVD, LIQ+SPOOF, etc.). 3x fire
+# rate boost. Per-system gates (SWING-needs-FUNDING, DAY-alone, etc.)
+# still apply for quality. Tunable via env to revert.
 
 # 2026-04-27: Event-based systems that may fire alone, bypassing CONF_MIN_SYS
 # and CONF_MIN_DOMAINS. These are DISCRETE EVENTS where the event itself IS
