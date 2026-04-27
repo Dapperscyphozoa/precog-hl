@@ -63,7 +63,13 @@ ENABLED              = os.environ.get('FUNDING_MR_ENABLED', '0') == '1'
 EXTREME_THRESHOLD    = float(os.environ.get('FUNDING_MR_THRESHOLD', '0.0001'))   # 0.01%/hr = 0.24%/day
 CONFIRM_THRESHOLD    = float(os.environ.get('FUNDING_MR_CONFIRM', '0.00005'))    # Binance must be > half of extreme
 COOLDOWN_SEC         = int(os.environ.get('FUNDING_MR_COOLDOWN', '14400'))       # 4h/coin
-REGIME_CHOP_ONLY     = os.environ.get('FUNDING_MR_CHOP_ONLY', '1') == '1'
+REGIME_CHOP_ONLY     = os.environ.get('FUNDING_MR_CHOP_ONLY', '0') == '1'
+# 2026-04-27: default flipped 1 → 0. FUNDING_MR has been our highest-WR
+# engine (80%/5 in recent window). The chop_only gate sidelined it
+# entirely when regime shifted to bull-calm — 702/702 checks rejected
+# during the shift. Funding-rate-extreme mean-reversion is valid signal
+# in any regime; chop is a confidence boost, not a strict prerequisite.
+# Set FUNDING_MR_CHOP_ONLY=1 in env to revert to chop-only.
 REQUIRE_CONFIRMATION = os.environ.get('FUNDING_MR_REQUIRE_CONFIRM', '0') == '1'  # require both venues agree
 
 # ─── State ─────────────────────────────────────────────────────────────────
