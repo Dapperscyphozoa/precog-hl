@@ -2643,6 +2643,10 @@ def health():
     return jsonify({'status':'ok','version':'v8.28',
                     'commit_live': _commit_short,
                     'disabled_engines': _DISABLED_ENGINES_RAW or None,
+                    'webhook_security': {
+                        'enabled': os.environ.get('WEBHOOK_ENABLED', '0') == '1',
+                        'require_secret': os.environ.get('WEBHOOK_REQUIRE_SECRET', '1') == '1',
+                    },
                     'engine_auto_pause': {
                         'enabled': _AUTO_PAUSE_ENABLED,
                         'window': _AUTO_PAUSE_WINDOW,
@@ -4954,13 +4958,42 @@ def transfer_funds():
 def webhook():
     """Receive DynaPro signal from TradingView.
     Expected JSON: {"ticker":"BTCUSD","action":"buy|sell|exit_buy|exit_sell","price":12345.67}
-    Optional: {"secret":"...","tf":"15"} 
+    Optional: {"secret":"...","tf":"15"}
     Also accepts plain text: 'buy BTCUSD 12345.67' format.
+
+    2026-04-27: SECURITY HARDENING. Public endpoint with no auth — anyone
+    posting to /webhook could fire trades. Behaviour now:
+      WEBHOOK_ENABLED=0 (default): log payload for forensics, refuse execution.
+      WEBHOOK_ENABLED=1 + WEBHOOK_REQUIRE_SECRET=1 (default if enabled):
+        Require `secret` field in JSON body matching WEBHOOK_SECRET env.
+      WEBHOOK_ENABLED=1 + WEBHOOK_REQUIRE_SECRET=0:
+        Open mode (legacy). NOT RECOMMENDED.
     """
-    # Parse flexibly — TV sends various formats
     raw_body = flask_request.get_data(as_text=True)
-    log(f"WEBHOOK RAW: content_type={flask_request.content_type} body={raw_body[:300]}")
-    
+    src_ip = flask_request.headers.get('X-Forwarded-For') or flask_request.remote_addr or 'unknown'
+    log(f"WEBHOOK RAW: from={src_ip} content_type={flask_request.content_type} body={raw_body[:300]}")
+
+    # ─── SECURITY GATE ──────────────────────────────────────────────
+    _wh_enabled = os.environ.get('WEBHOOK_ENABLED', '0') == '1'
+    if not _wh_enabled:
+        log(f"WEBHOOK REJECTED (disabled via env): from={src_ip} body_preview={raw_body[:200]}")
+        return jsonify({'status': 'webhook_disabled',
+                        'note': 'set WEBHOOK_ENABLED=1 to allow + WEBHOOK_REQUIRE_SECRET=1 + matching secret in payload'}), 403
+
+    _wh_require_secret = os.environ.get('WEBHOOK_REQUIRE_SECRET', '1') == '1'
+    if _wh_require_secret:
+        try:
+            _provisional = flask_request.get_json(force=True, silent=True) or {}
+        except Exception:
+            _provisional = {}
+        _supplied = (_provisional.get('secret') or
+                     flask_request.headers.get('X-Webhook-Secret') or
+                     flask_request.args.get('secret') or '')
+        if _supplied != WEBHOOK_SECRET:
+            log(f"WEBHOOK REJECTED (bad secret): from={src_ip} supplied_len={len(_supplied)}")
+            return jsonify({'status': 'unauthorized'}), 401
+
+    # Parse flexibly — TV sends various formats
     data = None
     try:
         data = flask_request.get_json(force=True, silent=True)
