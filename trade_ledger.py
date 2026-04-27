@@ -791,6 +791,11 @@ def system_aggregate(system='a', hours=12.0):
                 continue
             engine = (row.get('engine') or '').strip()
             is_b = engine.startswith('CONFLUENCE_')
+            # 2026-04-27: exclude noise engines from BOTH systems. RECONCILED
+            # is reconciler orphan-adoption (not a real signal). untagged_legacy
+            # is missing-engine fallback. They poison WR/$ aggregates.
+            if engine in ('RECONCILED', 'untagged_legacy'):
+                continue
             if (system == 'b' and not is_b) or (system == 'a' and (is_b or not engine)):
                 continue
             try:
