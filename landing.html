@@ -1124,7 +1124,7 @@ async function loadConfluence() {
         const shadowSize = d.shadow_universe_size;
         const shadowSigs = d.shadow_signals_last_scan;
         if (shadowSize !== undefined) {
-            rejHtml += `<br>// shadow tier: <span style="color:var(--cyan)">${shadowSize||0} candidates · ${shadowSigs||0} signals last scan</span> → <a href="/shadow" style="color:var(--cyan)" target="_blank">/shadow</a>`;
+            rejHtml += `<br>// shadow tier: <span style="color:var(--cyan)">${shadowSize||0} candidates · ${shadowSigs||0} signals last scan</span> → <a href="/shadow_tier" style="color:var(--cyan)" target="_blank">/shadow_tier</a>`;
         }
         rejDiv.innerHTML = rejHtml;
     } catch(e) {
