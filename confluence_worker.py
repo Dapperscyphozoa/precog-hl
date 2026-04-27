@@ -569,11 +569,12 @@ def _try_rotate_stale_flat():
     def _badness(item):
         _, pos = item
         mfe = pos.get('mfe_pct') or 0
-        # We don't have current raw here; use stale_flat_marked_ts as proxy
-        # for staleness (more recent mark = fresher data, prefer to evict
-        # ones that have been marked longest)
+        # Sort: ascending mfe (deadest first), then ascending marked_ts
+        # (oldest mark first — gives newer marks more time to recover).
+        # Prior bug used -marked_ts which inverted the staleness ranking
+        # (would have evicted newest-marked first).
         marked_ts = pos.get('stale_flat_marked_ts') or 0
-        return (mfe, -marked_ts)  # ascending mfe (lowest first), oldest mark first
+        return (mfe, marked_ts)
     candidates.sort(key=_badness)
     coin_to_evict, pos = candidates[0]
     # Compute current raw for the close log line
@@ -742,15 +743,32 @@ def _monitor_exits():
                                 coin, _is_buy_close, _partial_sz, _close_px,
                                 {'limit': {'tif': 'Ioc'}}, reduce_only=True
                             )
-                            with _state_lock:
-                                if coin in _state['open_positions']:
-                                    _state['open_positions'][coin]['partial_tp_taken'] = True
-                                    _state['open_positions'][coin]['partial_tp_ts'] = int(time.time())
-                            _log(f"{coin} PARTIAL_TP raw={raw_move*100:.2f}% — "
-                                 f"closed {PARTIAL_TP_FRACTION*100:.0f}% ({_partial_sz}/{_full_sz}) "
-                                 f"at ~{mark:.6f}, leaving 67% to run")
-                            _state.setdefault('partial_tp_fires', 0)
-                            _state['partial_tp_fires'] += 1
+                            # Verify order actually succeeded before marking
+                            # the flag. HL returns {'status':'ok',...} on success,
+                            # {'status':'err',...} or response with errors on fail.
+                            _ok = False
+                            try:
+                                if isinstance(_r, dict):
+                                    _status = (_r.get('status') or '').lower()
+                                    if _status == 'ok':
+                                        # also check for nested error in statuses
+                                        _data = (_r.get('response') or {}).get('data', {}) or {}
+                                        _statuses = _data.get('statuses', []) or []
+                                        _ok = not any('error' in (s if isinstance(s, dict) else {}) for s in _statuses)
+                            except Exception:
+                                _ok = False
+                            if _ok:
+                                with _state_lock:
+                                    if coin in _state['open_positions']:
+                                        _state['open_positions'][coin]['partial_tp_taken'] = True
+                                        _state['open_positions'][coin]['partial_tp_ts'] = int(time.time())
+                                _log(f"{coin} PARTIAL_TP raw={raw_move*100:.2f}% — "
+                                     f"closed {PARTIAL_TP_FRACTION*100:.0f}% ({_partial_sz}/{_full_sz}) "
+                                     f"at ~{mark:.6f}, leaving 67% to run")
+                                _state.setdefault('partial_tp_fires', 0)
+                                _state['partial_tp_fires'] += 1
+                            else:
+                                _log(f"{coin} PARTIAL_TP order rejected — flag NOT set, will retry next tick (resp={_r})")
                 except Exception as _ptp_e:
                     _log(f"{coin} partial_tp err: {_ptp_e}")
 
