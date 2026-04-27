@@ -854,13 +854,19 @@ _AUTO_PAUSE_WINDOW = int(os.environ.get('ENGINE_AUTO_PAUSE_WINDOW', '5'))
 _AUTO_PAUSE_MIN_WR = float(os.environ.get('ENGINE_AUTO_PAUSE_MIN_WR', '40'))
 _AUTO_PAUSE_HOURS = float(os.environ.get('ENGINE_AUTO_PAUSE_COOLDOWN_HOURS', '4'))
 _AUTO_PAUSE_LOOKBACK_H = float(os.environ.get('ENGINE_AUTO_PAUSE_LOOKBACK_H', '24'))
+# 2026-04-27: $ EV-based auto-pause threshold. WR alone misses engines with
+# decent hit-rate but losses that exceed wins. If mean PnL over last N trades
+# is below this dollar amount, pause. Default -$0.05 = "any net negative
+# trend over 5 trades pauses the engine".
+_AUTO_PAUSE_MIN_EV_USD = float(os.environ.get('ENGINE_AUTO_PAUSE_MIN_EV_USD', '-0.05'))
 
 def _engine_auto_paused(name):
-    """Return True if engine is auto-paused due to recent poor WR.
+    """Return True if engine is auto-paused due to recent poor WR OR poor $ EV.
 
-    Logic: if rolling WR over last N trades within lookback window is below
-    AUTO_PAUSE_MIN_WR, engine is paused for AUTO_PAUSE_HOURS from the most
-    recent close. Resets naturally once the bad streak ages out.
+    Two-layer check:
+      1. WR < AUTO_PAUSE_MIN_WR over last N trades → pause
+      2. Mean $ PnL < AUTO_PAUSE_MIN_EV_USD over last N → pause
+    Either failure pauses for AUTO_PAUSE_HOURS from most recent close.
     """
     if not name or not _AUTO_PAUSE_ENABLED:
         return False
@@ -869,8 +875,23 @@ def _engine_auto_paused(name):
         wr, n_dec, last_ts = _tl_ap.engine_rolling_wr(
             name, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
         if wr is None or n_dec < 2 or last_ts is None:
+            # Also check EV — engine might be too quiet for WR but still
+            # measurable. Fall through to EV-only check.
+            ev, ev_n, ev_ts = _tl_ap.engine_rolling_ev(
+                name, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
+            if ev is None or ev_n < 2 or ev_ts is None:
+                return False
+            if ev < _AUTO_PAUSE_MIN_EV_USD:
+                age_h = (time.time() - ev_ts) / 3600.0
+                return age_h < _AUTO_PAUSE_HOURS
             return False
-        if wr >= _AUTO_PAUSE_MIN_WR:
+        # WR-based pause
+        wr_fail = wr < _AUTO_PAUSE_MIN_WR
+        # $ EV-based pause (catches high-WR-but-bleeding engines)
+        ev, _, _ = _tl_ap.engine_rolling_ev(
+            name, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
+        ev_fail = (ev is not None and ev < _AUTO_PAUSE_MIN_EV_USD)
+        if not (wr_fail or ev_fail):
             return False
         age_h = (time.time() - last_ts) / 3600.0
         return age_h < _AUTO_PAUSE_HOURS
@@ -2800,11 +2821,18 @@ def health():
             for _eng in _candidate_engines:
                 _wr, _n, _ts = _tl_h.engine_rolling_wr(
                     _eng, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
+                _ev, _, _ = _tl_h.engine_rolling_ev(
+                    _eng, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
                 if _wr is None or _n < 2:
                     continue
-                _paused = _wr < _AUTO_PAUSE_MIN_WR and _ts and (time.time() - _ts) / 3600.0 < _AUTO_PAUSE_HOURS
+                _wr_fail = _wr < _AUTO_PAUSE_MIN_WR
+                _ev_fail = (_ev is not None and _ev < _AUTO_PAUSE_MIN_EV_USD)
+                _paused = (_wr_fail or _ev_fail) and _ts and (time.time() - _ts) / 3600.0 < _AUTO_PAUSE_HOURS
                 _ap_status[_eng] = {
-                    'wr_pct': round(_wr, 1), 'n': _n, 'paused': _paused,
+                    'wr_pct': round(_wr, 1), 'n': _n,
+                    'mean_pnl_usd': round(_ev, 4) if _ev is not None else None,
+                    'paused': _paused,
+                    'pause_reason': ('wr' if _wr_fail else ('ev' if _ev_fail else None)) if _paused else None,
                 }
         except Exception: pass
     return jsonify({'status':'ok','version':'v8.28',
