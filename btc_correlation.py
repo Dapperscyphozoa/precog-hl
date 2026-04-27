@@ -85,7 +85,12 @@ def _refresh():
 
 def allow_alt_trade(coin, side):
     """Block alt trade if either 1h or 4h BTC trend opposes the trade direction.
-    Fail-open: neutral TF passes through (can't determine, don't block)."""
+    Fail-open: neutral TF passes through (can't determine, don't block).
+
+    2026-04-27: in chop regime, require BOTH HTFs to oppose (not either).
+    Alts mean-revert independently of BTC during chop; "either" rule was
+    blocking ~half of SELL signals during BTC-up chop sessions.
+    """
     if coin in ('BTC', 'ETH'): return True
     now = time.time()
     with _LOCK: stale = now - _CACHE['ts'] > 60
@@ -94,7 +99,21 @@ def allow_alt_trade(coin, side):
         d1h = _CACHE['btc_1h_dir']
         d4h = _CACHE['btc_4h_dir']
     want = 1 if side == 'BUY' else -1
-    # Block if either HTF explicitly opposes (not neutral)
+
+    # Detect chop regime — relax to "both must oppose"
+    _is_chop = False
+    try:
+        import regime_detector as _rd
+        _is_chop = (_rd.get_regime() == 'chop')
+    except Exception:
+        pass
+
+    if _is_chop:
+        if d1h != 0 and want != d1h and d4h != 0 and want != d4h:
+            return False
+        return True
+
+    # Trending regime: keep strict "either opposes blocks"
     if d1h != 0 and want != d1h: return False
     if d4h != 0 and want != d4h: return False
     return True

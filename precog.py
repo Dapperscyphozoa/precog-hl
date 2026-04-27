@@ -5293,12 +5293,15 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
     """V3 trend + ATR-min filter. Returns True/False bool, OR (passed, reasons) if return_reasons=True.
     Reasons is a list of strings explaining why it failed (empty if passed)."""
     reasons = []
-    # CROWDING: directional imbalance — soft penalty (was hard block)
+    # CROWDING: directional imbalance.
+    # 2026-04-27: bumped 10 → 20. With 33-position cap, threshold of 10 was
+    # tripping on every SELL after first chop session. Real concern is "we're
+    # piled into shorts" which only happens >half the book.
     try:
         if side == 'SELL':
             lp = get_all_positions_live()
             shorts = sum(1 for k,v in lp.items() if v.get('size',0) < 0)
-            if shorts >= 10:
+            if shorts >= 20:
                 btc_state = btc_correlation.get_state()
                 if btc_state.get('btc_move', 0) > 0.002 or btc_state.get('btc_dir', 0) > 0:
                     reasons.append('crowding_shorts_btc_up')
