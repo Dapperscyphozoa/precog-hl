@@ -112,6 +112,7 @@ SEVENTY_79 = {
     'WIF'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.10, 'SL':0.035},  # WR 61.5% PF 2.20 n=39
     'LTC'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.035},  # WR 59.2% PF 1.88 n=49
     'BNB'         : {'sigs':['BB'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.025},  # WR 61.8% PF 2.21 n=34
+    'TAO'         : {'sigs':['BB','PV'], 'flt':'none', 'RH':75, 'RL':25, 'TP':0.05, 'SL':0.025},  # backtest WR 100%/2 +4%/trade — probationary 2026-04-27, watch closely
 }
 
 # Enterprise sizing — 0.5% risk uniform (edge-proof phase)
