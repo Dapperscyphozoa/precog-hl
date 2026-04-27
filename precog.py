@@ -2382,6 +2382,95 @@ def drift_diagnostic():
         return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
 
 
+@app.route('/backtest', methods=['GET'])
+def backtest_endpoint():
+    """Run historical backtest of confluence_engine on a list of coins.
+
+    Query params:
+      ?coins=BTC,ETH,SOL    — comma-separated coin list
+      ?top=20               — auto-select top N from shadow universe (by volume)
+      ?bars=300             — history depth (max 300 = ~3 days of 15m)
+      ?min_n=8              — promotion candidate threshold (sample size)
+      ?min_wr=60            — promotion candidate threshold (WR pct)
+
+    Returns:
+      per_coin stats + ranked promotion candidates list.
+    """
+    from flask import request
+    try:
+        import backtest as _bt
+        coins_param = (request.args.get('coins') or '').strip()
+        top_n = int(request.args.get('top', '0') or 0)
+        n_bars = int(request.args.get('bars', '300'))
+        min_n = int(request.args.get('min_n', '8'))
+        min_wr = float(request.args.get('min_wr', '60.0'))
+
+        # Resolve coin list
+        if coins_param:
+            coins = [c.strip().upper() for c in coins_param.split(',') if c.strip()]
+        elif top_n > 0:
+            # Pull top N by volume from HL meta_and_asset_ctxs (same as shadow tier)
+            try:
+                meta_ctxs = info.meta_and_asset_ctxs()
+                meta = meta_ctxs[0]
+                ctxs = meta_ctxs[1]
+                # Exclude live coins
+                live = set(COINS)
+                ranked = []
+                for i, u in enumerate(meta.get('universe', [])):
+                    name = (u.get('name', '') or '').upper()
+                    if not name or name in live:
+                        continue
+                    if name.startswith('k') and len(name) >= 4 and name[1].isupper():
+                        continue
+                    if i < len(ctxs):
+                        try:
+                            vol = float(ctxs[i].get('dayNtlVlm', 0) or 0)
+                        except (TypeError, ValueError):
+                            vol = 0
+                    else:
+                        vol = 0
+                    ranked.append((name, vol))
+                ranked.sort(key=lambda kv: -kv[1])
+                coins = [c for c, v in ranked[:top_n] if v > 0]
+            except Exception as _e:
+                return jsonify({'err': f'top-N resolve failed: {_e}'}), 500
+        else:
+            return jsonify({'err': 'specify ?coins=A,B,C or ?top=N'}), 400
+
+        # Run backtest (sequential — bounded by OKX rate limit)
+        results = _bt.backtest_universe(coins, n_bars=n_bars)
+        promotion = _bt.rank_promotion_candidates(results, min_n=min_n, min_wr=min_wr)
+
+        # Aggregate stats across universe
+        total_signals = sum(r.get('n_signals', 0) for r in results.values() if not r.get('err'))
+        total_wins = sum(r.get('wins', 0) for r in results.values() if not r.get('err'))
+        total_losses = sum(r.get('losses', 0) for r in results.values() if not r.get('err'))
+        decided = total_wins + total_losses
+        agg_wr = (total_wins / decided * 100) if decided else None
+
+        return jsonify({
+            'config': {
+                'n_coins': len(coins),
+                'n_bars': n_bars,
+                'min_n': min_n,
+                'min_wr': min_wr,
+                'note': 'orthogonal systems (LIQ/CVD/OI/SPOOF/WHALE/WALL_ABS/FUND_ARB/NEWS) fail-soft → backtest is price-action stack only (SNIPER/DAY/SWING + FUNDING)',
+            },
+            'aggregate': {
+                'total_signals': total_signals,
+                'total_wins': total_wins,
+                'total_losses': total_losses,
+                'aggregate_wr_pct': round(agg_wr, 1) if agg_wr is not None else None,
+            },
+            'promotion_candidates': promotion,
+            'per_coin': results,
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     eq = 0
