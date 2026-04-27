@@ -500,8 +500,12 @@ def regime_blocks_side(coin, side):
 #
 # Constants exposed for tuning post-observation:
 PROFIT_LOCK_ENABLED   = os.environ.get('PROFIT_LOCK', '1') != '0'
-PROFIT_LOCK_CLOSE_PCT = float(os.environ.get('PROFIT_LOCK_CLOSE_PCT', '0.035'))  # 3.5% raw
-PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.005'))  # 0.5% raw
+# 2026-04-27: defaults aligned with System B (confluence_worker.PROFIT_LOCK_PCT=0.015,
+# PROFIT_LOCK_BE_PCT=0.008). System A was using 3.5% which is past TP — wins
+# fade before reaching the lock. System B's 1.5%/0.8% catches the typical
+# winner-pattern (most moves peak at 1-1.5% before reverting).
+PROFIT_LOCK_CLOSE_PCT = float(os.environ.get('PROFIT_LOCK_CLOSE_PCT', '0.015'))  # 1.5% raw — match System B
+PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.008'))  # 0.8% raw — match System B
 # 2026-04-26 (later): CLOSE 0.02 → 0.035. The 2% force-close was killing
 # winners at half their target. Confluence engines have TP=4%, so a trade
 # that reached +2% MFE got force-closed before it could reach TP. Worse,

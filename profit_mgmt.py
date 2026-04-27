@@ -22,12 +22,14 @@ _LOCK = threading.Lock()
 
 # ─── tunables ────────────────────────────────────────────────────
 # Partial-TP triggers when MFE reaches THIS fraction of TP target.
-# Default 0.5 → take 50% off when halfway to TP. Catches the common
-# winner-pattern that fades at 50%+ before reaching full TP.
-PARTIAL_MFE_FRAC = float(os.environ.get('PARTIAL_MFE_FRAC', '0.5'))
+# Default 0.25 → fires at +1% on 4% TP. Matches System B's partial-TP at
+# +1% raw (most common winner-pattern peaks at 1-1.5% before reverting).
+# Was 0.5 (fired at +2%) — too late, most moves never reach.
+PARTIAL_MFE_FRAC = float(os.environ.get('PARTIAL_MFE_FRAC', '0.25'))
 
-# Fraction of position to close on partial. Default 0.5 = half.
-PARTIAL_CLOSE_FRACTION = float(os.environ.get('PARTIAL_CLOSE_FRACTION', '0.5'))
+# Fraction of position to close on partial. Default 0.33 = third (matches
+# System B's confluence_worker partial-TP at +1% which closes 33%).
+PARTIAL_CLOSE_FRACTION = float(os.environ.get('PARTIAL_CLOSE_FRACTION', '0.33'))
 
 # After partial, remainder's SL moves to breakeven + this buffer.
 # Default 0.1% → guarantee 0.1% min profit on remainder.
