@@ -694,6 +694,23 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['day_alone_dropped'] += 1
             return None
 
+    # 2026-04-27 (later): SNIPER-alone gate. Per audit + live data:
+    # CONFLUENCE_SNIPER 1W/5L = 16.7% WR (poisoned by kFLOKI 1000x bug,
+    # but ex-kFLOKI is still bleeding). SNIPER is a 15m BB-rejection
+    # signal — a discrete price-action event that needs orthogonal
+    # confirmation (FUNDING/LIQ/SPOOF/WHALE/etc.) or other price-action
+    # system (DAY/SWING) to reject noise. Mirrors DAY-alone gate.
+    # Allows: SNIPER+anything (DAY, FUNDING, LIQ, etc.)
+    # Drops:  SNIPER-alone
+    # Tunable via CONF_SNIPER_REQUIRE_COMBINE (default 1).
+    _sniper_requires_combine = (_os.environ.get('CONF_SNIPER_REQUIRE_COMBINE', '1') == '1')
+    if _sniper_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'SNIPER' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('sniper_alone_dropped', 0)
+            _STATS['sniper_alone_dropped'] += 1
+            return None
+
     # 2026-04-27: FUNDING-alone gate (sample inspection).
     # CONFLUENCE_FUNDING (alone): 0% WR / 2 trades. Sample is tiny but
     # the design pattern follows DAY/SWING — single-system signals are
