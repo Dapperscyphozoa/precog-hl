@@ -448,6 +448,37 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['swing_no_funding_dropped'] += 1
             return None
 
+    # 2026-04-27: DAY-alone gate (mirror of SWING fix).
+    # CONFLUENCE_DAY alone: 25% WR / 4 trades / -$0.01 — same failure mode
+    # as SWING-alone (slow timeframe trend-cont signal, doesn't pan out
+    # short-term). DAY+SNIPER is 80% WR / 5 / +$0.027 — solid combo.
+    # DAY+FUNDING is also valid (orthogonal). Drop DAY-alone only.
+    # Tunable via CONF_DAY_REQUIRE_COMBINE (default 1).
+    _day_requires_combine = (_os.environ.get('CONF_DAY_REQUIRE_COMBINE', '1') == '1')
+    if _day_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'DAY' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('day_alone_dropped', 0)
+            _STATS['day_alone_dropped'] += 1
+            return None
+
+    # 2026-04-27: FUNDING-alone gate (sample inspection).
+    # CONFLUENCE_FUNDING (alone): 0% WR / 2 trades. Sample is tiny but
+    # the design pattern follows DAY/SWING — single-system signals are
+    # the consistent failure mode. FUNDING-alone (just funding extreme
+    # without price-action confirmation) is too thin a thesis. Require
+    # at least one price-action system (SNIPER/DAY/SWING) to confirm.
+    # Allows: FUNDING+SNIPER, FUNDING+DAY, FUNDING+SWING
+    # Drops:  FUNDING-alone
+    # Tunable via CONF_FUNDING_REQUIRE_COMBINE (default 1).
+    _funding_requires_combine = (_os.environ.get('CONF_FUNDING_REQUIRE_COMBINE', '1') == '1')
+    if _funding_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'FUNDING' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('funding_alone_dropped', 0)
+            _STATS['funding_alone_dropped'] += 1
+            return None
+
     _STATS['signals_yielded'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {

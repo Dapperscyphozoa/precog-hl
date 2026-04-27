@@ -609,6 +609,10 @@ def _monitor_exits():
     PROFIT_LOCK_PCT = 0.015          # raw ≥ 1.5% → close
     PROFIT_LOCK_BE_PCT = 0.008       # raw ≥ 0.8% → move SL to entry
 
+    # 2026-04-27: partial-TP — bank 33% at +1% MFE, leave 67% to run
+    PARTIAL_TP_MFE       = 0.010    # at +1% raw MFE
+    PARTIAL_TP_FRACTION  = 0.33     # close 33% of position size
+
     # 2026-04-26: stale-flat eviction.
     # v2: tightened raw threshold (-0.7%) and changed from auto-close to
     # rotation. Marks positions as eviction-eligible; _scan_once evicts only
@@ -703,6 +707,52 @@ def _monitor_exits():
                         _state['open_positions'][coin]['sl_pct'] = 0.0
                 _log(f"{coin} BE_SHIFT raw={raw_move*100:.2f}% — SL moved to entry")
                 # Don't continue — let next tick evaluate against new SL=0
+
+            # 4b: partial-TP at +1% raw (close 33%, leave 67% to run)
+            # 2026-04-27: bank profit early on the most common winner pattern
+            # (most trades that go positive reach +1% MFE, only ~18% reach
+            # +1.5%). Partial close locks profit immediately; remaining 67%
+            # has full upside via TP=4% / trail / profit_lock.
+            # Fires once per position (partial_tp_taken flag).
+            if (raw_move >= PARTIAL_TP_MFE
+                    and not pos.get('partial_tp_taken')):
+                try:
+                    # Query authoritative size from exchange
+                    _us = _precog.info.user_state(_precog.WALLET)
+                    _full_sz = 0.0
+                    for _p in _us.get('assetPositions', []):
+                        if _p.get('position', {}).get('coin') == coin:
+                            _full_sz = abs(float(_p['position']['szi']))
+                            break
+                    if _full_sz > 0:
+                        _partial_sz = _full_sz * PARTIAL_TP_FRACTION
+                        # Round to coin's lot size (use precog's helper)
+                        try:
+                            _partial_sz = float(_precog.round_size(coin, _partial_sz))
+                        except Exception:
+                            pass
+                        if _partial_sz > 0 and _partial_sz < _full_sz:
+                            _is_buy_close = (pos['side'] == 'SELL')
+                            _close_px = mark * (1.002 if _is_buy_close else 0.998)
+                            try:
+                                _close_px = float(_precog.round_price(coin, _close_px))
+                            except Exception:
+                                pass
+                            _r = _precog.exchange.order(
+                                coin, _is_buy_close, _partial_sz, _close_px,
+                                {'limit': {'tif': 'Ioc'}}, reduce_only=True
+                            )
+                            with _state_lock:
+                                if coin in _state['open_positions']:
+                                    _state['open_positions'][coin]['partial_tp_taken'] = True
+                                    _state['open_positions'][coin]['partial_tp_ts'] = int(time.time())
+                            _log(f"{coin} PARTIAL_TP raw={raw_move*100:.2f}% — "
+                                 f"closed {PARTIAL_TP_FRACTION*100:.0f}% ({_partial_sz}/{_full_sz}) "
+                                 f"at ~{mark:.6f}, leaving 67% to run")
+                            _state.setdefault('partial_tp_fires', 0)
+                            _state['partial_tp_fires'] += 1
+                except Exception as _ptp_e:
+                    _log(f"{coin} partial_tp err: {_ptp_e}")
 
             # 5: no-progress kill (age ≥ 2h, |raw| < 0.3%)
             if age >= NO_PROGRESS_AGE_S and abs(raw_move) < NO_PROGRESS_THRESHOLD:
