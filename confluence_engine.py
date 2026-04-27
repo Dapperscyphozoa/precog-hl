@@ -423,6 +423,38 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # WHALE as 9th system — large fill imbalance directional signal.
+    # whale_filter.get_imbalance returns (buy_usd, sell_usd, net_bias).
+    # Bias > 0.5 = strong buying by whales; bias < -0.5 = strong selling.
+    # Different from CVD: tracks LARGE individual fills, not aggregated
+    # volume. Captures informed-money direction when single-trade size
+    # exceeds threshold.
+    try:
+        import whale_filter as _whale
+        _, _, _wbias = _whale.get_imbalance(coin)
+        if _wbias > 0.5:
+            recents['WHALE'] = [(now_ts, 'BUY')]
+        elif _wbias < -0.5:
+            recents['WHALE'] = [(now_ts, 'SELL')]
+    except Exception:
+        pass
+
+    # WALL_ABS as 10th system — wall-absorption fade at BB extremes.
+    # wall_absorption.check fires when a stable wall sits at a BB
+    # extreme — high-conviction reversal setup. Returns trade_side
+    # ('BUY' for support hold at lower BB, 'SELL' for resistance hold
+    # at upper BB). Has internal cooldown.
+    # Fail-soft: needs current_px (from latest bar close).
+    try:
+        import wall_absorption as _wabs
+        _last_close = float(ctx_15['bars'][-1]['c']) if ctx_15.get('bars') else None
+        if _last_close:
+            _wabs_side, _ = _wabs.check(coin, _last_close)
+            if _wabs_side in ('BUY', 'SELL'):
+                recents['WALL_ABS'] = [(now_ts, _wabs_side)]
+    except Exception:
+        pass
+
     # SPOOF as 7th system — fade pulled walls.
     # spoof_detection scans for large walls that disappear (spoofing pattern).
     # When detected, the direction is the FADE of the spoof (the way price
@@ -443,7 +475,11 @@ def eval_coin(coin, bars_15m, now_ts=None):
     # Continuous state — gated to combine-required.
     try:
         import cvd_ws as _cvd
-        _cs = _cvd.cvd_signal(coin)
+        # 2026-04-27: $500k default → $250k for more event triggers.
+        # Combine-required gate keeps quality bar high. More CVD fires
+        # = more 2-system confluence opportunities with other inputs.
+        _cvd_threshold = float(_os.environ.get('CONF_CVD_USD_THRESHOLD', '250000'))
+        _cs = _cvd.cvd_signal(coin, min_usd=_cvd_threshold)
         if _cs in ('BUY', 'SELL'):
             recents['CVD'] = [(now_ts, _cs)]
     except Exception:
@@ -599,6 +635,12 @@ def eval_coin(coin, bars_15m, now_ts=None):
     if 'CVD' in by_side[best_side]:
         _STATS.setdefault('cvd_contributed', 0)
         _STATS['cvd_contributed'] += 1
+    if 'WHALE' in by_side[best_side]:
+        _STATS.setdefault('whale_contributed', 0)
+        _STATS['whale_contributed'] += 1
+    if 'WALL_ABS' in by_side[best_side]:
+        _STATS.setdefault('wall_abs_contributed', 0)
+        _STATS['wall_abs_contributed'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {
         'coin': coin,
