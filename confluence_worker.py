@@ -743,15 +743,23 @@ def _monitor_exits():
                     with _state_lock:
                         if coin in _state['open_positions']:
                             _state['open_positions'][coin]['sl_pct'] = _target_sl_pct
-                            _state['open_positions'][coin]['sl_at_be'] = False  # past BE now
+                            # Keep sl_at_be=True so BE_SHIFT below doesn't re-fire
+                            # and override the trail SL back to entry. Trail SL is
+                            # ABOVE BE so the original BE intent is preserved.
+                            _state['open_positions'][coin]['sl_at_be'] = True
                             _state['open_positions'][coin]['trail_active'] = True
                     _log(f"{coin} CONT_TRAIL: MFE {_cur_mfe*100:.2f}% raw {raw_move*100:.2f}% "
                          f"→ SL={_target_sl_pct*100:.2f}% (trail {_trail_dist*100:.1f}%)")
                 # Don't continue — let SL check on next tick evaluate against new SL
                 # If raw_move falls below target_sl_pct, the SL hit at line 716 fires.
 
-            # 4: BE shift (move SL to entry once raw ≥ 0.8%)
-            if raw_move >= PROFIT_LOCK_BE_PCT and not pos.get('sl_at_be'):
+            # 4: BE shift (move SL to entry once raw ≥ 0.8% AND below PROFIT_LOCK).
+            # 2026-04-27: also skip if trail_active or sl_at_be already set —
+            # prevents BE_SHIFT from overriding the continuous trail above 1.5%.
+            if (raw_move >= PROFIT_LOCK_BE_PCT
+                    and raw_move < PROFIT_LOCK_PCT
+                    and not pos.get('sl_at_be')
+                    and not pos.get('trail_active')):
                 with _state_lock:
                     if coin in _state['open_positions']:
                         _state['open_positions'][coin]['sl_at_be'] = True
@@ -784,7 +792,7 @@ def _monitor_exits():
                             pass
                         if _partial_sz > 0 and _partial_sz < _full_sz:
                             _is_buy_close = (pos['side'] == 'SELL')
-                            _close_px = mark * (1.002 if _is_buy_close else 0.998)
+                            _close_px = px * (1.002 if _is_buy_close else 0.998)
                             try:
                                 _close_px = float(_precog.round_price(coin, _close_px))
                             except Exception:
