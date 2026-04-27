@@ -712,6 +712,19 @@ def _monitor_exits():
                     if raw_move < _cur['mae_pct']:
                         _cur['mae_pct'] = raw_move
 
+            # 2026-04-27: cleanup of stale trail state from inverted-semantics
+            # bug. If trail_active set with sl_pct > BE_PCT, that's the buggy
+            # trail's wider-loss state. Reset to BE+small buffer to prevent
+            # positions from riding into loss past intended threshold.
+            if pos.get('trail_active') and float(pos.get('sl_pct', 0) or 0) > 0.005:
+                with _state_lock:
+                    if coin in _state['open_positions']:
+                        _state['open_positions'][coin]['sl_pct'] = 0.0  # BE
+                        _state['open_positions'][coin]['trail_active'] = False
+                        _state['open_positions'][coin]['sl_at_be'] = True
+                _log(f"{coin} TRAIL_RESET: stale buggy trail cleared, SL→BE")
+                pos = _state['open_positions'].get(coin) or pos
+
             # 1+2: traditional SL/TP
             if raw_move <= -pos['sl_pct']:
                 _log(f"{coin} SL hit pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat")
