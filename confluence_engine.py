@@ -402,6 +402,27 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # LIQ as 5th system — liquidation cascade fade. Binance forceOrder feed
+    # tracks per-coin liquidations; a cascade (>$2M one direction in 60s)
+    # is an exhaustion event that typically reverts. fade_direction = the
+    # side that absorbs the cascade.
+    #
+    # This is fundamentally different from price-action and funding signals:
+    # it's POSITION FLOW data — direct evidence of forced position exits —
+    # which can't be derived from price bars or microstructure rates.
+    # Strongest orthogonal signal in the stack.
+    #
+    # Cascade events are rare (high threshold) but when they fire, the
+    # statistical edge is well-documented. Allowed to fire alone OR in
+    # combination with any system. Best-effort import + fail-soft.
+    try:
+        import liquidation_ws as _liq
+        _casc = _liq.get_cascade(coin, max_age_sec=180)  # cascade within 3min
+        if _casc:
+            recents['LIQ'] = [(now_ts, _casc['fade_direction'])]
+    except Exception:
+        pass
+
     # Tally per side
     by_side = {'BUY': set(), 'SELL': set()}
     latest_ts_by_side = {'BUY': 0, 'SELL': 0}
@@ -480,6 +501,11 @@ def eval_coin(coin, bars_15m, now_ts=None):
             return None
 
     _STATS['signals_yielded'] += 1
+    # 2026-04-27: track LIQ contribution to confluence signals — see how
+    # often the cascade fade is actually agreeing with other systems.
+    if 'LIQ' in by_side[best_side]:
+        _STATS.setdefault('liq_contributed', 0)
+        _STATS['liq_contributed'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {
         'coin': coin,
