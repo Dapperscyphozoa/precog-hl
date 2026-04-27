@@ -2409,6 +2409,14 @@ def health():
                     'order_state': order_state.status(),
                     'ledger':       position_ledger.status(),
                     'hl_user_ws':   hl_user_ws.status(),
+                    # 2026-04-27: surface external data-source feeds for diagnostics.
+                    # These power the new orthogonal confluence systems (LIQ, CVD,
+                    # WHALE). If any are dead, those engines fail-soft silent.
+                    'liquidation_ws': (liquidation_ws.status() if hasattr(liquidation_ws, 'status') else {}),
+                    'cvd_ws':         (cvd_ws.status() if hasattr(cvd_ws, 'status') else {}),
+                    'whale_filter':   (whale_filter.status() if hasattr(whale_filter, 'status') else {}),
+                    'spoof_detection':(spoof_detection.status() if hasattr(spoof_detection, 'status') else {}),
+                    'oi_tracker':     (oi_tracker.status() if hasattr(oi_tracker, 'status') else {}),
                     'enforce_throttle': {
                         **_ENFORCE_STATS,
                         'cooldown_sec': _ENFORCE_COOLDOWN_SEC,

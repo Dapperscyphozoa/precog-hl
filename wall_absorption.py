@@ -275,7 +275,13 @@ def check(coin, current_px, regime='unknown', active_absorption_count=0):
         _STATS['disabled'] += 1
         return None, None
 
-    if regime != 'chop':
+    # 2026-04-27: chop-only gate removed. Wall-absorption is a structural
+    # bounce off support/resistance — valid in any regime, not just chop.
+    # In bull-calm with strong walls at BB extremes, the bounce thesis still
+    # holds. Set WALL_ABS_CHOP_ONLY=1 in env to revert to chop-only.
+    import os as _os_wabs
+    _wabs_chop_only = _os_wabs.environ.get('WALL_ABS_CHOP_ONLY', '0') == '1'
+    if _wabs_chop_only and regime != 'chop':
         _STATS['wrong_regime'] += 1
         return None, None
 

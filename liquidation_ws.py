@@ -10,10 +10,11 @@ except ImportError:
     websocket = None
 
 import os as _os
-CASCADE_USD_THRESHOLD = float(_os.environ.get('LIQ_CASCADE_USD_THRESHOLD', '750000'))
-# 2026-04-27: 2M → 750k. \$2M cascade is rare (<5/day across whole universe).
-# 750k still requires meaningful position flush but increases fire rate
-# 3-4x. Override via env LIQ_CASCADE_USD_THRESHOLD to revert.
+CASCADE_USD_THRESHOLD = float(_os.environ.get('LIQ_CASCADE_USD_THRESHOLD', '400000'))
+# 2026-04-27 (later): 750k → 400k. /confluence engine_stats showed zero
+# liq_contributed across 398 evals — current regime quiet, 750k threshold
+# rarely met. 400k captures meaningful one-direction flush events without
+# tripping on every minor liq. Override via env to revert.
 CASCADE_WINDOW_SEC = 60
 WHALE_LIQ_USD = 100_000             # single liq >$100k = whale
 
