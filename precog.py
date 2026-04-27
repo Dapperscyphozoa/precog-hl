@@ -562,6 +562,23 @@ TRAIL_LADDER = _TRAIL_OVERRIDE if _TRAIL_OVERRIDE else [
     (0.035, 0.025),
 ]
 
+# 2026-04-27: live env reader with 30s TTL — env edits apply without restart.
+_TRAIL_LIVE_CACHE = {'val': TRAIL_LADDER, 'raw': os.environ.get('TRAIL_LADDER', ''), 'ts': 0.0}
+
+def _trail_ladder_live():
+    """Read TRAIL_LADDER from env each call (cached 30s)."""
+    import time as _t
+    now = _t.time()
+    if now - _TRAIL_LIVE_CACHE['ts'] < 30:
+        return _TRAIL_LIVE_CACHE['val']
+    raw = os.environ.get('TRAIL_LADDER', '')
+    if raw != _TRAIL_LIVE_CACHE['raw']:
+        parsed = _parse_trail_ladder()
+        _TRAIL_LIVE_CACHE['val'] = parsed if parsed else TRAIL_LADDER
+        _TRAIL_LIVE_CACHE['raw'] = raw
+    _TRAIL_LIVE_CACHE['ts'] = now
+    return _TRAIL_LIVE_CACHE['val']
+
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
 COIN_WR_FILTER_ENABLED = os.environ.get('COIN_WR_FILTER', '1') != '0'
@@ -783,7 +800,21 @@ MIN_RR = float(os.environ.get('MIN_RR', '1.2'))
 # regardless of computed size. ($11 not $10 — buffer above HL's $10 minimum
 # for rounding + slippage so orders don't bounce.) Use for diagnostic phase
 # only. Set to 0 to disable and resume normal sizing.
-FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '44'))
+# 2026-04-27: env-live readers. These wrappers read os.environ on each call
+# instead of caching at module load — lets Render env edits apply WITHOUT
+# requiring a service restart. Critical for Phase 1→2 transitions.
+FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '44'))  # boot value, retained for legacy reads
+
+def _force_notional_usd_live():
+    """Read FORCE_NOTIONAL_USD on each call. 0 = disabled (computed sizing).
+    Empty/unset = backward-compat default $44."""
+    raw = os.environ.get('FORCE_NOTIONAL_USD', '').strip()
+    if raw == '':
+        return 44.0
+    try:
+        return float(raw)
+    except Exception:
+        return 44.0
 # 2026-04-27: 22 → 44 (kept). User: focus on conviction × volume, not
 # notional — but $44 stays as a baseline since system is proven.
 # The actual lever pulled today: CONF_MIN_DOMAINS gate (domain-coverage
@@ -804,7 +835,11 @@ COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'R
 #   DISABLE_ENGINES=TREND_CONT          → skip TREND_CONT engine
 #   DISABLE_ENGINES=TREND_CONT,WALL_BNC → skip both
 #   DISABLE_ENGINES=CONFLUENCE_*        → skip all confluence engines
-_DISABLED_ENGINES_RAW = os.environ.get('DISABLE_ENGINES', '')
+_DISABLED_ENGINES_RAW = os.environ.get('DISABLE_ENGINES', '')  # boot snapshot
+
+def _disabled_engines_live():
+    """Read DISABLE_ENGINES on each call so env edits apply without restart."""
+    return os.environ.get('DISABLE_ENGINES', '') or _DISABLED_ENGINES_RAW
 
 # 2026-04-27: auto engine-pause based on rolling WR.
 # If an engine's WR over the last N closed trades drops below threshold,
@@ -858,9 +893,10 @@ def _engine_disabled(name, coin=None):
     """
     if not name:
         return False
-    # 1. Manual env-driven kill list
-    if _DISABLED_ENGINES_RAW:
-        for tok in _DISABLED_ENGINES_RAW.split(','):
+    # 1. Manual env-driven kill list (live-readable)
+    _disabled_raw = _disabled_engines_live()
+    if _disabled_raw:
+        for tok in _disabled_raw.split(','):
             tok = tok.strip()
             if not tok:
                 continue
@@ -2675,7 +2711,7 @@ def health():
         except Exception: pass
     return jsonify({'status':'ok','version':'v8.28',
                     'commit_live': _commit_short,
-                    'disabled_engines': _DISABLED_ENGINES_RAW or None,
+                    'disabled_engines': _disabled_engines_live() or None,
                     'webhook_security': {
                         'enabled': os.environ.get('WEBHOOK_ENABLED', '0') == '1',
                         'require_secret': os.environ.get('WEBHOOK_REQUIRE_SECRET', '1') == '1',
@@ -2860,7 +2896,7 @@ def precog_status_endpoint():
             'by_engine': _agg.get('by_engine', {}),
             'by_coin': _agg.get('by_coin', {}),
             'engine_auto_pause': _ap_state,
-            'disabled_engines': _DISABLED_ENGINES_RAW or None,
+            'disabled_engines': _disabled_engines_live() or None,
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
@@ -6571,8 +6607,13 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     # 2026-04-25: DEBUG mode — force fixed notional regardless of sizing logic.
     # Bypasses risk_mult, leverage, confluence, session, news, etc. Pure fixed
     # USD per trade for clean data collection during bug-hunt phase.
-    if FORCE_NOTIONAL_USD > 0:
-        raw = FORCE_NOTIONAL_USD / px
+    # 2026-04-27: read env LIVE so Render env edits apply without restart.
+    # FORCE_NOTIONAL_USD>0 → force that USD notional.
+    # FORCE_NOTIONAL_USD=0 → use computed sizing (Phase 2 transition).
+    # Unset → default $44 (backward compat).
+    _live_force = _force_notional_usd_live()
+    if _live_force > 0:
+        raw = _live_force / px
     if raw>=100: return round(raw,0)
     if raw>=10:  return round(raw,1)
     if raw>=1:   return round(raw,2)
@@ -6689,7 +6730,14 @@ def try_tier_bump(incoming_coin, state, live_positions):
 # race that was triggering the audit→enforce cascade. Falls back to legacy
 # place() if disabled or if atomic submission fails.
 
-MAX_SL_PCT = float(os.environ.get('MAX_SL_PCT', '0.025'))
+MAX_SL_PCT = float(os.environ.get('MAX_SL_PCT', '0.025'))  # boot value
+
+def _max_sl_pct_live():
+    """Read MAX_SL_PCT on each call so env edits apply without restart."""
+    try:
+        return float(os.environ.get('MAX_SL_PCT', '0.025'))
+    except Exception:
+        return MAX_SL_PCT
 # 2026-04-26: global hard ceiling on SL distance. Per-coin OOS configs ranged
 # 1.5%-5% (RSR=4%, JTO=3%, etc.). At min notional, a 4% stop is bounded loss,
 # but observed RSR -$0.45 + JTO -$0.34 events drove the engine PnL deep into
@@ -6698,11 +6746,10 @@ MAX_SL_PCT = float(os.environ.get('MAX_SL_PCT', '0.025'))
 # Disable cap entirely with MAX_SL_PCT=0.
 
 def _apply_sl_cap(sl_pct):
-    """Clamp SL distance to MAX_SL_PCT (env-tunable). 0 disables the cap."""
-    if not sl_pct or sl_pct <= 0:
-        return sl_pct
-    if MAX_SL_PCT > 0 and sl_pct > MAX_SL_PCT:
-        return MAX_SL_PCT
+    """Clamp SL distance to MAX_SL_PCT (env-tunable, live-readable)."""
+    cap = _max_sl_pct_live()
+    if cap > 0 and sl_pct is not None and sl_pct > cap:
+        return cap
     return sl_pct
 
 
@@ -10031,7 +10078,7 @@ def main():
                                 _pl_state = state.get('positions', {}).get(_pl_coin, {})
                                 _trail_level = int(_pl_state.get('sl_trail_level', 0))
                                 _cur_mfe = (_mm_pos.get('mfe_pct') or 0) if _mm_pos else 0
-                                for _ti, (_t_mfe, _t_lock) in enumerate(TRAIL_LADDER):
+                                for _ti, (_t_mfe, _t_lock) in enumerate(_trail_ladder_live()):
                                     if _ti < _trail_level:
                                         continue
                                     if _cur_mfe >= _t_mfe:
@@ -10044,7 +10091,7 @@ def main():
                                                                    buffer_pct=_t_lock)
                                             _pl_state['sl_trail_level'] = _ti + 1
                                             state.setdefault('positions', {})[_pl_coin] = _pl_state
-                                            log(f"{_pl_coin} TRAIL_SL rung {_ti+1}/{len(TRAIL_LADDER)}: "
+                                            log(f"{_pl_coin} TRAIL_SL rung {_ti+1}/{len(_trail_ladder_live())}: "
                                                 f"MFE {_cur_mfe*100:.2f}% ≥ {_t_mfe*100:.1f}% — "
                                                 f"SL → entry+{_t_lock*100:.1f}%")
                                         break  # one rung per tick
