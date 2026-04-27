@@ -34,12 +34,25 @@ from collections import defaultdict
 # (signal starvation by design). Each system already passes 6 quality filters.
 #
 # 2026-04-27: 1 → 2. Stack now has 10 systems across 6 data domains.
-# With this many orthogonal inputs, requiring 2+ to agree no longer starves
-# signals — instead it filters every fire to be high-conviction multi-system
-# confirmed. User direction: build to 150-200 high-conviction trades/day,
-# quality over quantity per fire. Tunable via CONF_MIN_SYS env.
+# 2026-04-27 (later): added CONF_MIN_DOMAINS=2 — true high-conviction filter.
+# A 2+ system count is meaningless if both systems are in the same data
+# domain (e.g. SNIPER+DAY both price-action — correlated, not orthogonal).
+# CONF_MIN_DOMAINS forces fires to span 2+ distinct domains.
 import os as _os_minsys
 CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '2'))
+CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
+
+# Domain map — groups correlated inputs.
+# Only cross-domain agreement counts as TRUE confluence.
+SYSTEM_DOMAIN = {
+    'SNIPER': 'price_action', 'DAY': 'price_action', 'SWING': 'price_action',
+    'FUNDING': 'microstructure', 'FUND_ARB': 'microstructure',
+    'LIQ': 'order_flow_event', 'SPOOF': 'order_flow_event',
+    'OI': 'position_count', 'CVD': 'position_count',
+    'WHALE': 'whale_flow',
+    'WALL_ABS': 'order_book',
+    'NEWS': 'sentiment',
+}
 CONF_WINDOW_S       = 24 * 3600
 COIN_COOLDOWN_S     = 24 * 3600
 TP_PCT              = 0.04
@@ -580,6 +593,25 @@ def eval_coin(coin, bars_15m, now_ts=None):
 
     if best_side is None:
         _STATS['no_candidate_24h'] += 1
+        return None
+
+    # 2026-04-27: DOMAIN-COVERAGE GATE — true high-conviction filter.
+    # CONF_MIN_SYS counts SYSTEMS, but two systems in the same data domain
+    # are correlated, not independent. Real confluence = signals from
+    # different DATA DOMAINS agreeing.
+    #
+    # Examples that previously passed CONF_MIN_SYS=2 but are LOW-conviction:
+    #   SNIPER + DAY      (both price_action — same data, different timeframes)
+    #   OI + CVD          (both position_count — measuring the same thing)
+    #   LIQ + SPOOF       (both order_flow_event — correlated within domain)
+    #
+    # Now require 2+ DOMAINS in the agreeing system set. This is the
+    # actual "orthogonal confluence" filter the user has been pushing for.
+    _systems_set = by_side[best_side]
+    _domains_in_set = {SYSTEM_DOMAIN.get(s, '_unknown') for s in _systems_set}
+    if len(_domains_in_set) < CONF_MIN_DOMAINS:
+        _STATS.setdefault('low_domain_dropped', 0)
+        _STATS['low_domain_dropped'] += 1
         return None
 
     # 2026-04-26: SWING gate — require FUNDING confirmation specifically.
