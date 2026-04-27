@@ -722,11 +722,33 @@ def _monitor_exits():
                 _close_position(coin, 'tp', raw_move)
                 continue
 
-            # 3: profit lock (close at +1.5% raw)
+            # 3: profit lock — at +1.5% raw, hand off to CONTINUOUS TRAIL
+            # 2026-04-27: was force-close at +1.5%. Now ratchets SL to
+            # max(1.5%, MFE - TRAIL_DISTANCE) every tick. Captures breakouts
+            # to 3-5% while protecting +1.5% floor on reversal.
+            # Tunable: PROFIT_LOCK_FORCE_CLOSE=1 to revert to old behavior.
+            # Tunable: CONTINUOUS_TRAIL_DISTANCE (default 0.005 = 0.5%).
             if raw_move >= PROFIT_LOCK_PCT:
-                _log(f"{coin} PROFIT_LOCK pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat")
-                _close_position(coin, 'tp_lock', raw_move)
-                continue
+                if os.environ.get('PROFIT_LOCK_FORCE_CLOSE', '0') == '1':
+                    _log(f"{coin} PROFIT_LOCK pnl={raw_move*100:.2f}% age={age/60:.0f}m — flat (force_close)")
+                    _close_position(coin, 'tp_lock', raw_move)
+                    continue
+                # Continuous trail: SL = max(1.5%, MFE - distance)
+                _trail_dist = float(os.environ.get('CONTINUOUS_TRAIL_DISTANCE', '0.005'))
+                _cur_mfe = pos.get('mfe_pct', raw_move) or raw_move
+                _target_sl_pct = max(PROFIT_LOCK_PCT, _cur_mfe - _trail_dist)
+                _current_sl = float(pos.get('sl_pct', 0) or 0)
+                # Ratchet SL up only — never decrease
+                if _target_sl_pct > _current_sl + 0.001:
+                    with _state_lock:
+                        if coin in _state['open_positions']:
+                            _state['open_positions'][coin]['sl_pct'] = _target_sl_pct
+                            _state['open_positions'][coin]['sl_at_be'] = False  # past BE now
+                            _state['open_positions'][coin]['trail_active'] = True
+                    _log(f"{coin} CONT_TRAIL: MFE {_cur_mfe*100:.2f}% raw {raw_move*100:.2f}% "
+                         f"→ SL={_target_sl_pct*100:.2f}% (trail {_trail_dist*100:.1f}%)")
+                # Don't continue — let SL check on next tick evaluate against new SL
+                # If raw_move falls below target_sl_pct, the SL hit at line 716 fires.
 
             # 4: BE shift (move SL to entry once raw ≥ 0.8%)
             if raw_move >= PROFIT_LOCK_BE_PCT and not pos.get('sl_at_be'):
