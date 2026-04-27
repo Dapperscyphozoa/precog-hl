@@ -423,6 +423,32 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # SPOOF as 7th system — fade pulled walls.
+    # spoof_detection scans for large walls that disappear (spoofing pattern).
+    # When detected, the direction is the FADE of the spoof (the way price
+    # was being held back). Discrete event, rare, high-conviction.
+    # 120s freshness window. Cooldown per coin prevents duplicate fires.
+    try:
+        import spoof_detection as _spoof
+        _sp = _spoof.get_spoof_signal(coin, max_age_sec=120)
+        if _sp:
+            recents['SPOOF'] = [(now_ts, _sp['direction'])]
+    except Exception:
+        pass
+
+    # CVD as 8th system — cumulative volume delta divergence.
+    # cvd_ws tracks per-coin buy-vs-sell volume from Binance aggTrade feed.
+    # Threshold $500k cumulative net delta in 300s window = directional
+    # buyer/seller dominance. Confirms or contradicts price direction.
+    # Continuous state — gated to combine-required.
+    try:
+        import cvd_ws as _cvd
+        _cs = _cvd.cvd_signal(coin)
+        if _cs in ('BUY', 'SELL'):
+            recents['CVD'] = [(now_ts, _cs)]
+    except Exception:
+        pass
+
     # OI as 6th system — open-interest direction confirmation.
     # oi_tracker polls Binance OI every 5min and tracks 15min deltas.
     # Logic (oi_bias()):
@@ -546,6 +572,19 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['oi_alone_dropped'] += 1
             return None
 
+    # 2026-04-27: CVD-alone gate. CVD is similar to OI — continuous state
+    # ($500k+ cumulative delta in 300s). Could fire often during sustained
+    # buying/selling. Require combination so CVD adds confirmation, not
+    # pure direction. SPOOF stays alone-allowed (discrete event).
+    # Tunable via CONF_CVD_REQUIRE_COMBINE (default 1).
+    _cvd_requires_combine = (_os.environ.get('CONF_CVD_REQUIRE_COMBINE', '1') == '1')
+    if _cvd_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'CVD' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('cvd_alone_dropped', 0)
+            _STATS['cvd_alone_dropped'] += 1
+            return None
+
     _STATS['signals_yielded'] += 1
     # 2026-04-27: track per-system contribution to confluence signals
     if 'LIQ' in by_side[best_side]:
@@ -554,6 +593,12 @@ def eval_coin(coin, bars_15m, now_ts=None):
     if 'OI' in by_side[best_side]:
         _STATS.setdefault('oi_contributed', 0)
         _STATS['oi_contributed'] += 1
+    if 'SPOOF' in by_side[best_side]:
+        _STATS.setdefault('spoof_contributed', 0)
+        _STATS['spoof_contributed'] += 1
+    if 'CVD' in by_side[best_side]:
+        _STATS.setdefault('cvd_contributed', 0)
+        _STATS['cvd_contributed'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {
         'coin': coin,
