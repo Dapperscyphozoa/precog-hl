@@ -56,7 +56,12 @@ CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
 #
 # Continuous-state systems (CVD, OI, FUND_ARB, NEWS) describe ongoing
 # conditions and DO need confirmation — they remain combine-required.
-EVENT_ALONE_ALLOWED = {'LIQ', 'SPOOF', 'WHALE', 'WALL_ABS'}
+#
+# 2026-04-27 (later): WHALE removed from event-alone. Backtest top=100 showed
+# FIL got 13 WHALE-alone signals with 0W/12L = -16.84% sum. ETH with
+# DAY+WHALE was 1W/0L+2timeouts = +4.2% sum. WHALE is HIGH-noise alone but
+# valuable as a CONFIRMATION layer — it must combine with price-action.
+EVENT_ALONE_ALLOWED = {'LIQ', 'SPOOF', 'WALL_ABS'}
 
 # Domain map — groups correlated inputs.
 # Only cross-domain agreement counts as TRUE confluence.
