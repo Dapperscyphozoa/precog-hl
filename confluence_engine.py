@@ -31,12 +31,15 @@ from collections import defaultdict
 
 # ─── LOCKED CONFIG (do not tune without OOS re-validation) ──────────
 # 2026-04-25: CONF_MIN_SYS 2 → 1. Strict 2+ confluence was producing 0 fires
-# (signal starvation by design). Each system already passes 6 quality filters
-# (rb/struct/dist/rsi/vol/htf — _f1 through _f6). A single-system signal that
-# survives all 6 IS high quality. Per spec: "allow 1 engine if quality is high."
-# 6-filter pass equates to "confidence >= 8" requirement — relying on existing
-# gates rather than adding a new score.
-CONF_MIN_SYS        = 1
+# (signal starvation by design). Each system already passes 6 quality filters.
+#
+# 2026-04-27: 1 → 2. Stack now has 10 systems across 6 data domains.
+# With this many orthogonal inputs, requiring 2+ to agree no longer starves
+# signals — instead it filters every fire to be high-conviction multi-system
+# confirmed. User direction: build to 150-200 high-conviction trades/day,
+# quality over quantity per fire. Tunable via CONF_MIN_SYS env.
+import os as _os_minsys
+CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '2'))
 CONF_WINDOW_S       = 24 * 3600
 COIN_COOLDOWN_S     = 24 * 3600
 TP_PCT              = 0.04
@@ -423,6 +426,46 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # FUND_ARB as 11th system — cross-exchange funding divergence.
+    # funding_arb.arb_bias compares HL funding rate vs Binance/Bybit/OKX.
+    # If HL funding > peer by >5bp/hr → HL longs paying too much →
+    # short-bias on HL (the exchange-specific positioning is extreme).
+    # If HL funding < peer by >5bp/hr → HL shorts paying → long-bias.
+    #
+    # Different from FUNDING (absolute extreme): this captures EXCHANGE-
+    # SPECIFIC mispricing — the kind that arbs out within 30-60min.
+    # Pure orthogonal info: cross-venue positioning differential.
+    try:
+        import funding_arb as _farb
+        _ab = _farb.arb_bias(coin)
+        if _ab == 1:
+            recents['FUND_ARB'] = [(now_ts, 'BUY')]
+        elif _ab == -1:
+            recents['FUND_ARB'] = [(now_ts, 'SELL')]
+    except Exception:
+        pass
+
+    # NEWS as 12th system — market-wide directional sentiment.
+    # news_filter polls news feed, scores headlines for magnitude +
+    # direction. direction_bias > +0.5 = strong bullish news flow,
+    # < -0.5 = strong bearish. Market-wide (not per-coin) — applies
+    # the same direction across all coins evaluated this scan.
+    #
+    # Captures macro/exogenous events that price-action-only systems
+    # can't see until after the fact. Particularly powerful in
+    # combination with order-flow systems (LIQ/SPOOF/WHALE) — news
+    # justifies why position flow is happening.
+    try:
+        import news_filter as _news
+        _nstate = _news.get_state() or {}
+        _nbias = _nstate.get('direction_bias') or _nstate.get('news_direction') or 0
+        if _nbias > 0.5:
+            recents['NEWS'] = [(now_ts, 'BUY')]
+        elif _nbias < -0.5:
+            recents['NEWS'] = [(now_ts, 'SELL')]
+    except Exception:
+        pass
+
     # WHALE as 9th system — large fill imbalance directional signal.
     # whale_filter.get_imbalance returns (buy_usd, sell_usd, net_bias).
     # Bias > 0.5 = strong buying by whales; bias < -0.5 = strong selling.
@@ -641,6 +684,12 @@ def eval_coin(coin, bars_15m, now_ts=None):
     if 'WALL_ABS' in by_side[best_side]:
         _STATS.setdefault('wall_abs_contributed', 0)
         _STATS['wall_abs_contributed'] += 1
+    if 'FUND_ARB' in by_side[best_side]:
+        _STATS.setdefault('fund_arb_contributed', 0)
+        _STATS['fund_arb_contributed'] += 1
+    if 'NEWS' in by_side[best_side]:
+        _STATS.setdefault('news_contributed', 0)
+        _STATS['news_contributed'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
     return {
         'coin': coin,
