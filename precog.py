@@ -2738,7 +2738,7 @@ def health():
 
 @app.route('/confluence', methods=['GET'])
 def confluence_status():
-    """System B status: fires, WR, PnL, open positions."""
+    """System B status: fires, WR, PnL ($ AND %), open positions."""
     try:
         import confluence_worker as cw
         st = cw.status()
@@ -2746,44 +2746,121 @@ def confluence_status():
         total_closed = st.get('wins', 0) + st.get('losses', 0)
         if total_closed > 0:
             wr = st['wins'] * 100 // total_closed
-        # Last-bar diagnostics — if empty, worker isn't fetching candles
         last_bars = st.get('last_bar_ts', {})
+        # 2026-04-27: pull $ PnL from trade_ledger (System B = CONFLUENCE_*).
+        # In-memory _state['total_pnl_pct'] is fragile across restarts; ledger
+        # is canonical. window_hours tunable via ?hours=N query param.
+        try:
+            _hrs = float(flask_request.args.get('hours', '12'))
+        except Exception:
+            _hrs = 12.0
+        try:
+            import trade_ledger as _tl
+            _agg = _tl.system_aggregate(system='b', hours=_hrs)
+        except Exception:
+            _agg = {}
         return jsonify({
+            'system': 'B',
             'enabled': cw.ENABLED,
             'dry_run': cw.DRY_RUN,
             'scan_interval_s': cw.SCAN_INTERVAL_S,
             'max_positions': cw.MAX_POSITIONS,
             'risk_pct': cw.RISK_PCT,
+            # Live worker counters (in-memory, since boot)
             'total_fires': st.get('total_fires', 0),
             'wins': st.get('wins', 0),
             'losses': st.get('losses', 0),
             'timeouts': st.get('timeouts', 0),
             'wr_pct': wr,
             'total_pnl_pct': st.get('total_pnl_pct', 0.0),
+            # 2026-04-27: $ PnL from trade_ledger (canonical, restart-safe)
+            'window_hours': _agg.get('window_hours', _hrs),
+            'closed_count': _agg.get('closed_count', 0),
+            'wins_window': _agg.get('wins', 0),
+            'losses_window': _agg.get('losses', 0),
+            'breakevens_window': _agg.get('breakevens', 0),
+            'wr_pct_window': _agg.get('wr_pct'),
+            'total_pnl_usd': _agg.get('total_pnl_usd', 0.0),
+            'avg_win_usd': _agg.get('avg_win_usd', 0.0),
+            'avg_loss_usd': _agg.get('avg_loss_usd', 0.0),
+            'by_engine': _agg.get('by_engine', {}),
+            'by_coin': _agg.get('by_coin', {}),
             'open_positions': st.get('open_positions', {}),
             'last_fire_ts': st.get('last_fire_ts', {}),
-            # Diagnostics
             'last_bar_coins': len(last_bars),
             'last_bar_sample': dict(list(last_bars.items())[:5]),
             'killed_coins': list(st.get('killed_coins', {}).keys())[:20],
-            # Per-filter rejection counters (surgical diagnosis for "why 0 fires")
             'engine_stats': st.get('engine_stats', {}),
-            # 2026-04-26: per-gate reject counters across the scan→fire pipeline.
-            # signals_yielded - sum(rejects_last_scan) - last_scan_fires should = 0.
-            # Whichever bucket dominates rejects_last_scan IS the blocker.
             'rejects_cumulative': st.get('rejects', {}),
             'rejects_last_scan': st.get('rejects_last_scan', {}),
             'last_scan_at': st.get('last_scan_at', 0),
             'last_scan_signals': st.get('last_scan_signals', 0),
             'last_scan_fires': st.get('last_scan_fires', 0),
-            # 2026-04-26: fire-stage diagnostics (why post-gate signals don't fire)
             'place_attempts': st.get('place_attempts', 0),
             'place_filled':   st.get('place_filled', 0),
             'place_no_fill':  st.get('place_no_fill', 0),
             'place_error':    st.get('place_error', 0),
-            # 2026-04-26: stale-flat rotation diagnostics
-            'stale_flat_marked':  st.get('stale_flat_marked', 0),    # times marked eligible
-            'stale_flat_rotated': st.get('stale_flat_rotated', 0),   # times actually evicted
+            'stale_flat_marked':  st.get('stale_flat_marked', 0),
+            'stale_flat_rotated': st.get('stale_flat_rotated', 0),
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/precog_status', methods=['GET'])
+def precog_status_endpoint():
+    """System A status — mirrors /confluence layout. Aggregates non-CONFLUENCE_*
+    engine trades from trade_ledger. window_hours tunable via ?hours=N.
+
+    Provides parity with System B for at-a-glance comparison. $ and % PnL,
+    by_engine and by_coin breakdowns, WR — same shape as /confluence.
+    """
+    try:
+        try:
+            _hrs = float(flask_request.args.get('hours', '12'))
+        except Exception:
+            _hrs = 12.0
+        try:
+            import trade_ledger as _tl
+            _agg = _tl.system_aggregate(system='a', hours=_hrs)
+        except Exception as _e_agg:
+            return jsonify({'err': f'aggregate err: {_e_agg}'}), 500
+
+        # Surface engine auto-pause and disabled-engines for parity with /confluence
+        try:
+            _ap_state = {}
+            if _AUTO_PAUSE_ENABLED:
+                import trade_ledger as _tl_ap
+                _candidate_engines = ['BB_REJ', 'PIVOT', 'TREND_CONT', 'WALL_BNC',
+                                      'WALL_EXH', 'WALL_ABSORB', 'FUNDING_MR',
+                                      'LIQ_CSCD', 'SPOOF', 'PULLBACK', 'INSIDE_BAR']
+                for _eng in _candidate_engines:
+                    _wr, _n, _ts = _tl_ap.engine_rolling_wr(
+                        _eng, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
+                    if _wr is None or _n < 2:
+                        continue
+                    _paused = _wr < _AUTO_PAUSE_MIN_WR and _ts and (time.time() - _ts) / 3600.0 < _AUTO_PAUSE_HOURS
+                    _ap_state[_eng] = {'wr_pct': round(_wr, 1), 'n': _n, 'paused': _paused}
+        except Exception:
+            _ap_state = {}
+
+        return jsonify({
+            'system': 'A',
+            'enabled': True,
+            'risk_pct': INITIAL_RISK_PCT,
+            'window_hours': _agg.get('window_hours', _hrs),
+            'closed_count': _agg.get('closed_count', 0),
+            'wins_window': _agg.get('wins', 0),
+            'losses_window': _agg.get('losses', 0),
+            'breakevens_window': _agg.get('breakevens', 0),
+            'wr_pct_window': _agg.get('wr_pct'),
+            'total_pnl_usd': _agg.get('total_pnl_usd', 0.0),
+            'avg_win_usd': _agg.get('avg_win_usd', 0.0),
+            'avg_loss_usd': _agg.get('avg_loss_usd', 0.0),
+            'by_engine': _agg.get('by_engine', {}),
+            'by_coin': _agg.get('by_coin', {}),
+            'engine_auto_pause': _ap_state,
+            'disabled_engines': _DISABLED_ENGINES_RAW or None,
         })
     except Exception as e:
         return jsonify({'err': str(e)}), 500
