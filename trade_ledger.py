@@ -707,6 +707,54 @@ def recent_consecutive_losses(coin, hours=4.0):
     return consec, closes[0][0]
 
 
+def engine_rolling_ev(engine, n_window=5, hours=24.0):
+    """Compute rolling mean $ PnL (expected value) for a given engine over
+    the last N closed trades within `hours`. Returns (mean_pnl_usd, n,
+    last_close_ts). Used by auto-pause for $ EV gating — catches engines
+    with decent WR but losses that exceed wins.
+
+    Excludes RECONCILED/untagged_legacy noise rows (consistent with
+    system_aggregate filtering).
+    """
+    if not engine:
+        return None, 0, None
+    if engine in ('RECONCILED', 'untagged_legacy'):
+        return None, 0, None
+    cutoff = time.time() - hours * 3600.0
+    closes = []
+    with _LOCK:
+        for tid, row in _INDEX['by_trade_id'].items():
+            if (row.get('engine') or '') != engine:
+                continue
+            if row.get('event_type') != 'CLOSE':
+                continue
+            ts_iso = row.get('timestamp', '')
+            if not ts_iso:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if ts < cutoff:
+                continue
+            try:
+                pnl_raw = row.get('pnl', '')
+                if pnl_raw == '' or pnl_raw is None:
+                    continue
+                pnl = float(pnl_raw)
+            except (TypeError, ValueError):
+                continue
+            closes.append((ts, pnl))
+    if not closes:
+        return None, 0, None
+    closes.sort(key=lambda x: -x[0])
+    recent = closes[:n_window]
+    if len(recent) < 2:
+        return None, len(recent), recent[0][0]
+    mean = sum(p for _, p in recent) / len(recent)
+    return mean, len(recent), recent[0][0]
+
+
 def engine_rolling_wr(engine, n_window=5, hours=24.0):
     """Compute rolling WR for a given engine over the last N closed trades
     within `hours`. Returns (wr_pct, n_decided, last_close_ts) where:
