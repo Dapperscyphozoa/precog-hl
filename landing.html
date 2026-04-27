@@ -702,6 +702,21 @@ body::after {
     <div id="ob-heatmap" style="height: 520px; position: relative;"></div>
 </div>
 
+<!-- MACRO STATE STRIP -->
+<div class="panel" style="margin-bottom: 16px; padding: 8px 14px;">
+    <div id="macro-strip" style="font-size: 11px; letter-spacing: 0.05em; opacity: 0.85;">// macro: loading…</div>
+</div>
+
+<!-- PRECOG · SYSTEM A -->
+<div class="panel" style="margin-bottom: 16px;">
+    <div class="panel-head">
+        <div class="panel-title">Precog · System A</div>
+        <div class="panel-meta" id="precog-meta">—</div>
+    </div>
+    <div id="precog-stats" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 16px;"></div>
+    <div id="precog-engines" style="font-size: 11px; opacity: 0.85; letter-spacing: 0.04em;"></div>
+</div>
+
 <!-- CONFLUENCE · SYSTEM B -->
 <div class="panel" style="margin-bottom: 32px;">
     <div class="panel-head">
@@ -1038,19 +1053,27 @@ async function loadConfluence() {
         const pf = d.place_filled || 0;
         const pn = d.place_no_fill || 0;
         const pe = d.place_error || 0;
+        // 12h $ aggregates from trade_ledger (canonical) — same shape as System A
+        const usdPnl = (d.total_pnl_usd != null) ? Number(d.total_pnl_usd) : null;
+        const usdColor = (usdPnl == null) ? '' : (usdPnl >= 0 ? 'color:var(--acid)' : 'color:#f88');
+        const usdStr = (usdPnl != null) ? `${usdPnl >= 0 ? '+' : ''}$${usdPnl.toFixed(2)}` : '—';
+        const wrWin = (d.wr_pct_window != null) ? `${d.wr_pct_window.toFixed(1)}%` : '—';
+        const wWin = d.wins_window || 0;
+        const lWin = d.losses_window || 0;
+        const avgW = (d.avg_win_usd != null) ? `+$${Number(d.avg_win_usd).toFixed(3)}` : '—';
+        const avgL = (d.avg_loss_usd != null) ? `$${Number(d.avg_loss_usd).toFixed(3)}` : '—';
         document.getElementById('confluence-stats').innerHTML = `
-            <div class="metric-cell"><div class="metric-val">${fires}</div><div class="metric-lbl">Fires</div></div>
-            <div class="metric-cell"><div class="metric-val">${wins}</div><div class="metric-lbl">Wins</div></div>
-            <div class="metric-cell"><div class="metric-val">${losses}</div><div class="metric-lbl">Losses</div></div>
-            <div class="metric-cell"><div class="metric-val">${wr}${totN?'%':''}</div><div class="metric-lbl">WR</div></div>
-            <div class="metric-cell"><div class="metric-val">${pnlPct}%</div><div class="metric-lbl">PnL %</div></div>
+            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL 12h</div></div>
+            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR 12h</div></div>
+            <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}</div><div class="metric-lbl">W/L 12h</div></div>
+            <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
+            <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
+            <div class="metric-cell"><div class="metric-val">${fires}</div><div class="metric-lbl">Fires (live)</div></div>
+            <div class="metric-cell"><div class="metric-val">${pnlPct}%</div><div class="metric-lbl">PnL % (live)</div></div>
             <div class="metric-cell"><div class="metric-val">${open}/${cap}</div><div class="metric-lbl">Open / Cap</div></div>
             <div class="metric-cell"><div class="metric-val">${d.last_scan_signals||0}/${d.last_scan_fires||0}</div><div class="metric-lbl">Last Sig/Fire</div></div>
             <div class="metric-cell"><div class="metric-val">${pf}/${pa}</div><div class="metric-lbl">Filled/Attempts</div></div>
-            <div class="metric-cell"><div class="metric-val">${pn}</div><div class="metric-lbl">No-Fill</div></div>
-            <div class="metric-cell"><div class="metric-val">${pe}</div><div class="metric-lbl">Errors</div></div>
-            <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${d.partial_tp_fires||0}</div><div class="metric-lbl">Partial-TP</div></div>
-            <div class="metric-cell"><div class="metric-val">${d.stale_flat_marked||0}/${d.stale_flat_rotated||0}</div><div class="metric-lbl">Stale Mark/Rot</div></div>
+            <div class="metric-cell"><div class="metric-val">${pn}/${pe}</div><div class="metric-lbl">NoFill/Err</div></div>
             <div class="metric-cell"><div class="metric-val" style="color:var(--cyan)">${d.engine_stats?.signals_yielded||0}</div><div class="metric-lbl">Sigs/Scan</div></div>
         `;
 
@@ -1134,6 +1157,117 @@ async function loadConfluence() {
 }
 loadConfluence();
 setInterval(loadConfluence, 10000);
+
+async function loadPrecogStatus() {
+    try {
+        const r = await fetch('/precog_status');
+        const d = await r.json();
+        if (!d || d.err) {
+            document.getElementById('precog-meta').textContent = 'error: ' + (d?.err || 'unknown');
+            return;
+        }
+        const usdPnl = (d.total_pnl_usd != null) ? Number(d.total_pnl_usd) : null;
+        const usdColor = (usdPnl == null) ? '' : (usdPnl >= 0 ? 'color:var(--acid)' : 'color:#f88');
+        const usdStr = (usdPnl != null) ? `${usdPnl >= 0 ? '+' : ''}$${usdPnl.toFixed(2)}` : '—';
+        const wrWin = (d.wr_pct_window != null) ? `${d.wr_pct_window.toFixed(1)}%` : '—';
+        const wWin = d.wins_window || 0;
+        const lWin = d.losses_window || 0;
+        const bWin = d.breakevens_window || 0;
+        const closed = d.closed_count || 0;
+        const avgW = (d.avg_win_usd != null) ? `+$${Number(d.avg_win_usd).toFixed(3)}` : '—';
+        const avgL = (d.avg_loss_usd != null) ? `$${Number(d.avg_loss_usd).toFixed(3)}` : '—';
+        const aw = Math.abs(Number(d.avg_win_usd || 0));
+        const al = Math.abs(Number(d.avg_loss_usd || 0));
+        const rr = (al > 0) ? (aw / al).toFixed(2) : '—';
+        const rrColor = (al > 0 && aw / al >= 1) ? 'color:var(--acid)' : 'color:#f88';
+        const disabled = d.disabled_engines || 'none';
+        const meta = document.getElementById('precog-meta');
+        meta.innerHTML = `<span style="color:var(--acid)">LIVE</span> · ${closed} closes/${d.window_hours||12}h · disable=<span style="color:#f88">${disabled}</span>`;
+        document.getElementById('precog-stats').innerHTML = `
+            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL 12h</div></div>
+            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR 12h</div></div>
+            <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}/${bWin}</div><div class="metric-lbl">W/L/B</div></div>
+            <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
+            <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
+            <div class="metric-cell"><div class="metric-val" style="${rrColor}">${rr}</div><div class="metric-lbl">R:R</div></div>
+            <div class="metric-cell"><div class="metric-val">${closed}</div><div class="metric-lbl">Closes</div></div>
+        `;
+        // Per-engine breakdown with auto-pause flag
+        const byEng = d.by_engine || {};
+        const ap = d.engine_auto_pause || {};
+        const engKeys = Object.keys(byEng).filter(k => k !== 'RECONCILED' && k !== '_untagged').sort();
+        if (engKeys.length === 0) {
+            document.getElementById('precog-engines').innerHTML = '<div style="opacity:0.5;font-style:italic">// no closes in window</div>';
+        } else {
+            const rows = engKeys.map(k => {
+                const v = byEng[k];
+                const apEng = ap[k] || {};
+                const pausedFlag = apEng.paused ? ' <span style="color:#f88;font-weight:bold">[PAUSED]</span>' : '';
+                const pnlColor = (v.pnl_usd >= 0) ? 'color:var(--acid)' : 'color:#f88';
+                const pnlStr = `${v.pnl_usd >= 0 ? '+' : ''}$${Number(v.pnl_usd).toFixed(3)}`;
+                const wrStr = (v.wr_pct != null) ? `${v.wr_pct}%` : '—';
+                return `<div style="display:grid;grid-template-columns:140px 50px 60px 80px 80px 1fr;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,0,0,0.06)">
+                    <div><strong>${k}</strong>${pausedFlag}</div>
+                    <div>n=${v.n}</div>
+                    <div>${v.w}/${v.l}/${v.b}</div>
+                    <div>${wrStr}</div>
+                    <div style="${pnlColor}">${pnlStr}</div>
+                    <div></div>
+                </div>`;
+            }).join('');
+            const headerStyle = 'display:grid;grid-template-columns:140px 50px 60px 80px 80px 1fr;gap:8px;padding:5px 0;font-weight:bold;color:var(--blood);border-bottom:1px solid var(--blood);font-size:10px;letter-spacing:0.05em';
+            document.getElementById('precog-engines').innerHTML = `<div style="${headerStyle}">
+                <div>ENGINE</div><div>n</div><div>W/L/B</div><div>WR</div><div>$ PnL</div><div></div>
+            </div>${rows}`;
+        }
+    } catch(e) {
+        console.error('precog load err', e);
+        document.getElementById('precog-meta').textContent = 'fetch failed';
+    }
+}
+
+loadPrecogStatus();
+setInterval(loadPrecogStatus, 10000);
+
+async function loadMacroStrip() {
+    try {
+        const r = await fetch('/health');
+        const d = await r.json();
+        const bm = d.btc_macro || {};
+        const ws = d.webhook_security || {};
+        const ap = d.engine_auto_pause || {};
+        const apEngs = ap.engines || {};
+        const pausedList = Object.entries(apEngs).filter(([k,v]) => v.paused).map(([k]) => k);
+        const btcMid = bm.btc_mid ? `$${bm.btc_mid.toLocaleString()}` : '—';
+        const macroBits = [];
+        if (bm.near_resistance) {
+            const dPct = bm.resistance_distance_pct;
+            const wallUsd = bm.resistance_wall_usd ? `$${(bm.resistance_wall_usd/1e6).toFixed(1)}M` : '?';
+            macroBits.push(`<span style="color:#f88">SELL_WALL ${dPct?.toFixed(2)}% ${wallUsd}</span>`);
+        }
+        if (bm.near_support) {
+            const dPct = bm.support_distance_pct;
+            const wallUsd = bm.support_wall_usd ? `$${(bm.support_wall_usd/1e6).toFixed(1)}M` : '?';
+            macroBits.push(`<span style="color:var(--acid)">BUY_WALL ${dPct?.toFixed(2)}% ${wallUsd}</span>`);
+        }
+        if (bm.recent_break_up) macroBits.push('<span style="color:var(--acid)">↑BREAK</span>');
+        if (bm.recent_break_down) macroBits.push('<span style="color:#f88">↓BREAK</span>');
+        if (macroBits.length === 0) macroBits.push('<span style="opacity:0.6">no_walls</span>');
+        const wsBit = ws.enabled ? '<span style="color:var(--acid)">webhook=ON</span>' : '<span style="opacity:0.6">webhook=OFF</span>';
+        const pausedBit = pausedList.length > 0
+            ? `<span style="color:#f88">paused: ${pausedList.join(',')}</span>`
+            : '<span style="opacity:0.6">no_paused</span>';
+        const commit = d.commit_live || '—';
+        const eq = d.equity ? `$${Number(d.equity).toFixed(2)}` : '—';
+        document.getElementById('macro-strip').innerHTML =
+            `// equity ${eq} · regime <span style="color:var(--cyan)">${d.regime||'?'}</span> · BTC ${btcMid} · ${macroBits.join(' · ')} · ${pausedBit} · ${wsBit} · commit <span style="opacity:0.7">${commit}</span>`;
+    } catch(e) {
+        document.getElementById('macro-strip').innerHTML = '// macro: fetch failed';
+    }
+}
+
+loadMacroStrip();
+setInterval(loadMacroStrip, 5000);
 
 loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); updateClock();
 setInterval(loadDash, 5000);
