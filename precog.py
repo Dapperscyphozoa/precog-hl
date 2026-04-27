@@ -993,7 +993,12 @@ def _confirm_5m(coin, side):
 # Tunable:
 #   SA_ORTHOGONAL_MIN_CONFIRMS — minimum confirms (default 1)
 #   SA_ORTHOGONAL_GATE_ENABLED — set 0 to disable
-_SA_ORTHO_GATE_ENABLED = os.environ.get('SA_ORTHOGONAL_GATE_ENABLED', '1') == '1'
+# 2026-04-27: DEFAULT DISABLED. Pre-deploy live data showed PIVOT (80% WR
+# n=6) and BB_REJ (100% WR n=2-5) firing alone WITHOUT orthogonal confirms
+# — they were already winning. Forcing this gate would have blocked
+# already-profitable signals. Re-enable only after shadow-testing shows
+# net positive WR uplift with no volume cliff.
+_SA_ORTHO_GATE_ENABLED = os.environ.get('SA_ORTHOGONAL_GATE_ENABLED', '0') == '1'
 def _sa_orthogonal_min():
     try:
         return int(os.environ.get('SA_ORTHOGONAL_MIN_CONFIRMS', '1'))
@@ -8714,18 +8719,23 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         log(f"{coin} {sig} {signal_engine} dropped: engine_disabled (manual/auto-pause/coin-pair)")
         sig = None
 
-    # 2026-04-27: orthogonal-domain confirmation gate (System A signal quality).
-    # Require ≥N independent-domain agreements before firing. Catches bare
-    # price-action signals that lack microstructure/macro confirmation —
-    # those are noise. Mirrors System B's confluence requirement.
-    if sig and signal_engine and _SA_ORTHO_GATE_ENABLED and coin not in ('BTC', 'ETH'):
+    # 2026-04-27: orthogonal-domain confirmation — SHADOW MEASURE by default.
+    # Default-off (SA_ORTHOGONAL_GATE_ENABLED=0). Records what WOULD have been
+    # blocked but lets the signal through. After enough samples comparing
+    # confirmed-vs-unconfirmed WR, we can decide whether to enable as a live
+    # gate. Set SA_ORTHOGONAL_GATE_ENABLED=1 to make it a hard block.
+    if sig and signal_engine and coin not in ('BTC', 'ETH'):
         try:
             _confirms = _orthogonal_confirms(coin, sig)
             _need = _sa_orthogonal_min()
             if _confirms < _need:
-                log(f"{coin} {sig} {signal_engine} dropped: orthogonal_confirms={_confirms}<{_need}")
-                sig = None
-                signal_engine = None
+                if _SA_ORTHO_GATE_ENABLED:
+                    log(f"{coin} {sig} {signal_engine} dropped: orthogonal_confirms={_confirms}<{_need}")
+                    sig = None
+                    signal_engine = None
+                else:
+                    # Shadow-record only — let signal through but tag for later analysis
+                    log(f"{coin} {sig} {signal_engine} ORTHO_SHADOW: confirms={_confirms}<{_need} (NOT BLOCKED)")
         except Exception:
             pass  # fail-open on confirmation system error
         signal_engine = None
