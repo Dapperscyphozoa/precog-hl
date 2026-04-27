@@ -10271,6 +10271,35 @@ def main():
                                                 f"MFE {_cur_mfe*100:.2f}% ≥ {_t_mfe*100:.1f}% — "
                                                 f"SL → entry+{_t_lock*100:.1f}%")
                                         break  # one rung per tick
+
+                                # 2026-04-27: CONTINUOUS TRAIL above PROFIT_LOCK_CLOSE_PCT
+                                # Once MFE crosses 1.5% (the floor), ratchet SL every tick
+                                # to (MFE - TRAIL_DISTANCE). Floor at 1.5% so we never give
+                                # back below the lock level. Tight trail captures runaway
+                                # winners (3-5% breakouts) without losing prior gains.
+                                # Tunable: CONTINUOUS_TRAIL_DISTANCE (default 0.005 = 0.5%).
+                                try:
+                                    _trail_floor = PROFIT_LOCK_CLOSE_PCT  # 1.5% floor
+                                    if _cur_mfe >= _trail_floor:
+                                        _trail_dist = float(os.environ.get('CONTINUOUS_TRAIL_DISTANCE', '0.005'))
+                                        _target_sl_pct = max(_trail_floor, _cur_mfe - _trail_dist)
+                                        _current_sl = float(_pl_state.get('sl_pct', 0) or 0)
+                                        # Only update if meaningfully higher (>10bp diff)
+                                        if _target_sl_pct > _current_sl + 0.001:
+                                            _pl_entry = float(_pl_lp.get('entry') or 0)
+                                            _pl_size = abs(_pl_lp.get('size', 0))
+                                            _pl_is_long = _pl_lp.get('size', 0) > 0
+                                            if _pl_entry > 0 and _pl_size > 0:
+                                                modify_sl_to_breakeven(_pl_coin, _pl_entry,
+                                                                       _pl_size, _pl_is_long,
+                                                                       buffer_pct=_target_sl_pct)
+                                                _pl_state['sl_pct'] = _target_sl_pct
+                                                state.setdefault('positions', {})[_pl_coin] = _pl_state
+                                                log(f"{_pl_coin} CONT_TRAIL: MFE {_cur_mfe*100:.2f}% "
+                                                    f"→ SL → entry+{_target_sl_pct*100:.2f}% "
+                                                    f"(trail {_trail_dist*100:.1f}%)")
+                                except Exception as _ct_e:
+                                    log(f"{_pl_coin} cont_trail err: {_ct_e}")
                             except Exception as _tr_e:
                                 log(f"{_pl_coin} trail_sl err: {_tr_e}")
                         except Exception as _pl_inner:
