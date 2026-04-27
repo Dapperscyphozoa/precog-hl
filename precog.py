@@ -6487,6 +6487,26 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
         log(f"{coin} blocked: in COIN_BLOCKLIST={sorted(COIN_BLOCKLIST)}")
         return out
 
+    # 2026-04-27: per-coin recent-loss circuit breaker. If a coin has 2+
+    # consecutive losses in the last 4h, lock it out for 4h from the most
+    # recent close. Bleeders (W, UMA, STX) were eating winners' gains —
+    # this caps the damage before forensic blocklist patches catch up.
+    # Env-tunable: COIN_LOSS_CB_CONSEC (default 2), COIN_LOSS_CB_HOURS (4).
+    try:
+        _cb_consec = int(os.environ.get('COIN_LOSS_CB_CONSEC', '2'))
+        _cb_hours = float(os.environ.get('COIN_LOSS_CB_HOURS', '4'))
+        if _cb_consec > 0 and _cb_hours > 0 and coin:
+            import trade_ledger as _tl_cb
+            _consec, _last_ts = _tl_cb.recent_consecutive_losses(coin, hours=_cb_hours)
+            if _consec >= _cb_consec and _last_ts:
+                _age_h = (time.time() - _last_ts) / 3600.0
+                if _age_h < _cb_hours:
+                    out['reason'] = 'recent_loss_cb'
+                    log(f"{coin} blocked: {_consec} consec losses, last {_age_h:.1f}h ago (CB={_cb_hours}h)")
+                    return out
+    except Exception:
+        pass
+
     # 2026-04-26: side filter — defaults to BOTH sides. The earlier 30-trade
     # SELL-bias signal dissipated by trade 33 (BUY 50% / SELL 54.5% over 40
     # decided, Wilson CIs heavily overlap). Don't cut signals on weak evidence.

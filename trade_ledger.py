@@ -660,6 +660,53 @@ def recent_close_ts(coin, max_age_sec=45):
     return latest
 
 
+def recent_consecutive_losses(coin, hours=4.0):
+    """Count consecutive losing closes for `coin` going backwards from now,
+    within `hours`. Stops counting at the first non-loss (win or breakeven).
+
+    Returns (consecutive_loss_count, last_close_ts) where last_close_ts is
+    unix seconds of the most recent close (None if none).
+
+    Used by entry dispatcher to circuit-break coins on a recent losing
+    streak — 2026-04-27: bleeders (W, UMA, STX) ate winners' gains.
+    """
+    if not coin:
+        return 0, None
+    coin_u = coin.upper()
+    cutoff = time.time() - hours * 3600.0
+    closes = []
+    with _LOCK:
+        for tid, row in _INDEX['by_trade_id'].items():
+            if (row.get('coin') or '').upper() != coin_u:
+                continue
+            if row.get('event_type') != 'CLOSE':
+                continue
+            ts_iso = row.get('timestamp', '')
+            if not ts_iso:
+                continue
+            try:
+                ts = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+            except Exception:
+                continue
+            if ts < cutoff:
+                continue
+            try:
+                pnl = float(row.get('pnl', '') or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            closes.append((ts, pnl))
+    if not closes:
+        return 0, None
+    closes.sort(key=lambda x: -x[0])  # newest first
+    consec = 0
+    for ts, pnl in closes:
+        if pnl < 0:
+            consec += 1
+        else:
+            break
+    return consec, closes[0][0]
+
+
 def is_closed(trade_id: str) -> bool:
     with _LOCK:
         return trade_id not in _INDEX['open_trades']
