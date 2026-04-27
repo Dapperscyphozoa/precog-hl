@@ -79,9 +79,10 @@ CONF_WINDOW_S       = 24 * 3600
 # 2026-04-27: tunable per-coin cooldown. Default 1h matches dedupe window.
 # Engines with proven >70% rolling WR get a HALF cooldown (30min) via the
 # adaptive logic in should_enter — increases trade volume on winning combos.
-COIN_COOLDOWN_S     = int(_os.environ.get('CONF_COIN_COOLDOWN_S', str(1 * 3600)))
-COIN_COOLDOWN_FAST_S = int(_os.environ.get('CONF_COIN_COOLDOWN_FAST_S', str(30 * 60)))
-COIN_COOLDOWN_FAST_WR = float(_os.environ.get('CONF_COIN_COOLDOWN_FAST_WR', '70'))
+# Uses _os_minsys (imported at line 41) — _os isn't aliased until line 125.
+COIN_COOLDOWN_S     = int(_os_minsys.environ.get('CONF_COIN_COOLDOWN_S', str(1 * 3600)))
+COIN_COOLDOWN_FAST_S = int(_os_minsys.environ.get('CONF_COIN_COOLDOWN_FAST_S', str(30 * 60)))
+COIN_COOLDOWN_FAST_WR = float(_os_minsys.environ.get('CONF_COIN_COOLDOWN_FAST_WR', '70'))
 TP_PCT              = 0.04
 SL_PCT              = 0.015
 MAX_HOLD_S          = 72 * 3600
