@@ -759,10 +759,13 @@ MIN_RR = float(os.environ.get('MIN_RR', '1.2'))
 # regardless of computed size. ($11 not $10 — buffer above HL's $10 minimum
 # for rounding + slippage so orders don't bounce.) Use for diagnostic phase
 # only. Set to 0 to disable and resume normal sizing.
-FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '22'))
-# 2026-04-26: 11 → 22. User's discipline was "scale when profitable". After
-# +$2 equity climb in 8h post-fix, scaling 2x. Same risk math (2.5% SL),
-# 2x dollar PnL per trade. Override via env if needed.
+FORCE_NOTIONAL_USD = float(os.environ.get('FORCE_NOTIONAL_USD', '44'))
+# 2026-04-27: 22 → 44. System proven (65% WR over 38 decided, +$1.50 in
+# 8h, 12-system confluence stack, all gates working). Max simultaneous-
+# stop drawdown at $44 × 25 positions × 2.5% SL = $27.50 = 4.9% equity —
+# still inside the 5% safety ceiling. 2x dollar PnL per trade.
+# Override via env FORCE_NOTIONAL_USD to revert to 22 or push to 66.
+# Compounds with all 12 confluence inputs + trail + partial-TP shipped today.
 
 # 2026-04-26: per-coin blocklist for engines that have shown persistent
 # losing patterns. Initially RSR (PIVOT engine, single -$0.45 event) and

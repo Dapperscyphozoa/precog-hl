@@ -321,7 +321,7 @@ def _size_and_fire(coin, signal, equity):
     notional_usd = risk_usd / sl_pct
     # ─── DEBUG MODE: force fixed notional if env set ───
     try:
-        _force = float(os.environ.get('FORCE_NOTIONAL_USD', '22'))
+        _force = float(os.environ.get('FORCE_NOTIONAL_USD', '44'))
         if _force > 0:
             notional_usd = _force
     except Exception:
