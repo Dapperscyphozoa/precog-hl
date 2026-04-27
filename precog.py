@@ -527,16 +527,40 @@ PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.005')) 
 # Same trade pattern (MFE 1.8% then retrace):
 #   Before: SL at entry+0.2% → realized +0.2% × $11 = $0.022
 #   After:  SL at entry+0.8% → realized +0.8% × $11 = $0.088 (4x)
-TRAIL_LADDER = [
-    (0.010, 0.005),   # MFE 1.0% → SL to entry+0.5% (lock 0.5%) — NEW lower rung 2026-04-27
-    (0.015, 0.008),   # MFE 1.5% → SL to entry+0.8% (lock 0.8%)
-    (0.025, 0.015),   # MFE 2.5% → SL to entry+1.5% (lock 1.5%)
-    (0.035, 0.025),   # MFE 3.5% → SL to entry+2.5% (lock 2.5%)
+# 2026-04-27: TRAIL_LADDER now env-tunable. Format: comma-separated pairs
+# of MFE_pct:SL_pct. Default below is the original 4-rung ladder. To delay
+# first lock-in (R:R improvement when realized losses outsize wins),
+# set: TRAIL_LADDER=0.020:0.010,0.030:0.015,0.040:0.025
+# This skips the aggressive 1%/0.5% lock that was clamping wins early.
+def _parse_trail_ladder():
+    raw = os.environ.get('TRAIL_LADDER', '').strip()
+    if not raw:
+        return [
+            (0.010, 0.005),  # MFE 1.0% → SL to entry+0.5%
+            (0.015, 0.008),  # MFE 1.5% → SL to entry+0.8%
+            (0.025, 0.015),  # MFE 2.5% → SL to entry+1.5%
+            (0.035, 0.025),  # MFE 3.5% → SL to entry+2.5%
+        ]
+    rungs = []
+    try:
+        for pair in raw.split(','):
+            pair = pair.strip()
+            if not pair:
+                continue
+            mfe, sl = pair.split(':')
+            rungs.append((float(mfe.strip()), float(sl.strip())))
+        rungs.sort(key=lambda r: r[0])  # ascending MFE
+        return rungs if rungs else None
+    except Exception:
+        return None
+
+_TRAIL_OVERRIDE = _parse_trail_ladder()
+TRAIL_LADDER = _TRAIL_OVERRIDE if _TRAIL_OVERRIDE else [
+    (0.010, 0.005),
+    (0.015, 0.008),
+    (0.025, 0.015),
+    (0.035, 0.025),
 ]
-# 2026-04-27: added 1.0%/0.5% rung. /analyze MFE distribution showed 23%
-# of trades reach 1.0% MFE but only 18% reach 1.5%. The 5pp band that
-# previously round-tripped back to BE-lock (+0.2%) now locks +0.5% min.
-# Captures incremental profit on the most common winner-pattern.
 
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
