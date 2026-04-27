@@ -47,7 +47,12 @@ def oi_bias(coin, price_dir):
     Falling OI = covering = reversal risk (0)
     """
     delta = get_delta(coin)
-    if abs(delta) < 0.01: return 0  # <1% change
+    # 2026-04-27: 1% → 0.7% threshold via env override.
+    # /confluence engine_stats showed zero oi_contributed — quiet regime.
+    # 0.7% still requires meaningful 15min OI move.
+    import os as _os_oi
+    _oi_thresh = float(_os_oi.environ.get('OI_DELTA_MIN_PCT', '0.007'))
+    if abs(delta) < _oi_thresh: return 0  # below threshold = no signal
     if delta > 0:
         return 1 if price_dir > 0 else -1
     return 0  # covering, don't signal

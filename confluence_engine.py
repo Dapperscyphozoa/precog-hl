@@ -497,9 +497,12 @@ def eval_coin(coin, bars_15m, now_ts=None):
     try:
         import whale_filter as _whale
         _, _, _wbias = _whale.get_imbalance(coin)
-        if _wbias > 0.5:
+        # 2026-04-27 (later): 0.5 → 0.4 threshold via env override.
+        # Quieter regime = need slightly looser threshold for activity.
+        _whale_thresh = float(_os.environ.get('CONF_WHALE_BIAS_THRESHOLD', '0.4'))
+        if _wbias > _whale_thresh:
             recents['WHALE'] = [(now_ts, 'BUY')]
-        elif _wbias < -0.5:
+        elif _wbias < -_whale_thresh:
             recents['WHALE'] = [(now_ts, 'SELL')]
     except Exception:
         pass
@@ -540,10 +543,10 @@ def eval_coin(coin, bars_15m, now_ts=None):
     # Continuous state — gated to combine-required.
     try:
         import cvd_ws as _cvd
-        # 2026-04-27: $500k default → $250k for more event triggers.
-        # Combine-required gate keeps quality bar high. More CVD fires
-        # = more 2-system confluence opportunities with other inputs.
-        _cvd_threshold = float(_os.environ.get('CONF_CVD_USD_THRESHOLD', '250000'))
+        # 2026-04-27 (later): $250k → $150k. Engine_stats showed zero
+        # cvd_contributed across many evals — quiet regime. $150k still
+        # requires meaningful directional volume but generates more triggers.
+        _cvd_threshold = float(_os.environ.get('CONF_CVD_USD_THRESHOLD', '150000'))
         _cs = _cvd.cvd_signal(coin, min_usd=_cvd_threshold)
         if _cs in ('BUY', 'SELL'):
             recents['CVD'] = [(now_ts, _cs)]
@@ -743,6 +746,9 @@ def eval_coin(coin, bars_15m, now_ts=None):
     if 'WALL_ABS' in by_side[best_side]:
         _STATS.setdefault('wall_abs_contributed', 0)
         _STATS['wall_abs_contributed'] += 1
+    if 'FUNDING' in by_side[best_side]:
+        _STATS.setdefault('funding_contributed', 0)
+        _STATS['funding_contributed'] += 1
     if 'FUND_ARB' in by_side[best_side]:
         _STATS.setdefault('fund_arb_contributed', 0)
         _STATS['fund_arb_contributed'] += 1
