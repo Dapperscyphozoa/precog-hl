@@ -528,10 +528,15 @@ PROFIT_LOCK_BE_PCT    = float(os.environ.get('PROFIT_LOCK_BE_PCT',    '0.005')) 
 #   Before: SL at entry+0.2% → realized +0.2% × $11 = $0.022
 #   After:  SL at entry+0.8% → realized +0.8% × $11 = $0.088 (4x)
 TRAIL_LADDER = [
+    (0.010, 0.005),   # MFE 1.0% → SL to entry+0.5% (lock 0.5%) — NEW lower rung 2026-04-27
     (0.015, 0.008),   # MFE 1.5% → SL to entry+0.8% (lock 0.8%)
     (0.025, 0.015),   # MFE 2.5% → SL to entry+1.5% (lock 1.5%)
     (0.035, 0.025),   # MFE 3.5% → SL to entry+2.5% (lock 2.5%)
 ]
+# 2026-04-27: added 1.0%/0.5% rung. /analyze MFE distribution showed 23%
+# of trades reach 1.0% MFE but only 18% reach 1.5%. The 5pp band that
+# previously round-tripped back to BE-lock (+0.2%) now locks +0.5% min.
+# Captures incremental profit on the most common winner-pattern.
 
 REGIME_DIR_BLOCK_ENABLED = os.environ.get('REGIME_DIR_BLOCK', '1') != '0'
 
