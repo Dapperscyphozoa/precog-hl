@@ -559,11 +559,14 @@ def _parse_trail_ladder():
         return None
 
 _TRAIL_OVERRIDE = _parse_trail_ladder()
+# 2026-04-27 (later): default ladder now starts at +1.5% MFE so it picks up
+# from where PROFIT_LOCK hands off. Each rung locks within 0.5% of MFE —
+# tight trail captures continuation while protecting downside.
 TRAIL_LADDER = _TRAIL_OVERRIDE if _TRAIL_OVERRIDE else [
-    (0.010, 0.005),
-    (0.015, 0.008),
-    (0.025, 0.015),
-    (0.035, 0.025),
+    (0.015, 0.010),  # MFE +1.5% → SL to entry+1.0% (locks +1.0%)
+    (0.020, 0.015),  # MFE +2.0% → SL to entry+1.5%
+    (0.025, 0.020),  # MFE +2.5% → SL to entry+2.0%
+    (0.035, 0.030),  # MFE +3.5% → SL to entry+3.0%
 ]
 
 # 2026-04-27: live env reader with 30s TTL — env edits apply without restart.
@@ -769,7 +772,21 @@ def _profit_lock_check(coin, live_pos, mark_px):
     """Per-tick check on a single open position.
     Returns one of: 'force_close' | 'move_be' | None.
     raw_move = (mark - entry) / entry, signed by side.
-    Uses RAW price move, NOT leveraged PnL% — consistent across leverage tiers."""
+    Uses RAW price move, NOT leveraged PnL% — consistent across leverage tiers.
+
+    2026-04-27 (later): the +1.5% raw force_close was leaving money on the
+    table during trending moves. Replaced with: at +1.5% MFE, request trail
+    activation (let TRAIL_LADDER take over). Position rides up with tight
+    trail SL; if reverses, trail catches the lock. If continues, captures
+    more.
+
+    Returns:
+      None         — no action
+      'move_be'    — caller moves SL to breakeven (raw ≥ PROFIT_LOCK_BE_PCT)
+      'trail'      — caller hands off to TRAIL_LADDER (raw ≥ PROFIT_LOCK_CLOSE_PCT)
+      'force_close'— legacy: only fires if PROFIT_LOCK_FORCE_CLOSE=1 env set
+                     (revert path for chop conditions)
+    """
     if not PROFIT_LOCK_ENABLED:
         return None
     try:
@@ -779,7 +796,10 @@ def _profit_lock_check(coin, live_pos, mark_px):
         is_long = live_pos.get('size', 0) > 0
         raw_move = ((mark_px - entry) / entry) if is_long else ((entry - mark_px) / entry)
         if raw_move >= PROFIT_LOCK_CLOSE_PCT:
-            return 'force_close'
+            # Default: hand off to trail. Force-close only if env explicitly set.
+            if os.environ.get('PROFIT_LOCK_FORCE_CLOSE', '0') == '1':
+                return 'force_close'
+            return 'trail'
         if raw_move >= PROFIT_LOCK_BE_PCT:
             return 'move_be'
     except Exception:
@@ -10182,7 +10202,17 @@ def main():
                             except Exception:
                                 pass
                             _pl_action = _profit_lock_check(_pl_coin, _pl_lp, _pl_mark)
-                            if _pl_action == 'force_close':
+                            if _pl_action == 'trail':
+                                # 2026-04-27: at +1.5% MFE, hand off to TRAIL_LADDER
+                                # instead of force-close. Lets winners run while
+                                # protecting downside via tight trail SL.
+                                # Mark position as trail-active so TRAIL_LADDER block
+                                # below knows to evaluate it.
+                                _pl_state = state.get('positions', {}).get(_pl_coin, {})
+                                if not _pl_state.get('trail_active'):
+                                    _pl_state['trail_active'] = True
+                                    log(f"{_pl_coin} PROFIT_LOCK→TRAIL handoff: raw≥{PROFIT_LOCK_CLOSE_PCT*100:.1f}%, trail engaged")
+                            elif _pl_action == 'force_close':
                                 # Emit intent — reconciler resolves
                                 if _INTENTS_OK and _intents is not None:
                                     _pl_tid = None
