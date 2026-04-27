@@ -316,6 +316,22 @@ def _size_and_fire(coin, signal, equity):
     2026-04-25: respects FORCE_NOTIONAL_USD env override (debug mode).
     When set, all System B trades use fixed notional regardless of risk math.
     """
+    # 2026-04-27: engine kill switch. If DISABLE_ENGINES env contains the
+    # CONFLUENCE_* tag for this signal's systems combo, skip the order.
+    # Supports exact (CONFLUENCE_WHALE) or prefix wildcard (CONFLUENCE_*).
+    try:
+        _engine_tag_check = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
+        if _precog is not None and hasattr(_precog, '_engine_disabled'):
+            if _precog._engine_disabled(_engine_tag_check):
+                _log(f"{coin} {signal['side']} {_engine_tag_check} dropped: in DISABLE_ENGINES")
+                try:
+                    _state.setdefault('rejects', {})
+                    _state['rejects']['engine_disabled'] = _state['rejects'].get('engine_disabled', 0) + 1
+                except Exception: pass
+                return None
+    except Exception:
+        pass
+
     sl_pct = signal['sl_pct']
     risk_usd = equity * RISK_PCT
     notional_usd = risk_usd / sl_pct
