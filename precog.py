@@ -814,6 +814,15 @@ def _engine_auto_paused(name):
     except Exception:
         return False
 
+def _btc_macro_status_safe():
+    """Fail-soft accessor for btc_macro.status() — returns {} on any error."""
+    try:
+        import btc_macro as _bm_h
+        return _bm_h.status()
+    except Exception:
+        return {}
+
+
 def _engine_disabled(name, coin=None):
     """Return True if engine should be skipped for this fire.
 
@@ -2696,6 +2705,7 @@ def health():
                     'wall_exhaustion': wall_exhaustion.status(),
                     'wall_absorption': wall_absorption.status(),
                     'wall_bounce': wall_bounce.status() if hasattr(wall_bounce, 'status') else {},
+                    'btc_macro': _btc_macro_status_safe(),
                     'funding_mr': funding_engine.status(),
                     'engine_health': _compute_engine_health(),
                     'use_atomic_exec': USE_ATOMIC_EXEC,
@@ -7237,6 +7247,73 @@ def run_profit_management(state, live_positions):
         except Exception as e:
             log(f"profit_mgmt err {coin}: {e}")
 
+    # 2026-04-27: BTC macro-structure position management.
+    # If BTC is at a verified wall and a position OPPOSES that wall:
+    #   - In profit (MFE >= 0.5%): tighten SL to entry+0.1% (lock BE+)
+    #   - Underwater: force close (cap loss before SL hit)
+    # Idempotent via pos_state['btc_macro_locked'] flag.
+    if os.environ.get('BTC_MACRO_POSMGMT_ENABLED', '1') == '1':
+        try:
+            import btc_macro as _bm
+            _summary = _bm.near_wall_summary()
+            _opposing_side_for_position = None
+            if _summary.get('near_resistance') and not _summary.get('recent_break_up'):
+                _opposing_side_for_position = 'BUY'   # BUYs oppose sell-wall
+            elif _summary.get('near_support') and not _summary.get('recent_break_down'):
+                _opposing_side_for_position = 'SELL'  # SELLs oppose buy-wall
+
+            if _opposing_side_for_position:
+                _wall_info = (_summary.get('resistance_wall')
+                              if _opposing_side_for_position == 'BUY'
+                              else _summary.get('support_wall'))
+                _wall_px = (_wall_info or {}).get('price', 0)
+                _wall_usd = (_wall_info or {}).get('usd', 0)
+
+                for coin, lp in live_positions.items():
+                    if coin in ('BTC', 'ETH'):
+                        continue
+                    pos_state = state.get('positions', {}).get(coin, {})
+                    if not pos_state or pos_state.get('btc_macro_locked'):
+                        continue
+                    is_long = lp['size'] > 0
+                    pos_side = 'BUY' if is_long else 'SELL'
+                    if pos_side != _opposing_side_for_position:
+                        continue
+
+                    entry = float(pos_state.get('entry', 0))
+                    if entry <= 0:
+                        continue
+                    mark = get_mid(coin)
+                    if not mark or mark <= 0:
+                        continue
+                    fav_pct = ((mark - entry) / entry) if is_long else ((entry - mark) / entry)
+                    size_abs = abs(lp.get('size', 0))
+                    if size_abs <= 0:
+                        continue
+
+                    if fav_pct >= 0.005:
+                        # In profit ≥0.5% — tighten SL to BE+0.1%
+                        try:
+                            new_sl = modify_sl_to_breakeven(coin, entry, size_abs, is_long, buffer_pct=0.001)
+                            if new_sl:
+                                pos_state['btc_macro_locked'] = True
+                                pos_state['sl_pct'] = 0.001
+                                log(f"{coin} {pos_side} BTC-macro tighten: SL→BE+0.1% "
+                                    f"(BTC at ${_wall_px:.0f} ${_wall_usd/1e6:.1f}M, mfe={fav_pct*100:.2f}%)")
+                        except Exception as _e_sl:
+                            log(f"{coin} BTC-macro SL tighten err: {_e_sl}")
+                    elif fav_pct <= 0:
+                        # Underwater — force close before regime move plays out
+                        try:
+                            log(f"{coin} {pos_side} BTC-macro force-close: underwater "
+                                f"(fav={fav_pct*100:.2f}%, BTC at ${_wall_px:.0f} ${_wall_usd/1e6:.1f}M)")
+                            pos_state['btc_macro_locked'] = True
+                            close_one_position(coin)
+                        except Exception as _e_fc:
+                            log(f"{coin} BTC-macro force-close err: {_e_fc}")
+        except Exception as _e_bm:
+            pass
+
 
 def close(coin, state_ref=None, reason=None):
     """Close position. Behavior depends on RECONCILER_AUTHORITATIVE env.
@@ -8377,6 +8454,33 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         log(f"{coin} {sig} {signal_engine} dropped: 5m momentum opposes")
         sig = None
         signal_engine = None
+
+    # 2026-04-27: BTC macro-structure gate. If BTC is near a verified
+    # large sell/buy wall, alt directional bias is dominated by BTC's
+    # imminent reaction at that level. Block trades fighting the macro
+    # context. Distinct from btc_correlation (trend) — this checks
+    # STRUCTURE (verified stacked liquidity).
+    # Tunable via BTC_MACRO_GATE_ENABLED (default 1).
+    if sig and signal_engine and coin not in ('BTC', 'ETH'):
+        try:
+            if os.environ.get('BTC_MACRO_GATE_ENABLED', '1') == '1':
+                import btc_macro as _bm
+                if sig == 'BUY':
+                    near_res, res_wall = _bm.near_resistance()
+                    if near_res and res_wall and not _bm.wall_broken('up'):
+                        log(f"{coin} BUY {signal_engine} dropped: BTC near sell wall "
+                            f"@ ${res_wall.get('price', 0):.0f} ${res_wall.get('usd', 0)/1e6:.1f}M")
+                        sig = None
+                        signal_engine = None
+                elif sig == 'SELL':
+                    near_sup, sup_wall = _bm.near_support()
+                    if near_sup and sup_wall and not _bm.wall_broken('down'):
+                        log(f"{coin} SELL {signal_engine} dropped: BTC near buy wall "
+                            f"@ ${sup_wall.get('price', 0):.0f} ${sup_wall.get('usd', 0)/1e6:.1f}M")
+                        sig = None
+                        signal_engine = None
+        except Exception:
+            pass
 
     cur=state['positions'].get(coin)
     live=live_positions.get(coin)

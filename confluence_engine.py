@@ -73,6 +73,7 @@ SYSTEM_DOMAIN = {
     'WHALE': 'whale_flow',
     'WALL_ABS': 'order_book', 'OBI': 'order_book',  # OBI = order book imbalance
     'NEWS': 'sentiment',
+    'BTC_WALL': 'macro_structure',  # cross-asset: BTC at verified wall
 }
 CONF_WINDOW_S       = 24 * 3600
 # 2026-04-27: tunable per-coin cooldown. Default 1h matches dedupe window.
@@ -617,6 +618,22 @@ def eval_coin(coin, bars_15m, now_ts=None):
     except Exception:
         pass
 
+    # BTC_WALL as 10th system — cross-asset macro structure.
+    # 2026-04-27: alts inherit BTC's reaction at major verified walls.
+    # Sell-wall on BTC → directional bias = SELL on alts. Buy-wall →
+    # BUY on alts. Skipped for BTC/ETH themselves (they ARE the macro).
+    # Domain: 'macro_structure' (uncorrelated with all others).
+    if coin not in ('BTC', 'ETH'):
+        try:
+            import btc_macro as _bm_ce
+            _summary = _bm_ce.near_wall_summary()
+            if _summary.get('near_resistance') and not _summary.get('recent_break_up'):
+                recents['BTC_WALL'] = [(now_ts, 'SELL')]
+            elif _summary.get('near_support') and not _summary.get('recent_break_down'):
+                recents['BTC_WALL'] = [(now_ts, 'BUY')]
+        except Exception:
+            pass
+
     # Tally per side
     by_side = {'BUY': set(), 'SELL': set()}
     latest_ts_by_side = {'BUY': 0, 'SELL': 0}
@@ -787,6 +804,19 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['obi_alone_dropped'] += 1
             return None
 
+    # 2026-04-27: BTC_WALL-alone gate. Macro structure alone isn't a
+    # trade thesis — it's a confirmation layer that boosts alt-side bias.
+    # Alts at BTC sell wall: SELL signal needs PA confirmation (DAY/SNIPER/
+    # SWING/PIVOT/etc.). Same idea as FUNDING/OI/CVD/OBI — combine-required.
+    # Tunable via CONF_BTC_WALL_REQUIRE_COMBINE (default 1).
+    _btc_wall_requires_combine = (_os.environ.get('CONF_BTC_WALL_REQUIRE_COMBINE', '1') == '1')
+    if _btc_wall_requires_combine:
+        _systems_set = by_side[best_side]
+        if 'BTC_WALL' in _systems_set and len(_systems_set) == 1:
+            _STATS.setdefault('btc_wall_alone_dropped', 0)
+            _STATS['btc_wall_alone_dropped'] += 1
+            return None
+
     _STATS['signals_yielded'] += 1
     # 2026-04-27: track per-system contribution to confluence signals
     if 'LIQ' in by_side[best_side]:
@@ -807,6 +837,9 @@ def eval_coin(coin, bars_15m, now_ts=None):
     if 'OBI' in by_side[best_side]:
         _STATS.setdefault('obi_contributed', 0)
         _STATS['obi_contributed'] += 1
+    if 'BTC_WALL' in by_side[best_side]:
+        _STATS.setdefault('btc_wall_contributed', 0)
+        _STATS['btc_wall_contributed'] += 1
     if 'WALL_ABS' in by_side[best_side]:
         _STATS.setdefault('wall_abs_contributed', 0)
         _STATS['wall_abs_contributed'] += 1
