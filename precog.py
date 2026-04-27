@@ -2485,8 +2485,8 @@ def confluence_status():
         return jsonify({'err': str(e)}), 500
 
 
-@app.route('/shadow', methods=['GET'])
-def shadow_status():
+@app.route('/shadow_tier', methods=['GET'])
+def shadow_tier_status():
     """Shadow-tier screening results. Tracks coins NOT currently in the
     confluence universe — eval'd every scan, hypothetical TP/SL outcomes
     resolved as candles advance.
