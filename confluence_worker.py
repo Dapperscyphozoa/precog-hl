@@ -52,10 +52,9 @@ except Exception:
 
 ENABLED         = os.environ.get('CONFLUENCE_ENABLED', '0') == '1'
 DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
-SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '180'))
-# 2026-04-26: 300s → 180s. Increases scan frequency from every 5min to
-# every 3min. Same per-scan signal yield → 1.67x more checks/day → ~30%
-# more fires/day at near-zero risk increase. Override via env if needed.
+SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '120'))
+# 2026-04-27: 180s → 120s. Faster scan cadence; same per-scan logic, more
+# checks per day. ~1.5x more fires/day, no quality reduction. Tunable via env.
 MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
@@ -84,12 +83,12 @@ DECAY_PNL_THRESHOLD = 0.0
 # ─── FIX 2: confluence dedupe ────────────────────────────────────────
 # Hash = (coin, side, first_signal_ts) — any signal sharing this key is
 # treated as the same confluence event and blocked within 24h window
-DEDUPE_WINDOW_S = int(os.environ.get('CONFLUENCE_DEDUPE_WINDOW_S', str(4 * 3600)))
-# 2026-04-26: 24h → 4h. After a coin closes, allow re-entry sooner if a fresh
-# confluence signal appears. Old 24h window blocked many legitimate re-entries
-# on the same coin throughout the day, especially in chop where the same level
-# gets tested multiple times. 4h is enough to avoid same-event double-fires
-# but short enough to capture independent setups same day.
+DEDUPE_WINDOW_S = int(os.environ.get('CONFLUENCE_DEDUPE_WINDOW_S', str(1 * 3600)))
+# 2026-04-27: 4h → 1h. Allow re-entry on same coin after just 1h if a fresh
+# confluence signal appears. Captures intraday level-retests. Same coin can
+# fire multiple times per day under different setups. 1h is short enough
+# to avoid same-event double-fires (typical confluence event resolves in
+# 5-30min) and long enough to register a separate event.
 
 # ─── FIX B: entry drift control ──────────────────────────────────────
 MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '86400'))
@@ -335,7 +334,12 @@ def _size_and_fire(coin, signal, equity):
     # (with all gates passed, fires still 0). 30bps default gives much higher
     # fill rate. Operator can tune via env CONFLUENCE_IOC_SLIP_BUFFER.
     is_buy = signal['side'] == 'BUY'
-    _slip_buf = float(os.environ.get('CONFLUENCE_IOC_SLIP_BUFFER', '0.003'))
+    _slip_buf = float(os.environ.get('CONFLUENCE_IOC_SLIP_BUFFER', '0.0015'))
+    # 2026-04-27: 0.003 → 0.0015. Tightens IOC price tolerance from 30bp to
+    # 15bp. Trades that fill come in at better avg prices (less slippage tax);
+    # trades that would have filled at >15bp from mid become no_fills (safer
+    # — that's adversely-moving market, we don't want to chase it). Net:
+    # higher avg fill quality, slightly lower fill rate. Tunable via env.
     px = entry * (1 + _slip_buf) if is_buy else entry * (1 - _slip_buf)
 
     # Compute TP/SL prices
