@@ -316,17 +316,29 @@ def _size_and_fire(coin, signal, equity):
     2026-04-25: respects FORCE_NOTIONAL_USD env override (debug mode).
     When set, all System B trades use fixed notional regardless of risk math.
     """
-    # 2026-04-27: engine kill switch. If DISABLE_ENGINES env contains the
-    # CONFLUENCE_* tag for this signal's systems combo, skip the order.
-    # Supports exact (CONFLUENCE_WHALE) or prefix wildcard (CONFLUENCE_*).
+    # 2026-04-27: engine kill switch. Checks (in order): manual env list,
+    # auto-pause on rolling WR, per-coin x per-engine pause on rolling WR.
     try:
         _engine_tag_check = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
         if _precog is not None and hasattr(_precog, '_engine_disabled'):
-            if _precog._engine_disabled(_engine_tag_check):
-                _log(f"{coin} {signal['side']} {_engine_tag_check} dropped: in DISABLE_ENGINES")
+            if _precog._engine_disabled(_engine_tag_check, coin=coin):
+                _log(f"{coin} {signal['side']} {_engine_tag_check} dropped: engine_disabled")
                 try:
                     _state.setdefault('rejects', {})
                     _state['rejects']['engine_disabled'] = _state['rejects'].get('engine_disabled', 0) + 1
+                except Exception: pass
+                return None
+    except Exception:
+        pass
+
+    # 2026-04-27: 5m confirmation gate (shared with precog signals).
+    try:
+        if _precog is not None and hasattr(_precog, '_confirm_5m'):
+            if not _precog._confirm_5m(coin, signal.get('side')):
+                _log(f"{coin} {signal['side']} CONFLUENCE dropped: 5m momentum opposes")
+                try:
+                    _state.setdefault('rejects', {})
+                    _state['rejects']['fivem_opposes'] = _state['rejects'].get('fivem_opposes', 0) + 1
                 except Exception: pass
                 return None
     except Exception:

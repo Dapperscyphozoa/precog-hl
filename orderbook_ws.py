@@ -175,6 +175,73 @@ def get_walls(coin):
     with _LOCK:
         return list(_VERIFIED_WALLS.get(coin, []))
 
+
+def imbalance(coin, depth_pct=0.005):
+    """Compute near-mid order book imbalance for `coin`.
+
+    Sums bid USD vs ask USD within `depth_pct` (default 0.5%) of mid price,
+    then returns a signed ratio in [-1, 1]:
+      +1 = pure buy pressure (all near-mid liquidity is bids)
+      -1 = pure sell pressure
+       0 = balanced
+
+    Returns None if no depth data.
+    Used as a new orthogonal signal source ('OBI' system) in confluence
+    engine. Confirms direction with order book flow without waiting for
+    trades to print (CVD).
+    """
+    with _LOCK:
+        d = _DEPTH.get(coin)
+        if not d or not d.get('mid'):
+            return None
+        mid = d['mid']
+        if mid <= 0:
+            return None
+        bid_usd = 0.0
+        ask_usd = 0.0
+        for px, sz in d['bids'].values():
+            if mid - px <= mid * depth_pct:
+                bid_usd += px * sz
+        for px, sz in d['asks'].values():
+            if px - mid <= mid * depth_pct:
+                ask_usd += px * sz
+    total = bid_usd + ask_usd
+    if total <= 0:
+        return None
+    return (bid_usd - ask_usd) / total
+
+
+def imbalance_signal(coin, threshold=0.30, min_usd=50000):
+    """Return 'BUY'/'SELL'/None if order book imbalance crosses threshold.
+
+    threshold: minimum |imbalance| ratio (0-1)
+    min_usd: minimum total near-mid liquidity to count (filter low-vol coins)
+    """
+    with _LOCK:
+        d = _DEPTH.get(coin)
+        if not d or not d.get('mid'):
+            return None
+        mid = d['mid']
+        if mid <= 0:
+            return None
+        bid_usd = 0.0
+        ask_usd = 0.0
+        for px, sz in d['bids'].values():
+            if mid - px <= mid * 0.005:
+                bid_usd += px * sz
+        for px, sz in d['asks'].values():
+            if px - mid <= mid * 0.005:
+                ask_usd += px * sz
+    total = bid_usd + ask_usd
+    if total < min_usd:
+        return None
+    ratio = (bid_usd - ask_usd) / total
+    if ratio >= threshold:
+        return 'BUY'
+    if ratio <= -threshold:
+        return 'SELL'
+    return None
+
 def status():
     with _LOCK:
         return {

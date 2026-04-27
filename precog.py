@@ -782,18 +782,129 @@ COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'R
 #   DISABLE_ENGINES=CONFLUENCE_*        → skip all confluence engines
 _DISABLED_ENGINES_RAW = os.environ.get('DISABLE_ENGINES', '')
 
-def _engine_disabled(name):
-    if not name or not _DISABLED_ENGINES_RAW:
+# 2026-04-27: auto engine-pause based on rolling WR.
+# If an engine's WR over the last N closed trades drops below threshold,
+# it auto-disables for cooldown period. Prevents bleeders like TREND_CONT
+# (33% WR / -$1.98) from continuing to fire while we manually intervene.
+_AUTO_PAUSE_ENABLED = os.environ.get('ENGINE_AUTO_PAUSE_ENABLED', '1') == '1'
+_AUTO_PAUSE_WINDOW = int(os.environ.get('ENGINE_AUTO_PAUSE_WINDOW', '5'))
+_AUTO_PAUSE_MIN_WR = float(os.environ.get('ENGINE_AUTO_PAUSE_MIN_WR', '40'))
+_AUTO_PAUSE_HOURS = float(os.environ.get('ENGINE_AUTO_PAUSE_COOLDOWN_HOURS', '4'))
+_AUTO_PAUSE_LOOKBACK_H = float(os.environ.get('ENGINE_AUTO_PAUSE_LOOKBACK_H', '24'))
+
+def _engine_auto_paused(name):
+    """Return True if engine is auto-paused due to recent poor WR.
+
+    Logic: if rolling WR over last N trades within lookback window is below
+    AUTO_PAUSE_MIN_WR, engine is paused for AUTO_PAUSE_HOURS from the most
+    recent close. Resets naturally once the bad streak ages out.
+    """
+    if not name or not _AUTO_PAUSE_ENABLED:
         return False
-    for tok in _DISABLED_ENGINES_RAW.split(','):
-        tok = tok.strip()
-        if not tok:
-            continue
-        if tok == name:
-            return True
-        if tok.endswith('*') and name.startswith(tok[:-1]):
-            return True
+    try:
+        import trade_ledger as _tl_ap
+        wr, n_dec, last_ts = _tl_ap.engine_rolling_wr(
+            name, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
+        if wr is None or n_dec < 2 or last_ts is None:
+            return False
+        if wr >= _AUTO_PAUSE_MIN_WR:
+            return False
+        age_h = (time.time() - last_ts) / 3600.0
+        return age_h < _AUTO_PAUSE_HOURS
+    except Exception:
+        return False
+
+def _engine_disabled(name, coin=None):
+    """Return True if engine should be skipped for this fire.
+
+    Three layers:
+      1. Manual env-driven kill list (DISABLE_ENGINES)
+      2. Automatic engine-level pause (rolling WR < threshold)
+      3. Per-coin x per-engine pause (this coin+engine pair has negative
+         rolling WR — even if engine globally is fine)
+    """
+    if not name:
+        return False
+    # 1. Manual env-driven kill list
+    if _DISABLED_ENGINES_RAW:
+        for tok in _DISABLED_ENGINES_RAW.split(','):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok == name:
+                return True
+            if tok.endswith('*') and name.startswith(tok[:-1]):
+                return True
+    # 2. Automatic engine-level pause
+    if _engine_auto_paused(name):
+        return True
+    # 3. Per-coin x per-engine pause
+    if coin and _coin_engine_paused(coin, name):
+        return True
     return False
+
+
+# 2026-04-27: per-coin x per-engine WR gate. Blocks fires on (coin, engine)
+# pairs that have proven negative rolling WR. Distinct from engine-level
+# pause (which kills the engine globally) — this is finer-grained, lets
+# us keep firing winning combos on other coins while shutting losing
+# coin/engine pairs.
+_COIN_ENGINE_GATE_ENABLED = os.environ.get('COIN_ENGINE_GATE_ENABLED', '1') == '1'
+_COIN_ENGINE_WINDOW = int(os.environ.get('COIN_ENGINE_GATE_WINDOW', '5'))
+_COIN_ENGINE_MIN_WR = float(os.environ.get('COIN_ENGINE_GATE_MIN_WR', '40'))
+_COIN_ENGINE_LOOKBACK_H = float(os.environ.get('COIN_ENGINE_GATE_LOOKBACK_H', '48'))
+
+def _coin_engine_paused(coin, engine):
+    """Block specific (coin, engine) pair if rolling WR < threshold over
+    last N trades. Returns False (allows fire) for pairs with <3 samples.
+    """
+    if not coin or not engine or not _COIN_ENGINE_GATE_ENABLED:
+        return False
+    try:
+        import trade_ledger as _tl_ce
+        wr, n_dec, _last_ts = _tl_ce.coin_engine_rolling_wr(
+            coin, engine, n_window=_COIN_ENGINE_WINDOW, hours=_COIN_ENGINE_LOOKBACK_H)
+        if wr is None or n_dec < 3:
+            return False
+        return wr < _COIN_ENGINE_MIN_WR
+    except Exception:
+        return False
+
+
+# 2026-04-27: 5-minute confirmation gate for 15m signals. Catches the case
+# where price moves AGAINST a 15m signal during the bar — e.g. 15m BB-rejection
+# fires BUY but the last few 5m bars are still selling hard. Fail-soft on
+# fetch errors. Tunable via CONF_5M_GATE_ENABLED (default 1) and
+# CONF_5M_GATE_PCT (max adverse 5m move pct, default 0.003 = 30bp).
+_CONF_5M_GATE_ENABLED = os.environ.get('CONF_5M_GATE_ENABLED', '1') == '1'
+_CONF_5M_GATE_PCT = float(os.environ.get('CONF_5M_GATE_PCT', '0.003'))
+
+def _confirm_5m(coin, side):
+    """Returns True if 5m short-term momentum doesn't oppose the trade.
+
+    Logic: net price move over the last ~15min (3 x 5m bars) must not be
+    more than CONF_5M_GATE_PCT against the trade direction.
+    BUY blocked if 5m move < -0.3% (recent strong selling)
+    SELL blocked if 5m move > +0.3% (recent strong buying)
+    """
+    if not _CONF_5M_GATE_ENABLED or not coin or side not in ('BUY', 'SELL'):
+        return True
+    try:
+        bars = okx_fetch.fetch_klines(coin, '5m', 6)
+        if not bars or len(bars) < 3:
+            return True
+        ref = float(bars[-3].get('c', 0))
+        cur = float(bars[-1].get('c', 0))
+        if ref <= 0:
+            return True
+        move = (cur - ref) / ref
+        if side == 'BUY' and move < -_CONF_5M_GATE_PCT:
+            return False
+        if side == 'SELL' and move > _CONF_5M_GATE_PCT:
+            return False
+        return True
+    except Exception:
+        return True  # fail-soft, allow
 
 # Multi-timeframe confluence — import new module (fail-soft if missing)
 try:
@@ -2509,9 +2620,36 @@ def health():
                     or os.environ.get('GIT_COMMIT')
                     or os.environ.get('COMMIT_SHA') or '')
     _commit_short = _commit_live[:7] if _commit_live else None
+    # Auto-paused engines: scan known engine names against rolling WR
+    _ap_status = {}
+    if _AUTO_PAUSE_ENABLED:
+        try:
+            import trade_ledger as _tl_h
+            _candidate_engines = ['BB_REJ', 'PIVOT', 'TREND_CONT', 'WALL_BNC',
+                                  'WALL_EXH', 'WALL_ABSORB', 'FUNDING_MR',
+                                  'LIQ_CSCD', 'SPOOF', 'PULLBACK', 'INSIDE_BAR',
+                                  'CONFLUENCE_DAY', 'CONFLUENCE_SWING',
+                                  'CONFLUENCE_SNIPER', 'CONFLUENCE_FUNDING']
+            for _eng in _candidate_engines:
+                _wr, _n, _ts = _tl_h.engine_rolling_wr(
+                    _eng, n_window=_AUTO_PAUSE_WINDOW, hours=_AUTO_PAUSE_LOOKBACK_H)
+                if _wr is None or _n < 2:
+                    continue
+                _paused = _wr < _AUTO_PAUSE_MIN_WR and _ts and (time.time() - _ts) / 3600.0 < _AUTO_PAUSE_HOURS
+                _ap_status[_eng] = {
+                    'wr_pct': round(_wr, 1), 'n': _n, 'paused': _paused,
+                }
+        except Exception: pass
     return jsonify({'status':'ok','version':'v8.28',
                     'commit_live': _commit_short,
                     'disabled_engines': _DISABLED_ENGINES_RAW or None,
+                    'engine_auto_pause': {
+                        'enabled': _AUTO_PAUSE_ENABLED,
+                        'window': _AUTO_PAUSE_WINDOW,
+                        'min_wr_pct': _AUTO_PAUSE_MIN_WR,
+                        'cooldown_h': _AUTO_PAUSE_HOURS,
+                        'engines': _ap_status,
+                    },
                     'equity':eq,
                     'queue_size':WEBHOOK_QUEUE.qsize(),
                     'mt4_queue':len(MT4_QUEUE),
@@ -8193,11 +8331,17 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             log(f"trend_cont err {coin}: {_tce}")
 
     # 2026-04-27: engine kill switch. Nullify signal if engine is disabled
-    # via DISABLE_ENGINES env. Single post-generation check covers all
-    # engines (PIVOT, BB_REJ, INSIDE_BAR, PULLBACK, WALL_BNC, WALL_EXH,
-    # WALL_ABSORB, FUNDING_MR, LIQ_CSCD, SPOOF, TREND_CONT, etc.).
-    if sig and signal_engine and _engine_disabled(signal_engine):
-        log(f"{coin} {sig} {signal_engine} dropped: engine in DISABLE_ENGINES={_DISABLED_ENGINES_RAW}")
+    # via DISABLE_ENGINES env, auto-paused (rolling WR), or per-coin x
+    # per-engine paused (this coin+engine has proven negative rolling WR).
+    if sig and signal_engine and _engine_disabled(signal_engine, coin=coin):
+        log(f"{coin} {sig} {signal_engine} dropped: engine_disabled (manual/auto-pause/coin-pair)")
+        sig = None
+        signal_engine = None
+
+    # 2026-04-27: 5m confirmation gate. Drop signal if recent 5m momentum
+    # strongly opposes the trade direction.
+    if sig and signal_engine and not _confirm_5m(coin, sig):
+        log(f"{coin} {sig} {signal_engine} dropped: 5m momentum opposes")
         sig = None
         signal_engine = None
 
