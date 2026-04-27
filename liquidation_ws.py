@@ -9,7 +9,11 @@ try:
 except ImportError:
     websocket = None
 
-CASCADE_USD_THRESHOLD = 2_000_000   # $2M in window = cascade
+import os as _os
+CASCADE_USD_THRESHOLD = float(_os.environ.get('LIQ_CASCADE_USD_THRESHOLD', '750000'))
+# 2026-04-27: 2M → 750k. \$2M cascade is rare (<5/day across whole universe).
+# 750k still requires meaningful position flush but increases fire rate
+# 3-4x. Override via env LIQ_CASCADE_USD_THRESHOLD to revert.
 CASCADE_WINDOW_SEC = 60
 WHALE_LIQ_USD = 100_000             # single liq >$100k = whale
 
