@@ -984,27 +984,48 @@ def _scan_once():
     # via shadow_trades.record_rejection so we can measure WR over time and
     # promote winners to live tiers when sample size is sufficient.
     #
-    # Default: HL perp universe (from info.meta) MINUS coins already live.
-    # Override via env CONFLUENCE_SHADOW_COINS for a curated list.
-    # Cap controls scan cost vs coverage tradeoff. Each shadow eval = 1 REST
-    # call for bars. At HL rate limit (1200/min), 150 shadow + 50 live every
-    # 120s = 75 calls/min. Safe headroom. Override via CONF_SHADOW_MAX env.
+    # 2026-04-27 (later): RANK BY 24h VOLUME instead of alphabetical.
+    # Per user direction: "we need to OOS test the highest potential passing
+    # coins." High-volume coins are more likely to:
+    #   - produce frequent signal events (faster to n>=15)
+    #   - have reliable fills if promoted to live (low slippage)
+    #   - exhibit clean technical setups (deep order books)
+    # Pulls dayNtlVlm from meta_and_asset_ctxs (the same call OI uses) and
+    # ranks descending. Takes top CONF_SHADOW_MAX (default 150).
     _shadow_env = os.environ.get('CONFLUENCE_SHADOW_COINS', '').strip()
     _shadow_cap = int(os.environ.get('CONF_SHADOW_MAX', '150'))
     if _shadow_env:
         SHADOW_UNIVERSE = [c.strip().upper() for c in _shadow_env.split(',') if c.strip()]
     else:
         try:
-            # Pull full HL perp universe from info.meta and subtract live coins.
-            _meta = _precog.info.meta() if hasattr(_precog, 'info') else {}
-            _all_hl_perps = {u.get('name', '').upper() for u in _meta.get('universe', []) if u.get('name')}
-            _live_set = set(CONFLUENCE_UNIVERSE)
-            # Skip k-prefix (still buggy) and known blocked coins
-            SHADOW_UNIVERSE = sorted([
-                c for c in _all_hl_perps
-                if c and c not in _live_set
-                and not (c.startswith('k') and len(c) >= 4 and c[1].isupper())
-            ])[:_shadow_cap]
+            # Pull universe + asset contexts in one call. Contexts have dayNtlVlm.
+            _meta_ctxs = _precog.info.meta_and_asset_ctxs() if hasattr(_precog, 'info') else None
+            if _meta_ctxs and len(_meta_ctxs) >= 2:
+                _meta = _meta_ctxs[0]
+                _ctxs = _meta_ctxs[1]
+                _live_set = set(CONFLUENCE_UNIVERSE)
+                _coins_with_vol = []
+                for _i, _u in enumerate(_meta.get('universe', [])):
+                    _name = (_u.get('name', '') or '').upper()
+                    if not _name:
+                        continue
+                    if _name in _live_set:
+                        continue
+                    if _name.startswith('k') and len(_name) >= 4 and _name[1].isupper():
+                        continue
+                    if _i < len(_ctxs):
+                        try:
+                            _vol = float(_ctxs[_i].get('dayNtlVlm', 0) or 0)
+                        except (TypeError, ValueError):
+                            _vol = 0
+                    else:
+                        _vol = 0
+                    _coins_with_vol.append((_name, _vol))
+                # Sort by volume descending — highest potential first
+                _coins_with_vol.sort(key=lambda kv: -kv[1])
+                SHADOW_UNIVERSE = [c for c, v in _coins_with_vol[:_shadow_cap] if v > 0]
+            else:
+                SHADOW_UNIVERSE = []
         except Exception:
             SHADOW_UNIVERSE = []
 
