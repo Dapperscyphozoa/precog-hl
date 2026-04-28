@@ -857,7 +857,7 @@ def _force_notional_usd_live():
 #   TRX    10 trades  0 wins/0 losses (all timeouts) — signal generates but never resolves
 # JTO REMOVED from blocklist — backtest shows 61.5% WR +$8.5 sum (n=13). Was wrongly blocked.
 # RSR retained — backtest insufficient bars, prior live data showed -$0.45 outsized loss.
-COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,MEW,TURBO,TRX').split(',') if c.strip()}
+COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,MEW,TRX,APE,LINK,XRP,LINEA,SAND,W,NOT,DOGE,AAVE,TURBO,ZK,HBAR').split(',') if c.strip()}
 
 # 2026-04-27: engine kill switch. DISABLE_ENGINES is a comma-separated list of
 # engine names to skip. Supports exact match (TREND_CONT) or prefix wildcard
