@@ -761,6 +761,23 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['sniper_alone_dropped'] += 1
             return None
 
+    # 2026-04-28: LAYER B — BTC vol flash gate.
+    # Suspend ALL new entries when BTC 5m vol exceeds adaptive P95 threshold.
+    # This catches fast regime transitions (storm onset) where the slower
+    # trend regime detector hasn't confirmed a flip yet. Asymmetric:
+    # 2-bar (10min) flag to engage, 6-bar (30min) clear to release.
+    # Fail-soft: if detector unavailable, gate is no-op.
+    # Tunable: VOL_GATE_ENABLED (default 1), VOL_DETECTOR_ENABLED, VOL_PCTILE.
+    if _os.environ.get('VOL_GATE_ENABLED', '1') == '1':
+        try:
+            import vol_detector as _vol_b
+            if _vol_b.is_volatile():
+                _STATS.setdefault('vol_flash_blocked', 0)
+                _STATS['vol_flash_blocked'] += 1
+                return None
+        except Exception:
+            pass  # fail-soft
+
     # 2026-04-28: SNIPER-in-chop gate. Live 7d audit:
     #   CONFLUENCE_BTC_WALL+SNIPER  n=35, 45.2% WR, -$0.73
     # SNIPER is a 15m BB-rejection. In chop, "rejections" are just
