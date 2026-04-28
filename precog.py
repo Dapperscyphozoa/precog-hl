@@ -10925,6 +10925,16 @@ def swing_fail_status():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/vol_status', methods=['GET'])
+def vol_status():
+    """LAYER B — BTC volatility flash detector status."""
+    try:
+        import vol_detector as _vol_det
+        return jsonify(_vol_det.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/lifecycle', methods=['GET'])
 def lifecycle_status():
     """Step 4 — full lifecycle observability with circuit breaker + multi-tier drift."""
@@ -11332,6 +11342,16 @@ if __name__ == '__main__':
             log("[swing_fail_shadow] daemon started (shadow_only mode)")
     except Exception as _e:
         log(f"swing_fail_shadow init failed (non-fatal): {_e}")
+
+    # LAYER B — BTC vol flash detector. Adaptive P95 threshold over 7d.
+    # Used by confluence_engine to suspend new entries during fast vol spikes
+    # before the slower trend regime detector confirms a flip.
+    # Tunable via VOL_DETECTOR_ENABLED, VOL_PCTILE, VOL_HISTORY_DAYS, etc.
+    try:
+        import vol_detector as _vol_det
+        _vol_det.start()
+    except Exception as _e:
+        log(f"vol_detector init failed (non-fatal): {_e}")
 
     # Run latency arbitrage module in background thread
     # LA KILLED — was burning 60 API calls/sec with 0 trades, causing 429s
