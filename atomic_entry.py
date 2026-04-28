@@ -59,6 +59,7 @@ Slippage policy:
 """
 
 import logging
+import os
 import time
 
 import position_ledger
@@ -171,7 +172,11 @@ def submit_atomic(exchange, coin, is_buy, size, mark_px, sl_px, tp_px,
             "reduce_only": True,
             "cloid": cloid_sl,
         },
-        # 2: TP trigger market (opposite side, reduce_only)
+        # 2: TP trigger (opposite side, reduce_only)
+        # 2026-04-28: TP maker mode (env TP_MAKER_MODE, default 1) — limit
+        # order at tp_px, rests on book as maker. Saves ~0.045% taker fee
+        # + earns rebate per TP fill. Set TP_MAKER_MODE=0 to revert.
+        # SL stays as market trigger (execution certainty preserved).
         {
             "coin": coin,
             "is_buy": (not bool(is_buy)),
@@ -179,7 +184,7 @@ def submit_atomic(exchange, coin, is_buy, size, mark_px, sl_px, tp_px,
             "limit_px": float(tp_px),
             "order_type": {
                 "trigger": {
-                    "isMarket": True,
+                    "isMarket": (os.environ.get('TP_MAKER_MODE', '1') != '1'),
                     "triggerPx": float(tp_px),
                     "tpsl": "tp",
                 }
