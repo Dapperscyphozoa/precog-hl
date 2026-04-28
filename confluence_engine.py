@@ -749,6 +749,23 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['sniper_alone_dropped'] += 1
             return None
 
+    # 2026-04-28: SNIPER-in-chop gate. Live 7d audit:
+    #   CONFLUENCE_BTC_WALL+SNIPER  n=35, 45.2% WR, -$0.73
+    # SNIPER is a 15m BB-rejection. In chop, "rejections" are just
+    # band-walking — high false-positive rate. Trend regimes still allow.
+    # Tunable via CONF_SNIPER_BLOCK_CHOP (default 1).
+    _sniper_block_chop = (_os.environ.get('CONF_SNIPER_BLOCK_CHOP', '1') == '1')
+    if _sniper_block_chop and 'SNIPER' in by_side[best_side]:
+        try:
+            import regime_detector as _rd_chop
+            _cur_regime = _rd_chop.get_regime() or ''
+        except Exception:
+            _cur_regime = ''
+        if _cur_regime == 'chop':
+            _STATS.setdefault('sniper_chop_dropped', 0)
+            _STATS['sniper_chop_dropped'] += 1
+            return None
+
     # 2026-04-27: FUNDING-alone gate (sample inspection).
     # CONFLUENCE_FUNDING (alone): 0% WR / 2 trades. Sample is tiny but
     # the design pattern follows DAY/SWING — single-system signals are
