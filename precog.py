@@ -809,6 +809,15 @@ def _profit_lock_check(coin, live_pos, mark_px):
 # ═══════════════════════════════════════════════════════
 MAX_TP_PCT = float(os.environ.get('MAX_TP_PCT', '0') or 0)  # 0 = no cap
 
+# 2026-04-28: TP maker-fill conversion. When 1 (default), TP orders are
+# placed as limit orders at trigger_px (no buffer), resting on the book to
+# fill as MAKER when price reaches TP. Saves ~0.045% taker fee + earns
+# ~0.0075% rebate per TP fill. Trade-off: if price gaps past TP fast, the
+# limit may not fill — you miss the TP and ride to SL or no_progress.
+# Risk acceptable on liquid coins; SL stays as market trigger (execution
+# certainty preserved). Set TP_MAKER_MODE=0 to revert to market triggers.
+TP_MAKER_MODE = os.environ.get('TP_MAKER_MODE', '1') == '1'
+
 # R:R FLOOR — enforce minimum profit-to-risk ratio at entry time.
 # 2026-04-25: 2.0 → 1.2. Global 2.0 was overriding empirical grid sweep configs.
 # Coins like STRK/TRX/POLYX/LTC/NEAR have grid-validated TP/SL ratios in the
@@ -5073,10 +5082,15 @@ def retune_exits_endpoint():
             try:
                 trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
                 trigger_px = float(round_price(coin, trigger_px))
-                limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+                if TP_MAKER_MODE:
+                    limit_px = trigger_px  # rests as maker at TP price
+                    tp_is_market = False
+                else:
+                    limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+                    tp_is_market = True
                 tp_size = float(round_size(coin, size_abs))
                 r = exchange.order(coin, not is_long, tp_size, limit_px,
-                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"tp"}},
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": tp_is_market, "tpsl":"tp"}},
                                    reduce_only=True)
                 s = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0]
                 result['new_tp_placed_at'] = trigger_px
@@ -5216,10 +5230,15 @@ def protect_all_endpoint():
             try:
                 trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
                 trigger_px = float(round_price(coin, trigger_px))
-                limit_px = float(round_price(coin, trigger_px * (0.98 if is_long else 1.02)))
+                if TP_MAKER_MODE:
+                    limit_px = trigger_px  # maker fill at TP
+                    tp_is_market = False
+                else:
+                    limit_px = float(round_price(coin, trigger_px * (0.98 if is_long else 1.02)))
+                    tp_is_market = True
                 tp_size = float(round_size(coin, size_abs))
                 r = exchange.order(coin, not is_long, tp_size, limit_px,
-                                   {"trigger":{"triggerPx": trigger_px, "isMarket": True, "tpsl":"tp"}},
+                                   {"trigger":{"triggerPx": trigger_px, "isMarket": tp_is_market, "tpsl":"tp"}},
                                    reduce_only=True)
                 s = (r or {}).get('response',{}).get('data',{}).get('statuses',[{}])[0]
                 result['tp_placed_at'] = trigger_px
@@ -8356,8 +8375,14 @@ def place_native_tp(coin, is_long, entry, size):
         entry = float(entry)
         trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
         trigger_px = float(round_price(coin, trigger_px))
-        # Limit: slightly worse to ensure fill
-        limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+        # 2026-04-28: TP maker mode — limit at trigger_px, rests as maker
+        # for rebate. Legacy: limit_px slightly past trigger for market slip.
+        if TP_MAKER_MODE:
+            limit_px = trigger_px
+            tp_is_market = False
+        else:
+            limit_px = float(round_price(coin, trigger_px * (0.998 if is_long else 1.002)))
+            tp_is_market = True
         tp_size = float(round_size(coin, actual_size))
         tp_side = not is_long
         # Deterministic cloid for HL-level idempotency
@@ -8373,7 +8398,7 @@ def place_native_tp(coin, is_long, entry, size):
                 order_kwargs = {'reduce_only': True}
                 if _tp_cloid: order_kwargs['cloid'] = _tp_cloid
                 r = exchange.order(coin, tp_side, tp_size, limit_px,
-                               {"trigger": {"triggerPx": trigger_px, "isMarket": True, "tpsl": "tp"}},
+                               {"trigger": {"triggerPx": trigger_px, "isMarket": tp_is_market, "tpsl": "tp"}},
                                **order_kwargs)
                 break
             except Exception as _e:
