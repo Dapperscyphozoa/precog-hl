@@ -778,6 +778,46 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['sniper_chop_dropped'] += 1
             return None
 
+    # 2026-04-28: LAYER A — per-(engine, regime) blocklist.
+    # Generalizes the SNIPER chop gate. Live 24h audit identified persistent
+    # bleeders by regime:
+    #   chop: BTC_WALL+SNIPER (-$0.74), BTC_WALL+OBI+SNIPER (-$0.74),
+    #         BTC_WALL+DAY (-$0.51), BTC_WALL+NEWS+SNIPER (-$0.007)
+    # Format: comma-separated "ENGINE_NAME:regime" pairs.
+    # When current regime matches AND engine name (constructed as
+    # 'CONFLUENCE_' + sorted '+'-joined systems) matches → drop signal.
+    # Tunable via ENGINE_REGIME_BLOCKS env. Default blocks the 3 chronic
+    # chop bleeders. Set ENGINE_REGIME_BLOCKS='' to disable entirely.
+    # Fail-soft: regime detector exception → no gate (allows fire).
+    _erb_raw = _os.environ.get(
+        'ENGINE_REGIME_BLOCKS',
+        'CONFLUENCE_BTC_WALL+SNIPER:chop,'
+        'CONFLUENCE_BTC_WALL+OBI+SNIPER:chop,'
+        'CONFLUENCE_BTC_WALL+DAY:chop'
+    )
+    if _erb_raw:
+        _blocked_pairs = set()
+        for _pair in _erb_raw.split(','):
+            _pair = _pair.strip()
+            if ':' in _pair:
+                _eng, _reg = _pair.split(':', 1)
+                _blocked_pairs.add((_eng.strip(), _reg.strip().lower()))
+        _engine_name = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
+        try:
+            import regime_detector as _rd_layer_a
+            _cur_regime_a = (_rd_layer_a.get_regime() or '').lower()
+        except Exception:
+            _cur_regime_a = ''
+        if (_engine_name, _cur_regime_a) in _blocked_pairs:
+            _STATS.setdefault('regime_engine_blocked', 0)
+            _STATS['regime_engine_blocked'] += 1
+            _STATS.setdefault('regime_engine_blocked_detail', {})
+            _key = f'{_engine_name}|{_cur_regime_a}'
+            _STATS['regime_engine_blocked_detail'][_key] = (
+                _STATS['regime_engine_blocked_detail'].get(_key, 0) + 1
+            )
+            return None
+
     # 2026-04-27: FUNDING-alone gate (sample inspection).
     # CONFLUENCE_FUNDING (alone): 0% WR / 2 trades. Sample is tiny but
     # the design pattern follows DAY/SWING — single-system signals are
