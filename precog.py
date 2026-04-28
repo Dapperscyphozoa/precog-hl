@@ -10915,6 +10915,16 @@ def tuner_log():
         return jsonify({'error':str(e)})
 
 
+@app.route('/swing_fail_status', methods=['GET'])
+def swing_fail_status():
+    """SWING_FAIL shadow runner status — live signals + outcomes vs backtest."""
+    try:
+        import swing_fail_shadow as _sfp_shadow
+        return jsonify(_sfp_shadow.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/lifecycle', methods=['GET'])
 def lifecycle_status():
     """Step 4 — full lifecycle observability with circuit breaker + multi-tier drift."""
@@ -11311,6 +11321,17 @@ if __name__ == '__main__':
         _cw.start(_sys.modules[__name__])
     except Exception as _e:
         log(f"confluence worker init failed (non-fatal): {_e}")
+
+    # SWING_FAIL shadow runner — 4h SFP detector, NO live orders, logs to jsonl
+    # Validates the backtest claim (276 trades, 59.4% WR, +1.03% net EV) live.
+    # Gated by SFP_SHADOW_ENABLED env (default 1). Set to 0 to disable.
+    try:
+        if os.environ.get('SFP_SHADOW_ENABLED', '1') == '1':
+            import swing_fail_shadow as _sfp_shadow
+            _sfp_shadow.start()
+            log("[swing_fail_shadow] daemon started (shadow_only mode)")
+    except Exception as _e:
+        log(f"swing_fail_shadow init failed (non-fatal): {_e}")
 
     # Run latency arbitrage module in background thread
     # LA KILLED — was burning 60 API calls/sec with 0 trades, causing 429s
