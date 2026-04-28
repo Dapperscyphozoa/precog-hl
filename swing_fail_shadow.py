@@ -30,14 +30,68 @@ SCAN_INTERVAL_S = int(os.environ.get('SFP_SCAN_INTERVAL_S', '900'))   # 15min
 BARS_TO_FETCH   = int(os.environ.get('SFP_BARS_FETCH', '50'))         # need 21+ for lookback=20
 HL_INFO_URL     = 'https://api.hyperliquid.xyz/info'
 
-DEFAULT_UNIVERSE = [
-    'BTC','ETH','SOL','BNB','ADA','XRP','DOGE','AVAX','LINK','LTC',
-    'UNI','NEAR','OP','ATOM','INJ','HBAR','TAO','SEI','JUP','TRX',
-    'STX','FET','TIA','PUMP','WLFI','S','WIF','MEW','MINA','ENS',
+# ─── COIN UNIVERSE TIERS (from validated 50-day backtest) ─────────────
+#
+# TIER A — VALIDATED WINNERS on HL (run live in shadow + future live):
+#   ENS, MEW, LTC, MINA, SOL, UNI, INJ, WIF, HBAR, STX, JUP, BNB, ADA,
+#   LINK, NEAR (15 coins, all on HL, all backtest +EV)
+#
+# TIER B — UNTESTED on HL (run in shadow under SFP_DISCOVERY=1 for
+# data collection — these are HL coins NOT in the 50d backtest, edge
+# unknown):
+#   AAVE, ALT, ANIME, APE, APEX, ASTER, BANANA, BIGTIME, BLAST, CAKE,
+#   CC, CRV, DYM, ETC, ETHFI, FTT, GRASS, HMSTR, ICP, IP, JTO, KAS,
+#   LAYER, LDO, LINEA, MANTA, MAV, MEGA, MERL, MOVE, NEO, NOT, ORDI,
+#   POL, POLYX, PROVE, RSR, SAND, SKR, SNX, STABLE, STRK, SUPER, SUSHI,
+#   TAO, TNSR, TRB, TURBO, UMA, USTC, VVV, W, WCT, XLM, XRP, ZEN, ZK,
+#   ZRO, kFLOKI (~59 coins)
+#
+# TIER C — VALIDATED LOSERS on HL (NEVER fire — backtest -EV consistently):
+#   SEI, PUMP, TRX, WLFI, OP (5 coins)
+#
+# TIER D — MARGINAL on HL (small backtest sample, monitor only):
+#   S (single backtest trade, near-flat)
+#
+# Tested in backtest but NOT on HL (informational only — can't trade):
+#   BTC, ETH, AVAX, ATOM, FET, TIA, DOGE
+#
+# Default = TIER A only. Set SFP_DISCOVERY=1 to add TIER B for data
+# collection. TIER C is hardcoded BLOCKED regardless of universe env.
+
+TIER_A_WINNERS = [
+    'ENS','MEW','LTC','MINA','SOL','UNI','INJ','WIF','HBAR','STX',
+    'JUP','BNB','ADA','LINK','NEAR',
 ]
+TIER_B_UNTESTED = [
+    'AAVE','ALT','ANIME','APE','APEX','ASTER','BANANA','BIGTIME','BLAST',
+    'CAKE','CC','CRV','DYM','ETC','ETHFI','FTT','GRASS','HMSTR','ICP',
+    'IP','JTO','KAS','LAYER','LDO','LINEA','MANTA','MAV','MEGA','MERL',
+    'MOVE','NEO','NOT','ORDI','POL','POLYX','PROVE','RSR','SAND','SKR',
+    'SNX','STABLE','STRK','SUPER','SUSHI','TAO','TNSR','TRB','TURBO',
+    'UMA','USTC','VVV','W','WCT','XLM','XRP','ZEN','ZK','ZRO','kFLOKI',
+]
+TIER_C_LOSERS = ['SEI','PUMP','TRX','WLFI','OP']  # hardcoded block
+
+# Build universe: A always; +B if discovery; -C always
+_discovery = os.environ.get('SFP_DISCOVERY', '0') == '1'
+_default_universe = list(TIER_A_WINNERS)
+if _discovery:
+    _default_universe += TIER_B_UNTESTED
 UNIVERSE = [c.strip().upper() for c in
-            os.environ.get('SFP_UNIVERSE', ','.join(DEFAULT_UNIVERSE)).split(',')
-            if c.strip()]
+            os.environ.get('SFP_UNIVERSE', ','.join(_default_universe)).split(',')
+            if c.strip() and c.strip().upper() not in TIER_C_LOSERS]
+
+# ─── REGIME GATE ──────────────────────────────────────────────────────
+# Backtest showed SFP +1.03% gross EV in bear-calm but -0.28% in Q4 2024
+# bull regime. Mirror failure mode. So: only fire SFP when regime is
+# bear-calm or chop. Skip bull regimes entirely.
+# Tunable: SFP_REGIME_GATE=0 disables, SFP_ALLOWED_REGIMES overrides list.
+_REGIME_GATE_ENABLED = os.environ.get('SFP_REGIME_GATE', '1') == '1'
+_ALLOWED_REGIMES = set(
+    r.strip().lower() for r in
+    os.environ.get('SFP_ALLOWED_REGIMES', 'chop,bear-calm,bear-storm').split(',')
+    if r.strip()
+)
 
 _LOCK = threading.Lock()
 _STATE = {
@@ -134,10 +188,30 @@ def _new_signal_id(coin, bar_t):
     return f'{coin}_{bar_t}'
 
 
+def _current_regime():
+    """Cached BTC regime read. None on failure → fail-soft to ALLOW."""
+    try:
+        import regime_detector as _rd
+        return (_rd.get_regime() or '').lower() or None
+    except Exception:
+        return None
+
+
 def _scan_once():
     """One full scan cycle. New signals get logged; pending get advanced."""
     now_ts = int(time.time())
     new_signals = 0
+
+    # Regime gate — skip new fires entirely if regime not in allowed set.
+    # Pending signals still get advanced (we don't abandon mid-trade).
+    regime_blocked = False
+    cur_regime = _current_regime()
+    if _REGIME_GATE_ENABLED and cur_regime is not None:
+        if cur_regime not in _ALLOWED_REGIMES:
+            regime_blocked = True
+    with _LOCK:
+        _STATE['last_regime'] = cur_regime
+        _STATE['regime_blocked'] = regime_blocked
 
     for coin in UNIVERSE:
         bars = _fetch_bars_4h(coin, BARS_TO_FETCH)
@@ -168,21 +242,34 @@ def _scan_once():
 
         sig = sfe.detect(bars)
         if sig:
-            sig['coin'] = coin
-            sig['signal_id'] = sig_id
-            sig['signal_bar_t'] = candidate['t']
-            sig['scan_ts'] = now_ts
-            sig['event'] = 'signal'
-            with _LOCK:
-                _STATE['pending'].append(sig)
-                _STATE['signals_total'] += 1
-            _append_jsonl(sig)
-            new_signals += 1
-            _log(f'NEW {coin} {sig["side"]} {sig["pattern"]} '
-                 f'entry={sig["entry_price"]:.6f} swing={sig["swing_level"]:.6f} '
-                 f'wick/body={sig["wick_body_ratio"]:.2f}x')
+            if regime_blocked:
+                # Log the would-have-fired event but don't add to pending
+                with _LOCK:
+                    _STATE.setdefault('regime_skipped', 0)
+                    _STATE['regime_skipped'] += 1
+                _log(f'REGIME-SKIP {coin} {sig["side"]} (regime={cur_regime} '
+                     f'not in {sorted(_ALLOWED_REGIMES)})')
+            else:
+                sig['coin'] = coin
+                sig['signal_id'] = sig_id
+                sig['signal_bar_t'] = candidate['t']
+                sig['scan_ts'] = now_ts
+                sig['regime_at_entry'] = cur_regime
+                sig['tier'] = ('A' if coin in TIER_A_WINNERS
+                               else 'B' if coin in TIER_B_UNTESTED
+                               else 'D')
+                sig['event'] = 'signal'
+                with _LOCK:
+                    _STATE['pending'].append(sig)
+                    _STATE['signals_total'] += 1
+                _append_jsonl(sig)
+                new_signals += 1
+                _log(f'NEW {coin} {sig["side"]} {sig["pattern"]} tier={sig["tier"]} '
+                     f'entry={sig["entry_price"]:.6f} swing={sig["swing_level"]:.6f} '
+                     f'wick/body={sig["wick_body_ratio"]:.2f}x')
 
-        # Advance any pending signals on this coin
+        # Advance any pending signals on this coin (always — even if regime blocked,
+        # don't abandon mid-trade entries)
         _advance_pending(coin, bars)
 
     with _LOCK:
@@ -288,6 +375,9 @@ def status():
         sigs = _STATE['signals_total']
         errs = _STATE['fetch_errors']
         started = _STATE['started_ts']
+        regime = _STATE.get('last_regime')
+        regime_blocked = _STATE.get('regime_blocked', False)
+        regime_skipped = _STATE.get('regime_skipped', 0)
 
     n_resolved = len(resolved)
     decided = tp + sl
@@ -310,12 +400,36 @@ def status():
         b['gross_sum'] += r.get('gross_pnl_pct', 0)
         b['net_sum'] += r.get('net_pnl_pct', 0)
 
+    # Per-tier breakdown
+    by_tier = defaultdict(lambda: {'n': 0, 'tp': 0, 'sl': 0, 'gross_sum': 0, 'net_sum': 0})
+    for r in resolved:
+        c = r.get('coin', '?')
+        tier = ('A' if c in TIER_A_WINNERS
+                else 'B' if c in TIER_B_UNTESTED
+                else 'D')
+        b = by_tier[tier]
+        b['n'] += 1
+        out = r.get('outcome')
+        if out == 'tp': b['tp'] += 1
+        elif out == 'sl': b['sl'] += 1
+        b['gross_sum'] += r.get('gross_pnl_pct', 0)
+        b['net_sum'] += r.get('net_pnl_pct', 0)
+
     return {
         'mode': 'shadow_only',
         'engine': 'SWING_FAIL_4H',
         'config': sfe.status(),
         'universe_size': len(UNIVERSE),
         'universe': UNIVERSE,
+        'tier_a_winners': TIER_A_WINNERS,
+        'tier_b_untested_count': len(TIER_B_UNTESTED),
+        'tier_c_blocked': TIER_C_LOSERS,
+        'discovery_mode': _discovery,
+        'regime_gate_enabled': _REGIME_GATE_ENABLED,
+        'allowed_regimes': sorted(_ALLOWED_REGIMES),
+        'current_regime': regime,
+        'regime_blocked_now': regime_blocked,
+        'regime_skipped_total': regime_skipped,
         'scans_total': scans,
         'last_scan_ts': last_ts,
         'last_scan_age_sec': int(time.time() - last_ts) if last_ts else None,
@@ -331,6 +445,16 @@ def status():
         'wr_pct': round(wr, 1) if wr is not None else None,
         'gross_mean_pct': round(gross_mean, 3),
         'net_mean_pct': round(net_mean, 3),
+        'by_tier': {
+            t: {
+                'n': v['n'], 'tp': v['tp'], 'sl': v['sl'],
+                'wr_pct': round(v['tp'] / (v['tp'] + v['sl']) * 100, 1)
+                          if (v['tp'] + v['sl']) else None,
+                'gross_mean_pct': round(v['gross_sum'] / v['n'] * 100, 3) if v['n'] else 0,
+                'net_mean_pct': round(v['net_sum'] / v['n'] * 100, 3) if v['n'] else 0,
+            }
+            for t, v in by_tier.items()
+        },
         'by_coin': {
             c: {
                 'n': v['n'], 'tp': v['tp'], 'sl': v['sl'], 'to': v['to'],
