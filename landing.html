@@ -1048,7 +1048,11 @@ async function loadConfluence() {
         const losses = d.losses || 0;
         const totN = wins + losses;
         const wr = totN > 0 ? (wins/totN*100).toFixed(1) : '—';
-        const pnlPct = (d.total_pnl_pct != null) ? Number(d.total_pnl_pct).toFixed(3) : '0.000';
+        // EV/Trade $ — average $ expectancy per closed trade (12h window)
+        const closedW = (d.wins_window || 0) + (d.losses_window || 0) + (d.breakevens_window || 0);
+        const evTrade = (d.total_pnl_usd != null && closedW > 0) ? (Number(d.total_pnl_usd) / closedW) : null;
+        const evColor = (evTrade == null) ? '' : (evTrade >= 0 ? 'color:var(--acid)' : 'color:#f88');
+        const evStr = (evTrade != null) ? `${evTrade >= 0 ? '+' : ''}$${evTrade.toFixed(3)}` : '—';
         const pa = d.place_attempts || 0;
         const pf = d.place_filled || 0;
         const pn = d.place_no_fill || 0;
@@ -1069,7 +1073,7 @@ async function loadConfluence() {
             <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
             <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
             <div class="metric-cell"><div class="metric-val">${fires}</div><div class="metric-lbl">Fires (live)</div></div>
-            <div class="metric-cell"><div class="metric-val">${pnlPct}%</div><div class="metric-lbl">PnL % (live)</div></div>
+            <div class="metric-cell"><div class="metric-val" style="${evColor}">${evStr}</div><div class="metric-lbl">EV / Trade</div></div>
             <div class="metric-cell"><div class="metric-val">${open}/${cap}</div><div class="metric-lbl">Open / Cap</div></div>
             <div class="metric-cell"><div class="metric-val">${d.last_scan_signals||0}/${d.last_scan_fires||0}</div><div class="metric-lbl">Last Sig/Fire</div></div>
             <div class="metric-cell"><div class="metric-val">${pf}/${pa}</div><div class="metric-lbl">Filled/Attempts</div></div>
@@ -1183,6 +1187,10 @@ async function loadPrecogStatus() {
         const disabled = d.disabled_engines || 'none';
         const meta = document.getElementById('precog-meta');
         meta.innerHTML = `<span style="color:var(--acid)">LIVE</span> · ${closed} closes/${d.window_hours||12}h · disable=<span style="color:#f88">${disabled}</span>`;
+        // When no closes in window, hide the metric grid entirely (the engine list below shows "no closes")
+        if (closed === 0) {
+            document.getElementById('precog-stats').innerHTML = '';
+        } else {
         document.getElementById('precog-stats').innerHTML = `
             <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL 12h</div></div>
             <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR 12h</div></div>
@@ -1192,6 +1200,7 @@ async function loadPrecogStatus() {
             <div class="metric-cell"><div class="metric-val" style="${rrColor}">${rr}</div><div class="metric-lbl">R:R</div></div>
             <div class="metric-cell"><div class="metric-val">${closed}</div><div class="metric-lbl">Closes</div></div>
         `;
+        }
         // Per-engine breakdown with auto-pause flag
         const byEng = d.by_engine || {};
         const ap = d.engine_auto_pause || {};
