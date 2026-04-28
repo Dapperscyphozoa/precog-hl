@@ -10126,6 +10126,22 @@ def main():
                 if k not in state['positions']:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
+                    # 2026-04-28: ORPHAN_ACTION gate. Parallel path to lifecycle_reconciler's
+                    # _detect_orphans — without this, precog's main loop kept adopting orphans
+                    # as RECONCILED every cycle (no signal edge, ~50% WR, -$5/24h bleed). Honor
+                    # the same env knob: close (default) | adopt | skip.
+                    _orphan_action = os.environ.get('ORPHAN_ACTION', 'close').lower()
+                    if _orphan_action == 'close':
+                        try:
+                            pct = _close_direct(k)
+                            log(f"ORPHAN EMERGENCY CLOSE (precog loop): {k} side={side} entry={entry_px} pct={pct}")
+                        except Exception as _ce:
+                            log(f"orphan close err {k}: {_ce}")
+                        continue
+                    if _orphan_action == 'skip':
+                        log(f"ORPHAN SKIP (precog loop): {k} side={side} (ORPHAN_ACTION=skip)")
+                        continue
+                    # action == 'adopt' (legacy) — fall through to existing logic.
                     # STEP 4 FIX: orphan adoption must check ledger first.
                     # Before Step 4: every adoption created a new trade_id, causing
                     # duplicate ledger entries across restarts (18 ledger opens vs 9 exch).
