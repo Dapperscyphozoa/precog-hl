@@ -124,6 +124,34 @@ TIER_SIZING = {
     'SEVENTY_79': {'leverage': 10, 'risk_pct': 0.005},
 }
 
+# ─── PROVEN_WINNERS: 2026-04-27 backtest top=80 bars=300 (3 days) ───
+# Coins with n>=10 trades AND >=60% WR AND positive sum_pnl_pct.
+# These are the coins that empirically deliver edge with our engine stack
+# at the current regime. Set CONFLUENCE_PROVEN_ONLY=1 env to restrict
+# fires to this set only — drops noise from 80-coin universe to 12.
+#
+# Per-trade $ avg at $44 notional (post-fees): ~$0.44
+# At $220 (1% risk): ~$2.20/trade
+# At $440 (Phase 2 + risk_pct=2%): ~$4.40/trade
+PROVEN_WINNERS = {
+    'HBAR':   {'wr': 100.0, 'n': 11, 'sum_pct': 21.19, 'systems': 'BTC_WALL+SNIPER'},
+    'SUSHI':  {'wr': 100.0, 'n': 13, 'sum_pct': 24.09, 'systems': 'BTC_WALL+DAY'},
+    'CC':     {'wr': 100.0, 'n': 13, 'sum_pct': 21.70, 'systems': 'BTC_WALL+SNIPER, BTC_WALL+DAY+SNIPER'},
+    'WCT':    {'wr': 91.7,  'n': 13, 'sum_pct': 19.88, 'systems': 'BTC_WALL+SNIPER'},
+    'NEAR':   {'wr': 84.6,  'n': 13, 'sum_pct': 19.00, 'systems': 'BTC_WALL+OBI'},
+    'SAND':   {'wr': 83.3,  'n': 13, 'sum_pct': 17.10, 'systems': 'BTC_WALL+OBI'},
+    'LAYER':  {'wr': 80.0,  'n': 10, 'sum_pct': 13.00, 'systems': 'BTC_WALL+OI'},
+    'BNB':    {'wr': 100.0, 'n': 10, 'sum_pct': 12.51, 'systems': 'BTC_WALL+DAY'},
+    'TRB':    {'wr': 76.9,  'n': 13, 'sum_pct': 15.50, 'systems': 'BTC_WALL+SNIPER'},
+    'W':      {'wr': 69.2,  'n': 13, 'sum_pct': 12.00, 'systems': 'BTC_WALL+SNIPER'},
+    'JTO':    {'wr': 61.5,  'n': 13, 'sum_pct':  8.50, 'systems': 'BTC_WALL+SNIPER'},
+    'PROVE':  {'wr': 100.0, 'n': 11, 'sum_pct':  4.61, 'systems': 'BTC_WALL+DAY'},
+}
+
+def is_proven_winner(coin):
+    """Return True if coin is in the empirically-validated proven-winners set."""
+    return (coin or '').upper() in PROVEN_WINNERS
+
 ELITE_MODE = True
 
 

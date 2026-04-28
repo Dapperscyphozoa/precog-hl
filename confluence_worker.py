@@ -1023,6 +1023,22 @@ def _scan_once():
     except Exception as e:
         _log(f"universe import err, falling back to empty: {e}")
         CONFLUENCE_UNIVERSE = []
+
+    # 2026-04-27: PROVEN-WINNERS gate. Backtest top=80 bars=300 showed only
+    # 12 coins meet n>=10 + WR>=60% + positive sum. Set CONFLUENCE_PROVEN_ONLY=1
+    # to restrict firing to that set — drops 80-coin universe to 12. Cuts
+    # trade rate ~70% but every fire is in a coin with proven edge.
+    # CONFLUENCE_PROVEN_ONLY=0 (default) — fire across full whitelist.
+    if os.environ.get('CONFLUENCE_PROVEN_ONLY', '0') == '1':
+        try:
+            import percoin_configs as _pc2
+            _proven = set(_pc2.PROVEN_WINNERS.keys())
+            _orig_count = len(CONFLUENCE_UNIVERSE)
+            CONFLUENCE_UNIVERSE = sorted(set(CONFLUENCE_UNIVERSE) & _proven)
+            _log(f"PROVEN_ONLY active: universe {_orig_count} → {len(CONFLUENCE_UNIVERSE)} coins")
+        except Exception as e:
+            _log(f"proven_only filter err: {e}")
+
     coins = CONFLUENCE_UNIVERSE
     if not coins:
         _log("no coin universe defined, skip")
