@@ -1,0 +1,344 @@
+"""SWING_FAIL shadow runner — live signal generation, NO live orders.
+
+Loops every SCAN_INTERVAL_S seconds:
+  1. Fetch 4h bars for each coin in UNIVERSE
+  2. Run swing_fail_engine.detect() on the latest closed bar
+  3. Log new signals to /var/data/swing_fail_shadow.jsonl
+  4. Advance pending signals — check if TP/SL hit using fresh bars
+  5. Apply friction (0.25% RT) + funding accumulation on close
+  6. Persist state across restarts via the jsonl
+
+Status visible at /swing_fail_status (Flask endpoint added by precog.py).
+
+Universe: 30 coins from the validated backtest (env override:
+SFP_UNIVERSE=BTC,ETH,...).
+
+Mode: shadow_only. NEVER places live orders. Signals are logged for
+post-hoc comparison against backtest expectations.
+"""
+import os
+import json
+import time
+import threading
+import urllib.request
+from collections import defaultdict
+
+import swing_fail_engine as sfe
+
+LOG_PATH        = os.environ.get('SFP_SHADOW_LOG', '/var/data/swing_fail_shadow.jsonl')
+SCAN_INTERVAL_S = int(os.environ.get('SFP_SCAN_INTERVAL_S', '900'))   # 15min
+BARS_TO_FETCH   = int(os.environ.get('SFP_BARS_FETCH', '50'))         # need 21+ for lookback=20
+HL_INFO_URL     = 'https://api.hyperliquid.xyz/info'
+
+DEFAULT_UNIVERSE = [
+    'BTC','ETH','SOL','BNB','ADA','XRP','DOGE','AVAX','LINK','LTC',
+    'UNI','NEAR','OP','ATOM','INJ','HBAR','TAO','SEI','JUP','TRX',
+    'STX','FET','TIA','PUMP','WLFI','S','WIF','MEW','MINA','ENS',
+]
+UNIVERSE = [c.strip().upper() for c in
+            os.environ.get('SFP_UNIVERSE', ','.join(DEFAULT_UNIVERSE)).split(',')
+            if c.strip()]
+
+_LOCK = threading.Lock()
+_STATE = {
+    'pending': [],          # signals awaiting TP/SL/timeout resolution
+    'resolved': [],         # closed signals with PnL
+    'last_scan_ts': 0,
+    'scans_total': 0,
+    'signals_total': 0,
+    'tp_hits': 0,
+    'sl_hits': 0,
+    'timeouts': 0,
+    'fetch_errors': 0,
+    'started_ts': 0,
+}
+_RUNNING = False
+
+
+def _log(msg):
+    print(f'[swing_fail_shadow] {msg}', flush=True)
+
+
+def _append_jsonl(record):
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, 'a') as f:
+            f.write(json.dumps(record) + '\n')
+    except Exception as e:
+        _log(f'jsonl write err: {e}')
+
+
+def _load_state():
+    if not os.path.exists(LOG_PATH):
+        return
+    try:
+        with open(LOG_PATH) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get('event') == 'signal':
+                    _STATE['pending'].append(rec)
+                    _STATE['signals_total'] += 1
+                elif rec.get('event') == 'resolved':
+                    _STATE['resolved'].append(rec)
+                    out = rec.get('outcome')
+                    if out == 'tp': _STATE['tp_hits'] += 1
+                    elif out == 'sl': _STATE['sl_hits'] += 1
+                    elif out == 'timeout': _STATE['timeouts'] += 1
+                    # Drop matching pending if present
+                    tid = rec.get('signal_id')
+                    _STATE['pending'] = [p for p in _STATE['pending']
+                                         if p.get('signal_id') != tid]
+        _log(f'loaded state: pending={len(_STATE["pending"])} '
+             f'resolved={len(_STATE["resolved"])}')
+    except Exception as e:
+        _log(f'load state err: {e}')
+
+
+def _fetch_bars_4h(coin, n_bars=50):
+    """Fetch 4h candles from HL via candleSnapshot."""
+    end_ms = int(time.time() * 1000)
+    ms_per_bar = 4 * 3600 * 1000
+    start_ms = end_ms - n_bars * ms_per_bar
+    body = json.dumps({
+        'type': 'candleSnapshot',
+        'req': {'coin': coin, 'interval': '4h',
+                'startTime': start_ms, 'endTime': end_ms}
+    }).encode()
+    req = urllib.request.Request(
+        HL_INFO_URL, data=body, method='POST',
+        headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        _STATE['fetch_errors'] += 1
+        return None
+    if not isinstance(data, list):
+        return None
+    bars = []
+    for k in data:
+        try:
+            bars.append({
+                't': int(k['t']), 'o': float(k['o']), 'h': float(k['h']),
+                'l': float(k['l']), 'c': float(k['c']), 'v': float(k.get('v', 0)),
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return bars
+
+
+def _new_signal_id(coin, bar_t):
+    return f'{coin}_{bar_t}'
+
+
+def _scan_once():
+    """One full scan cycle. New signals get logged; pending get advanced."""
+    now_ts = int(time.time())
+    new_signals = 0
+
+    for coin in UNIVERSE:
+        bars = _fetch_bars_4h(coin, BARS_TO_FETCH)
+        if not bars or len(bars) < 22:
+            continue
+
+        # Use the LAST CLOSED bar as candidate. HL returns the open bar
+        # too — drop the last if it's still open (current 4h slot).
+        # Heuristic: if last bar's t > now - 4h, it's the open bar.
+        ms_per_bar = 4 * 3600 * 1000
+        last_open_ms = (now_ts // (4 * 3600)) * (4 * 3600) * 1000
+        if bars[-1]['t'] >= last_open_ms:
+            bars = bars[:-1]
+        if len(bars) < 22:
+            continue
+
+        candidate = bars[-1]
+        sig_id = _new_signal_id(coin, candidate['t'])
+
+        # Skip if we've already logged this signal
+        with _LOCK:
+            seen_ids = {p.get('signal_id') for p in _STATE['pending']}
+            seen_ids |= {r.get('signal_id') for r in _STATE['resolved']}
+        if sig_id in seen_ids:
+            # Still need to advance pending for this coin if any
+            _advance_pending(coin, bars)
+            continue
+
+        sig = sfe.detect(bars)
+        if sig:
+            sig['coin'] = coin
+            sig['signal_id'] = sig_id
+            sig['signal_bar_t'] = candidate['t']
+            sig['scan_ts'] = now_ts
+            sig['event'] = 'signal'
+            with _LOCK:
+                _STATE['pending'].append(sig)
+                _STATE['signals_total'] += 1
+            _append_jsonl(sig)
+            new_signals += 1
+            _log(f'NEW {coin} {sig["side"]} {sig["pattern"]} '
+                 f'entry={sig["entry_price"]:.6f} swing={sig["swing_level"]:.6f} '
+                 f'wick/body={sig["wick_body_ratio"]:.2f}x')
+
+        # Advance any pending signals on this coin
+        _advance_pending(coin, bars)
+
+    with _LOCK:
+        _STATE['last_scan_ts'] = now_ts
+        _STATE['scans_total'] += 1
+    return new_signals
+
+
+def _advance_pending(coin, bars_4h):
+    """Check pending signals on this coin against new bars."""
+    if not bars_4h:
+        return
+    with _LOCK:
+        pending_for_coin = [p for p in _STATE['pending'] if p.get('coin') == coin]
+
+    for sig in pending_for_coin:
+        entry_t = sig.get('signal_bar_t', 0)
+        # Bars after entry
+        post_bars = [b for b in bars_4h if b['t'] > entry_t]
+        if not post_bars:
+            continue
+
+        # Use simulate_trade — but slice bars starting AT entry bar (so
+        # index 0 = entry, index 1+ = post)
+        sim_bars = [{'t': entry_t, 'o': sig['entry_price'],
+                     'h': sig['entry_price'], 'l': sig['entry_price'],
+                     'c': sig['entry_price']}] + post_bars
+
+        # Cap at 24 bars (96h) for max hold
+        n_lookahead = min(24, len(sim_bars))
+        outcome, exit_idx, gross, net, mfe, mae = sfe.simulate_trade(
+            sim_bars, sig, n_lookahead_bars=n_lookahead
+        )
+
+        if outcome == 'timeout' and len(post_bars) < 24:
+            # Not yet at 96h — leave pending
+            continue
+
+        # Resolved
+        resolved = {
+            'event': 'resolved',
+            'signal_id': sig.get('signal_id'),
+            'coin': coin,
+            'side': sig.get('side'),
+            'pattern': sig.get('pattern'),
+            'entry_price': sig.get('entry_price'),
+            'entry_bar_t': entry_t,
+            'exit_bar_t': post_bars[exit_idx - 1]['t'] if exit_idx > 0 else entry_t,
+            'outcome': outcome,
+            'gross_pnl_pct': gross,
+            'net_pnl_pct': net,
+            'mfe_pct': mfe,
+            'mae_pct': mae,
+            'resolved_ts': int(time.time()),
+        }
+        _append_jsonl(resolved)
+        with _LOCK:
+            _STATE['resolved'].append(resolved)
+            _STATE['pending'] = [p for p in _STATE['pending']
+                                 if p.get('signal_id') != sig.get('signal_id')]
+            if outcome == 'tp': _STATE['tp_hits'] += 1
+            elif outcome == 'sl': _STATE['sl_hits'] += 1
+            else: _STATE['timeouts'] += 1
+        _log(f'RESOLVED {coin} {outcome} gross={gross*100:+.2f}% net={net*100:+.2f}%')
+
+
+def _loop():
+    global _RUNNING
+    _RUNNING = True
+    _STATE['started_ts'] = int(time.time())
+    _log(f'started: universe={len(UNIVERSE)} coins, scan_interval={SCAN_INTERVAL_S}s')
+    _load_state()
+    while True:
+        try:
+            n = _scan_once()
+            if n > 0:
+                _log(f'scan complete: {n} new signals')
+        except Exception as e:
+            _log(f'scan error: {type(e).__name__}: {e}')
+        time.sleep(SCAN_INTERVAL_S)
+
+
+def start():
+    """Spawn the shadow runner thread. Idempotent."""
+    if _RUNNING:
+        _log('already running')
+        return
+    t = threading.Thread(target=_loop, name='swing-fail-shadow', daemon=True)
+    t.start()
+    _log('thread launched')
+
+
+def status():
+    """For /swing_fail_status endpoint."""
+    with _LOCK:
+        resolved = list(_STATE['resolved'])
+        pending = list(_STATE['pending'])
+        scans = _STATE['scans_total']
+        last_ts = _STATE['last_scan_ts']
+        tp = _STATE['tp_hits']
+        sl = _STATE['sl_hits']
+        to = _STATE['timeouts']
+        sigs = _STATE['signals_total']
+        errs = _STATE['fetch_errors']
+        started = _STATE['started_ts']
+
+    n_resolved = len(resolved)
+    decided = tp + sl
+    wr = (tp / decided * 100) if decided else None
+    gross_sum = sum(r.get('gross_pnl_pct', 0) for r in resolved)
+    net_sum = sum(r.get('net_pnl_pct', 0) for r in resolved)
+    gross_mean = (gross_sum / n_resolved * 100) if n_resolved else 0
+    net_mean = (net_sum / n_resolved * 100) if n_resolved else 0
+
+    by_coin = defaultdict(lambda: {'n': 0, 'tp': 0, 'sl': 0, 'to': 0,
+                                    'gross_sum': 0, 'net_sum': 0})
+    for r in resolved:
+        c = r.get('coin', '?')
+        b = by_coin[c]
+        b['n'] += 1
+        out = r.get('outcome')
+        if out == 'tp': b['tp'] += 1
+        elif out == 'sl': b['sl'] += 1
+        else: b['to'] += 1
+        b['gross_sum'] += r.get('gross_pnl_pct', 0)
+        b['net_sum'] += r.get('net_pnl_pct', 0)
+
+    return {
+        'mode': 'shadow_only',
+        'engine': 'SWING_FAIL_4H',
+        'config': sfe.status(),
+        'universe_size': len(UNIVERSE),
+        'universe': UNIVERSE,
+        'scans_total': scans,
+        'last_scan_ts': last_ts,
+        'last_scan_age_sec': int(time.time() - last_ts) if last_ts else None,
+        'started_ts': started,
+        'uptime_sec': int(time.time() - started) if started else 0,
+        'fetch_errors': errs,
+        'signals_total': sigs,
+        'pending': len(pending),
+        'resolved': n_resolved,
+        'tp_hits': tp,
+        'sl_hits': sl,
+        'timeouts': to,
+        'wr_pct': round(wr, 1) if wr is not None else None,
+        'gross_mean_pct': round(gross_mean, 3),
+        'net_mean_pct': round(net_mean, 3),
+        'by_coin': {
+            c: {
+                'n': v['n'], 'tp': v['tp'], 'sl': v['sl'], 'to': v['to'],
+                'wr_pct': round(v['tp'] / (v['tp'] + v['sl']) * 100, 1)
+                          if (v['tp'] + v['sl']) else None,
+                'gross_mean_pct': round(v['gross_sum'] / v['n'] * 100, 3) if v['n'] else 0,
+                'net_mean_pct': round(v['net_sum'] / v['n'] * 100, 3) if v['n'] else 0,
+            }
+            for c, v in by_coin.items()
+        },
+    }
