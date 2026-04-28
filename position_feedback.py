@@ -32,7 +32,12 @@ import threading
 
 # ─── CONFIG (env-tunable) ─────────────────────────────────────────────
 WINDOW_HOURS         = float(os.environ.get('PERF_WINDOW_HOURS', '1.0'))
-MIN_CLOSES           = int(os.environ.get('PERF_MIN_CLOSES', '5'))
+# 2026-04-28: bumped 5 → 10. At n=5 with true_WR=50%, P(WR<30%) = 18.75%
+# (false-positive rate). At n=10, drops to ~5.5%. Combined with the
+# loss-ratio condition, joint false-positive becomes negligible.
+# Trade-off: ~1.5-2h to first possible trigger at current trade frequency.
+# Acceptable since Layer B (vol detector) handles fast events.
+MIN_CLOSES           = int(os.environ.get('PERF_MIN_CLOSES', '10'))
 WR_THRESHOLD         = float(os.environ.get('PERF_WR_THRESHOLD', '0.30'))
 LOSS_RATIO_THRESHOLD = float(os.environ.get('PERF_LOSS_RATIO', '2.0'))
 WARNING_DURATION_S   = int(os.environ.get('PERF_WARNING_DURATION_S', '900'))  # 15min
