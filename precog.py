@@ -850,7 +850,14 @@ def _force_notional_usd_live():
 # JTO (FUNDING_MR engine, single -$0.34 event). Both engines have high
 # WR overall (70% and 86%) — only these specific coins drag them.
 # Comma-separated. Override via env.
-COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,JTO').split(',') if c.strip()}
+# 2026-04-27: backtest-driven blocklist update.
+# Backtest top=80 bars=300 (3 days) WR per coin (n>=5 only):
+#   MEW    13 trades  7.7% WR  -16.0 sum  ← STRUCTURALLY BROKEN on this coin
+#   TURBO  12 trades  33%  WR  -4.0  sum
+#   TRX    10 trades  0 wins/0 losses (all timeouts) — signal generates but never resolves
+# JTO REMOVED from blocklist — backtest shows 61.5% WR +$8.5 sum (n=13). Was wrongly blocked.
+# RSR retained — backtest insufficient bars, prior live data showed -$0.45 outsized loss.
+COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,MEW,TURBO,TRX').split(',') if c.strip()}
 
 # 2026-04-27: engine kill switch. DISABLE_ENGINES is a comma-separated list of
 # engine names to skip. Supports exact match (TREND_CONT) or prefix wildcard
