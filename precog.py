@@ -10122,8 +10122,17 @@ def main():
                             log(f"[ledger] phantom close err {k}: {_le}")
                     state['positions'].pop(k)
             # Track live-only positions (HL has it, state doesn't)
+            # 2026-04-28: also check System B state — confluence_worker tracks its
+            # own open positions separately. Without this, fresh System B entries
+            # (visible on HL but not yet in System A state) get false-positive
+            # closed as orphans within seconds of entry.
+            try:
+                import confluence_worker as _cw_orphan_check
+                _cw_open_keys = set(_cw_orphan_check._state.get('open_positions', {}).keys())
+            except Exception:
+                _cw_open_keys = set()
             for k in live_positions:
-                if k not in state['positions']:
+                if k not in state['positions'] and k not in _cw_open_keys:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
                     # 2026-04-28: ORPHAN_ACTION gate. Parallel path to lifecycle_reconciler's
