@@ -40,19 +40,26 @@ from collections import defaultdict
 # CONF_MIN_DOMAINS forces fires to span 2+ distinct domains.
 import os as _os_minsys
 CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '2'))
-CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '3'))
+CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
 # 2026-04-27 (later): CONF_MIN_DOMAINS reverted 1 → 2 after backtest revealed
 # same-domain combos (esp. SNIPER+DAY price-action) lose 90.5% of the time
 # without orthogonal confirmation. Live data showing 80% WR on these combos
 # was statistical noise / had implicit orthogonal contributors (NEWS).
 # Forcing 2+ domains per fire restores quality. With 12 systems and NEWS
 # contributing to most fires, signal volume stays adequate.
-# 2026-04-28: 2 → 3. Live 12h cut showed real-engine bleed -$1.90/91 trades
-# at 39.6% WR. After SNIPER chop gate kills -$1.73, residual is non-SNIPER
-# 2-domain combos like CONFLUENCE_BTC_WALL+DAY (-$0.51/12h). 3-domain rule
-# forces stronger confluence: cuts frequency 40-50%, raises avg WR via
-# higher-conviction fires, drops fee burden by ~half.
-# Tunable via env to revert.
+# 2026-04-28: tried 2 → 3, then reverted back to 2 before deploy. Domain
+# distribution audit (12h cut, 89 real-engine fires):
+#   2-domain fires: ~73 (82% of population)
+#   3-domain fires: ~16 (18%)
+# CONF_MIN_DOMAINS=3 cuts frequency 82% (not 40-50% as initially estimated).
+# Worse: the 3-domain survivor pool is dominated by BTC_WALL+OBI+SNIPER
+# (n=4, -$0.76, $-0.190/trade) — 3× worse per-trade than the 2-domain
+# average. The killswitch already suppresses the worst 2-domain combos
+# (BTC_WALL+SNIPER, BTC_WALL+DAY) via per-(coin,engine) auto-pause.
+# Keeping default at 2 preserves trade volume + lets killswitch handle
+# bleeders. Re-evaluate if BTC_WALL+OBI+SNIPER gets specifically
+# blocklisted or if killswitch coverage expands.
+# Tunable via env (CONF_MIN_DOMAINS=3) for ad-hoc strictness.
 
 # 2026-04-27: Event-based systems that may fire alone, bypassing CONF_MIN_SYS
 # and CONF_MIN_DOMAINS. These are DISCRETE EVENTS where the event itself IS
