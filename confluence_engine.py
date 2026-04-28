@@ -812,6 +812,53 @@ def eval_coin(coin, bars_15m, now_ts=None):
             _STATS['sniper_chop_dropped'] += 1
             return None
 
+    # 2026-04-28: LAYER A v2 — Regime ALLOWLIST (positive gate).
+    # Replaces implicit default-allow with explicit per-regime allowlists.
+    # In configured regimes, ONLY listed engines may fire. In unconfigured
+    # regimes (empty set), NOTHING fires — default-deny on regimes we have
+    # no validated data for. Detector failure → fail-soft allow.
+    #
+    # Source: 24h live audit (n>=3, $PnL>=0 in chop).
+    # Other regimes have insufficient data → empty set → default-deny.
+    # Re-populate as live data accumulates per regime.
+    #
+    # Tunable: REGIME_ALLOWLIST_DISABLED=1 bypasses gate entirely.
+    if _os.environ.get('REGIME_ALLOWLIST_DISABLED', '0') != '1':
+        _REGIME_ALLOWLIST = {
+            'chop': {
+                'CONFLUENCE_DAY+NEWS',
+                'CONFLUENCE_BTC_WALL+NEWS',
+                'CONFLUENCE_BTC_WALL+OBI',
+                'CONFLUENCE_BTC_WALL+DAY+SNIPER',
+                'CONFLUENCE_DAY+OBI',
+                'CONFLUENCE_BTC_WALL+DAY+NEWS',
+            },
+            'bear-calm':  set(),  # default-deny — insufficient live data
+            'bear-storm': set(),  # default-deny — no data
+            'bull-calm':  set(),  # default-deny — backtest only, no live
+            'bull-storm': set(),  # default-deny — no data
+        }
+        _engine_name_a = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
+        try:
+            import regime_detector as _rd_allow
+            _cur_regime_allow = (_rd_allow.get_regime() or '').lower()
+        except Exception:
+            _cur_regime_allow = ''
+        # Only enforce when regime is known AND configured (configured =
+        # appears as a key in _REGIME_ALLOWLIST). Detector returning '' or
+        # an unknown regime falls through (fail-soft allow).
+        if _cur_regime_allow and _cur_regime_allow in _REGIME_ALLOWLIST:
+            _allowed = _REGIME_ALLOWLIST[_cur_regime_allow]
+            if _engine_name_a not in _allowed:
+                _STATS.setdefault('regime_allowlist_blocked', 0)
+                _STATS['regime_allowlist_blocked'] += 1
+                _STATS.setdefault('regime_allowlist_blocked_detail', {})
+                _key = f'{_engine_name_a}|{_cur_regime_allow}'
+                _STATS['regime_allowlist_blocked_detail'][_key] = (
+                    _STATS['regime_allowlist_blocked_detail'].get(_key, 0) + 1
+                )
+                return None
+
     # 2026-04-28: LAYER A — per-(engine, regime) blocklist.
     # Generalizes the SNIPER chop gate. Live 24h audit identified persistent
     # bleeders by regime:

@@ -37,6 +37,22 @@ HISTORY_DAYS        = int(os.environ.get('VOL_HISTORY_DAYS', '7'))
 RECOMPUTE_INTERVAL_S = int(os.environ.get('VOL_RECOMPUTE_S', '3600'))
 CHECK_INTERVAL_S    = int(os.environ.get('VOL_CHECK_S', '300'))
 HYSTERESIS_FLAG     = int(os.environ.get('VOL_HYST_FLAG', '2'))
+# VOL_FLASH_ACTION — what to do with EXISTING positions on flash trigger.
+# Options:
+#   hold              — leave positions alone, only block new entries (default)
+#   flatten_losers    — close positions with negative uPnL
+#   lock_winners      — close positions with positive uPnL (lock profit)
+#   flatten           — close everything (max defense)
+# Half-close intentionally NOT offered (compounds fees without meaningful
+# risk reduction). NOTE: this module exposes the desired action via
+# desired_action(); actual position-closing must be wired into the
+# main loop in precog.py to read this and act. Detector is observation-only.
+VOL_FLASH_ACTION    = os.environ.get('VOL_FLASH_ACTION', 'hold').lower()
+_VALID_ACTIONS = {'hold', 'flatten_losers', 'lock_winners', 'flatten'}
+if VOL_FLASH_ACTION not in _VALID_ACTIONS:
+    print(f'[vol_detector] WARN: invalid VOL_FLASH_ACTION={VOL_FLASH_ACTION!r}, '
+          f'falling back to hold', flush=True)
+    VOL_FLASH_ACTION = 'hold'
 HYSTERESIS_CLEAR    = int(os.environ.get('VOL_HYST_CLEAR', '6'))
 COLD_START_THRESHOLD = float(os.environ.get('VOL_COLD_START_PCT', '0.004'))  # 0.4%
 ENABLED             = os.environ.get('VOL_DETECTOR_ENABLED', '1') == '1'
@@ -207,9 +223,13 @@ def _update_state():
             _CACHE['transitions'].append({
                 'ts': int(now), 'to': 'VOLATILE',
                 'std': cur_std, 'threshold': threshold,
+                'desired_action': VOL_FLASH_ACTION,
             })
             _log(f'STATE → VOLATILE (std={cur_std*100:.3f}% > P{int(PCTILE)}={threshold*100:.3f}%, '
-                 f'streak={_CACHE["flag_streak"]})')
+                 f'streak={_CACHE["flag_streak"]}, desired_action={VOL_FLASH_ACTION})')
+            if VOL_FLASH_ACTION != 'hold':
+                _log(f'POSITION ACTION INTENT: {VOL_FLASH_ACTION} '
+                     f'(precog main loop reads desired_action() to act)')
         elif prev_state and _CACHE['clear_streak'] >= HYSTERESIS_CLEAR:
             _CACHE['is_volatile'] = False
             _CACHE['transitions'].append({
@@ -262,6 +282,17 @@ def is_volatile():
         return _CACHE.get('is_volatile', False)
 
 
+def desired_action():
+    """What to do with EXISTING positions when volatile. Returns one of:
+      'hold' | 'flatten_losers' | 'lock_winners' | 'flatten'
+    Configured via VOL_FLASH_ACTION env. Default 'hold' (no-op).
+    The actual position-closing logic must be implemented by the caller
+    (typically precog main loop) — this module is observation-only."""
+    if not ENABLED or not is_volatile():
+        return 'hold'
+    return VOL_FLASH_ACTION
+
+
 def status():
     """Snapshot for /vol_status endpoint."""
     with _LOCK:
@@ -273,6 +304,8 @@ def status():
         'enabled': ENABLED,
         'running': _RUNNING,
         'is_volatile': c.get('is_volatile', False),
+        'desired_action': desired_action(),
+        'flash_action_config': VOL_FLASH_ACTION,
         'cold_start': cold,
         'threshold_pct': round(threshold * 100, 4) if threshold else None,
         'current_std_pct': round(cur_std * 100, 4) if cur_std else None,
