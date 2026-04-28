@@ -70,10 +70,13 @@ _CACHE = {
     'clear_streak': 0,            # consecutive checks below threshold
     'is_volatile': False,         # current state (with hysteresis)
     'transitions': [],            # log of state changes
+    'action_callback_invoked': 0, # count of CLEAR→VOLATILE callbacks fired
+    'action_callback_errors': 0,  # count of callback exceptions
     'fetch_errors': 0,
     'cold_start': True,
     'started_ts': 0,
 }
+_ACTION_CALLBACK = None           # set via register_action_callback()
 _RUNNING = False
 
 
@@ -228,8 +231,19 @@ def _update_state():
             _log(f'STATE → VOLATILE (std={cur_std*100:.3f}% > P{int(PCTILE)}={threshold*100:.3f}%, '
                  f'streak={_CACHE["flag_streak"]}, desired_action={VOL_FLASH_ACTION})')
             if VOL_FLASH_ACTION != 'hold':
-                _log(f'POSITION ACTION INTENT: {VOL_FLASH_ACTION} '
-                     f'(precog main loop reads desired_action() to act)')
+                _log(f'POSITION ACTION INTENT: {VOL_FLASH_ACTION}')
+                # Invoke registered callback (precog wires this to actual close
+                # logic on boot). Fires ONCE per CLEAR→VOLATILE transition.
+                cb = _ACTION_CALLBACK
+                if cb:
+                    try:
+                        cb(VOL_FLASH_ACTION)
+                        _CACHE['action_callback_invoked'] += 1
+                    except Exception as e:
+                        _CACHE['action_callback_errors'] += 1
+                        _log(f'callback err: {type(e).__name__}: {e}')
+                else:
+                    _log('no action_callback registered — action is observation-only')
         elif prev_state and _CACHE['clear_streak'] >= HYSTERESIS_CLEAR:
             _CACHE['is_volatile'] = False
             _CACHE['transitions'].append({
@@ -286,11 +300,30 @@ def desired_action():
     """What to do with EXISTING positions when volatile. Returns one of:
       'hold' | 'flatten_losers' | 'lock_winners' | 'flatten'
     Configured via VOL_FLASH_ACTION env. Default 'hold' (no-op).
-    The actual position-closing logic must be implemented by the caller
-    (typically precog main loop) — this module is observation-only."""
+    The actual position-closing logic is wired via register_action_callback."""
     if not ENABLED or not is_volatile():
         return 'hold'
     return VOL_FLASH_ACTION
+
+
+def register_action_callback(fn):
+    """Register a callback invoked on CLEAR→VOLATILE transitions when
+    VOL_FLASH_ACTION != 'hold'. Callback signature: fn(action_str).
+    Fires ONCE per transition (idempotent — won't re-fire while volatile).
+
+    Caller's responsibility:
+      - Iterate live positions
+      - Apply close criteria per action
+      - Handle errors gracefully (callback errors are logged but not retried)
+
+    Pattern (from precog.py boot):
+        import vol_detector
+        vol_detector.register_action_callback(_handle_vol_flash_action)
+        vol_detector.start()
+    """
+    global _ACTION_CALLBACK
+    _ACTION_CALLBACK = fn
+    _log(f'action callback registered: {getattr(fn, "__name__", repr(fn))}')
 
 
 def status():
@@ -322,6 +355,9 @@ def status():
         'last_pctile_ts': c.get('last_pctile_ts', 0),
         'last_pctile_age_sec': int(time.time() - c.get('last_pctile_ts', 0)) if c.get('last_pctile_ts') else None,
         'fetch_errors': c.get('fetch_errors', 0),
+        'action_callback_registered': _ACTION_CALLBACK is not None,
+        'action_callback_invoked': c.get('action_callback_invoked', 0),
+        'action_callback_errors': c.get('action_callback_errors', 0),
         'recent_transitions': c.get('transitions', [])[-10:],
         'uptime_sec': int(time.time() - c.get('started_ts', 0)) if c.get('started_ts') else 0,
     }

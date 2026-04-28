@@ -11357,8 +11357,46 @@ if __name__ == '__main__':
     # Used by confluence_engine to suspend new entries during fast vol spikes
     # before the slower trend regime detector confirms a flip.
     # Tunable via VOL_DETECTOR_ENABLED, VOL_PCTILE, VOL_HISTORY_DAYS, etc.
+    # VOL_FLASH_ACTION env (default 'hold'): action on existing positions
+    # when state transitions to VOLATILE. Wired via callback below.
+    def _handle_vol_flash_action(action):
+        """Invoked by vol_detector on CLEAR→VOLATILE transition when
+        VOL_FLASH_ACTION != 'hold'. Closes existing positions per action:
+          flatten_losers — close where uPnL < 0
+          lock_winners   — close where uPnL > 0
+          flatten        — close everything
+        """
+        try:
+            live = get_all_positions_live(force=True) or {}
+        except Exception as _le:
+            log(f"[vol_flash] get_all_positions_live err: {_le}")
+            return
+        if not live:
+            log(f"[vol_flash] no open positions — action {action} no-op")
+            return
+        to_close = []
+        for _coin, _p in live.items():
+            _upnl = float(_p.get('upnl', 0) or 0)
+            if action == 'flatten':
+                to_close.append((_coin, _upnl, 'flatten'))
+            elif action == 'flatten_losers' and _upnl < 0:
+                to_close.append((_coin, _upnl, 'losing'))
+            elif action == 'lock_winners' and _upnl > 0:
+                to_close.append((_coin, _upnl, 'winning'))
+        if not to_close:
+            log(f"[vol_flash] action={action}: no positions match (live n={len(live)})")
+            return
+        log(f"[vol_flash] action={action}: closing {len(to_close)}/{len(live)} positions")
+        for _coin, _upnl, _why in to_close:
+            try:
+                close(_coin, reason=f'vol_flash_{action}')
+                log(f"[vol_flash] {_coin} CLOSED ({_why}, upnl={_upnl:+.4f})")
+            except Exception as _ce:
+                log(f"[vol_flash] {_coin} close err: {_ce}")
+
     try:
         import vol_detector as _vol_det
+        _vol_det.register_action_callback(_handle_vol_flash_action)
         _vol_det.start()
     except Exception as _e:
         log(f"vol_detector init failed (non-fatal): {_e}")
