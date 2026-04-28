@@ -1030,8 +1030,23 @@ setInterval(loadEngines, 5000);
 
 async function loadConfluence() {
     try {
-        const r = await fetch('/confluence');
-        const d = await r.json();
+        // Same fallback ladder as System A — keep panel populated through quiet windows.
+        const windowsToTry = [12, 24, 72, 168];
+        let d = null;
+        let usedWindow = 12;
+        for (const hrs of windowsToTry) {
+            const r = await fetch(`/confluence?hours=${hrs}`);
+            const candidate = await r.json();
+            if (!candidate || candidate.err) {
+                d = candidate;
+                break;
+            }
+            if ((candidate.closed_count || 0) > 0 || hrs === windowsToTry[windowsToTry.length-1]) {
+                d = candidate;
+                usedWindow = hrs;
+                break;
+            }
+        }
         if (!d || d.err) {
             document.getElementById('conf-meta').textContent = 'error: ' + (d?.err || 'unknown');
             return;
@@ -1072,11 +1087,12 @@ async function loadConfluence() {
         const pnlPct12h = (usdPnl != null && eqRef && eqRef > 0)
             ? `${(usdPnl/eqRef*100).toFixed(3)}%`
             : '—';
+        const winLabel = `${usedWindow}h`;
         document.getElementById('confluence-stats').innerHTML = `
-            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL 12h</div></div>
-            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${pnlPct12h}</div><div class="metric-lbl">% PnL 12h</div></div>
-            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR 12h</div></div>
-            <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}</div><div class="metric-lbl">W/L 12h</div></div>
+            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL ${winLabel}</div></div>
+            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${pnlPct12h}</div><div class="metric-lbl">% PnL ${winLabel}</div></div>
+            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR ${winLabel}</div></div>
+            <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}</div><div class="metric-lbl">W/L ${winLabel}</div></div>
             <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
             <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
             <div class="metric-cell"><div class="metric-val">${fires}</div><div class="metric-lbl">Fires (cum)</div></div>
@@ -1170,8 +1186,25 @@ setInterval(loadConfluence, 10000);
 
 async function loadPrecogStatus() {
     try {
-        const r = await fetch('/precog_status');
-        const d = await r.json();
+        // Try 12h first; if no closes, widen the window so the panel stays
+        // populated for low-frequency engines (PIVOT typically fires 1-3x/day).
+        // 12h → 24h → 72h → 168h. First non-empty window wins.
+        const windowsToTry = [12, 24, 72, 168];
+        let d = null;
+        let usedWindow = 12;
+        for (const hrs of windowsToTry) {
+            const r = await fetch(`/precog_status?hours=${hrs}`);
+            const candidate = await r.json();
+            if (!candidate || candidate.err) {
+                d = candidate;
+                break;
+            }
+            if ((candidate.closed_count || 0) > 0 || hrs === windowsToTry[windowsToTry.length-1]) {
+                d = candidate;
+                usedWindow = hrs;
+                break;
+            }
+        }
         if (!d || d.err) {
             document.getElementById('precog-meta').textContent = 'error: ' + (d?.err || 'unknown');
             return;
@@ -1192,10 +1225,11 @@ async function loadPrecogStatus() {
         const rrColor = (al > 0 && aw / al >= 1) ? 'color:var(--acid)' : 'color:#f88';
         const disabled = d.disabled_engines || 'none';
         const meta = document.getElementById('precog-meta');
-        meta.innerHTML = `<span style="color:var(--acid)">LIVE</span> · ${closed} closes/${d.window_hours||12}h · disable=<span style="color:#f88">${disabled}</span>`;
+        const winLabel = `${usedWindow}h`;
+        meta.innerHTML = `<span style="color:var(--acid)">LIVE</span> · ${closed} closes/${winLabel} · disable=<span style="color:#f88">${disabled}</span>`;
         document.getElementById('precog-stats').innerHTML = `
-            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL 12h</div></div>
-            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR 12h</div></div>
+            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL ${winLabel}</div></div>
+            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR ${winLabel}</div></div>
             <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}/${bWin}</div><div class="metric-lbl">W/L/B</div></div>
             <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
             <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
