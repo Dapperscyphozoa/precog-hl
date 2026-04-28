@@ -152,7 +152,13 @@ def _load_state():
 
 
 def _fetch_bars_4h(coin, n_bars=50):
-    """Fetch 4h candles from HL via candleSnapshot."""
+    """Fetch 4h candles from HL via candleSnapshot.
+
+    Returns:
+      list of bars on success
+      None on network error (counted in fetch_errors_by_coin)
+      []   on empty/non-list response (likely coin unsupported on HL)
+    """
     end_ms = int(time.time() * 1000)
     ms_per_bar = 4 * 3600 * 1000
     start_ms = end_ms - n_bars * ms_per_bar
@@ -169,9 +175,36 @@ def _fetch_bars_4h(coin, n_bars=50):
             data = json.loads(r.read())
     except Exception as e:
         _STATE['fetch_errors'] += 1
+        # Per-coin diagnostic: track WHICH coins fail and why
+        with _LOCK:
+            _STATE.setdefault('fetch_errors_by_coin', {})
+            _STATE['fetch_errors_by_coin'][coin] = (
+                _STATE['fetch_errors_by_coin'].get(coin, 0) + 1
+            )
+        # Log first time per coin to avoid spam, then silent
+        if _STATE['fetch_errors_by_coin'][coin] == 1:
+            _log(f'fetch err {coin}: {type(e).__name__}: {e}')
         return None
     if not isinstance(data, list):
-        return None
+        # Non-list (e.g., {} or {"error": ...}) — likely unsupported coin
+        with _LOCK:
+            _STATE.setdefault('empty_responses_by_coin', {})
+            _STATE['empty_responses_by_coin'][coin] = (
+                _STATE['empty_responses_by_coin'].get(coin, 0) + 1
+            )
+        if _STATE['empty_responses_by_coin'][coin] == 1:
+            _log(f'fetch non-list {coin}: type={type(data).__name__} '
+                 f'preview={str(data)[:100]}')
+        return []
+    if not data:
+        with _LOCK:
+            _STATE.setdefault('empty_list_by_coin', {})
+            _STATE['empty_list_by_coin'][coin] = (
+                _STATE['empty_list_by_coin'].get(coin, 0) + 1
+            )
+        if _STATE['empty_list_by_coin'][coin] == 1:
+            _log(f'fetch empty-list {coin}: HL returned [] — coin not on HL?')
+        return []
     bars = []
     for k in data:
         try:
@@ -436,6 +469,9 @@ def status():
         'started_ts': started,
         'uptime_sec': int(time.time() - started) if started else 0,
         'fetch_errors': errs,
+        'fetch_errors_by_coin': dict(_STATE.get('fetch_errors_by_coin', {})),
+        'empty_responses_by_coin': dict(_STATE.get('empty_responses_by_coin', {})),
+        'empty_list_by_coin': dict(_STATE.get('empty_list_by_coin', {})),
         'signals_total': sigs,
         'pending': len(pending),
         'resolved': n_resolved,
