@@ -8624,7 +8624,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"pullback err {coin}: {e}")
     # Tertiary: wall-bounce retest engine (requires verified OB + V3 alignment)
-    if not sig:
+    # 2026-04-28: HARD-REMOVED. WALL_BNC failed in its theoretical sweet spot
+    # (chop/bear-calm): -$1.16 / 4 trades / 50% WR. Concept (bounce off support
+    # walls) doesn't survive contact with our notional+latency. To restore:
+    # remove the `if False:` guard. Was also in DISABLE_ENGINES env, but that
+    # only catches AFTER signal generation — wraps the entire check.
+    if False and not sig:
         try:
             # Infer V3 direction from trend_gate checks
             v3_dir = 0
@@ -8688,11 +8693,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     f"@ ${wa_ctx['wall_usd']/1000:.0f}k")
         except Exception as e:
             log(f"wall_absorption err {coin}: {e}")
-    # 2026-04-25: FUNDING_MR engine — counter-crowd fade in chop. When HL
-    # funding is extreme and Binance confirms, fade the over-positioned side.
-    # Default DISABLED via FUNDING_MR_ENABLED=0; flip env to enable. Only
-    # fires in chop regime by default (FUNDING_MR_CHOP_ONLY=1).
-    if not sig:
+    # 2026-04-25: FUNDING_MR engine — counter-crowd fade in chop.
+    # 2026-04-28: HARD-REMOVED. -$1.62 / 8 trades / 50% WR. Concept (fade
+    # extreme funding) didn't generate edge in our setup. Already gated by
+    # FUNDING_MR_ENABLED=0 internally, but adding code-level guard to make
+    # removal definitive. To restore: remove the `if False:` guard.
+    if False and not sig:
         try:
             _fmr_regime = 'unknown'
             try:
