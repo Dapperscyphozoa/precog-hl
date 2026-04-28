@@ -47,7 +47,19 @@ CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
 # was statistical noise / had implicit orthogonal contributors (NEWS).
 # Forcing 2+ domains per fire restores quality. With 12 systems and NEWS
 # contributing to most fires, signal volume stays adequate.
-# Tunable via env to revert.
+# 2026-04-28: tried 2 → 3, then reverted back to 2 before deploy. Domain
+# distribution audit (12h cut, 89 real-engine fires):
+#   2-domain fires: ~73 (82% of population)
+#   3-domain fires: ~16 (18%)
+# CONF_MIN_DOMAINS=3 cuts frequency 82% (not 40-50% as initially estimated).
+# Worse: the 3-domain survivor pool is dominated by BTC_WALL+OBI+SNIPER
+# (n=4, -$0.76, $-0.190/trade) — 3× worse per-trade than the 2-domain
+# average. The killswitch already suppresses the worst 2-domain combos
+# (BTC_WALL+SNIPER, BTC_WALL+DAY) via per-(coin,engine) auto-pause.
+# Keeping default at 2 preserves trade volume + lets killswitch handle
+# bleeders. Re-evaluate if BTC_WALL+OBI+SNIPER gets specifically
+# blocklisted or if killswitch coverage expands.
+# Tunable via env (CONF_MIN_DOMAINS=3) for ad-hoc strictness.
 
 # 2026-04-27: Event-based systems that may fire alone, bypassing CONF_MIN_SYS
 # and CONF_MIN_DOMAINS. These are DISCRETE EVENTS where the event itself IS
@@ -747,6 +759,23 @@ def eval_coin(coin, bars_15m, now_ts=None):
         if 'SNIPER' in _systems_set and len(_systems_set) == 1:
             _STATS.setdefault('sniper_alone_dropped', 0)
             _STATS['sniper_alone_dropped'] += 1
+            return None
+
+    # 2026-04-28: SNIPER-in-chop gate. Live 7d audit:
+    #   CONFLUENCE_BTC_WALL+SNIPER  n=35, 45.2% WR, -$0.73
+    # SNIPER is a 15m BB-rejection. In chop, "rejections" are just
+    # band-walking — high false-positive rate. Trend regimes still allow.
+    # Tunable via CONF_SNIPER_BLOCK_CHOP (default 1).
+    _sniper_block_chop = (_os.environ.get('CONF_SNIPER_BLOCK_CHOP', '1') == '1')
+    if _sniper_block_chop and 'SNIPER' in by_side[best_side]:
+        try:
+            import regime_detector as _rd_chop
+            _cur_regime = _rd_chop.get_regime() or ''
+        except Exception:
+            _cur_regime = ''
+        if _cur_regime == 'chop':
+            _STATS.setdefault('sniper_chop_dropped', 0)
+            _STATS['sniper_chop_dropped'] += 1
             return None
 
     # 2026-04-27: FUNDING-alone gate (sample inspection).

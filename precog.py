@@ -857,7 +857,7 @@ def _force_notional_usd_live():
 #   TRX    10 trades  0 wins/0 losses (all timeouts) — signal generates but never resolves
 # JTO REMOVED from blocklist — backtest shows 61.5% WR +$8.5 sum (n=13). Was wrongly blocked.
 # RSR retained — backtest insufficient bars, prior live data showed -$0.45 outsized loss.
-COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,MEW,TURBO,TRX').split(',') if c.strip()}
+COIN_BLOCKLIST = {c.strip().upper() for c in os.environ.get('COIN_BLOCKLIST', 'RSR,MEW,TRX,APE,LINK,XRP,LINEA,SAND,W,NOT,DOGE,AAVE,TURBO,ZK,HBAR').split(',') if c.strip()}
 
 # 2026-04-27: engine kill switch. DISABLE_ENGINES is a comma-separated list of
 # engine names to skip. Supports exact match (TREND_CONT) or prefix wildcard
@@ -10122,8 +10122,17 @@ def main():
                             log(f"[ledger] phantom close err {k}: {_le}")
                     state['positions'].pop(k)
             # Track live-only positions (HL has it, state doesn't)
+            # 2026-04-28: also check System B state — confluence_worker tracks its
+            # own open positions separately. Without this, fresh System B entries
+            # (visible on HL but not yet in System A state) get false-positive
+            # closed as orphans within seconds of entry.
+            try:
+                import confluence_worker as _cw_orphan_check
+                _cw_open_keys = set(_cw_orphan_check._state.get('open_positions', {}).keys())
+            except Exception:
+                _cw_open_keys = set()
             for k in live_positions:
-                if k not in state['positions']:
+                if k not in state['positions'] and k not in _cw_open_keys:
                     side = 'L' if live_positions[k]['size']>0 else 'S'
                     entry_px = live_positions[k]['entry']
                     # 2026-04-28: ORPHAN_ACTION gate. Parallel path to lifecycle_reconciler's
