@@ -778,6 +778,23 @@ def eval_coin(coin, bars_15m, now_ts=None):
         except Exception:
             pass  # fail-soft
 
+    # 2026-04-28: LAYER C — Position feedback gate.
+    # Suspend ALL new entries when last-hour System B performance is
+    # WR<30% AND avg_loss>2× avg_win. Catches strategy-environment mismatch
+    # in real-time (faster than vol detector or trend regime). Time-based
+    # release: 15min after trigger, re-evaluates.
+    # Fail-soft: if module unavailable, gate is no-op.
+    # Tunable: PERF_GATE_ENABLED (default 1).
+    if _os.environ.get('PERF_GATE_ENABLED', '1') == '1':
+        try:
+            import position_feedback as _pf_c
+            if _pf_c.is_warning():
+                _STATS.setdefault('perf_warning_blocked', 0)
+                _STATS['perf_warning_blocked'] += 1
+                return None
+        except Exception:
+            pass  # fail-soft
+
     # 2026-04-28: SNIPER-in-chop gate. Live 7d audit:
     #   CONFLUENCE_BTC_WALL+SNIPER  n=35, 45.2% WR, -$0.73
     # SNIPER is a 15m BB-rejection. In chop, "rejections" are just

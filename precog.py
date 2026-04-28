@@ -10935,6 +10935,16 @@ def vol_status():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/perf_status', methods=['GET'])
+def perf_status():
+    """LAYER C — Position feedback / performance circuit-breaker status."""
+    try:
+        import position_feedback as _pf
+        return jsonify(_pf.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/lifecycle', methods=['GET'])
 def lifecycle_status():
     """Step 4 — full lifecycle observability with circuit breaker + multi-tier drift."""
@@ -11352,6 +11362,16 @@ if __name__ == '__main__':
         _vol_det.start()
     except Exception as _e:
         log(f"vol_detector init failed (non-fatal): {_e}")
+
+    # LAYER C — Position feedback. Real-time circuit-breaker watching our
+    # own trade outcomes. Suspends entries when WR<30% AND loss_ratio>2× over
+    # last hour. Catches strategy-environment mismatch faster than A or B.
+    # Tunable via PERF_FEEDBACK_ENABLED, PERF_WR_THRESHOLD, etc.
+    try:
+        import position_feedback as _pf
+        _pf.start()
+    except Exception as _e:
+        log(f"position_feedback init failed (non-fatal): {_e}")
 
     # Run latency arbitrage module in background thread
     # LA KILLED — was burning 60 API calls/sec with 0 trades, causing 429s
