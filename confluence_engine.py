@@ -824,18 +824,27 @@ def eval_coin(coin, bars_15m, now_ts=None):
     #
     # Tunable: REGIME_ALLOWLIST_DISABLED=1 bypasses gate entirely.
     if _os.environ.get('REGIME_ALLOWLIST_DISABLED', '0') != '1':
+        # Chop allowlist — 6 combos validated by 24h live audit (n>=3, $PnL>=0)
+        _CHOP_ALLOWED = {
+            'CONFLUENCE_DAY+NEWS',
+            'CONFLUENCE_BTC_WALL+NEWS',
+            'CONFLUENCE_BTC_WALL+OBI',
+            'CONFLUENCE_BTC_WALL+DAY+SNIPER',
+            'CONFLUENCE_DAY+OBI',
+            'CONFLUENCE_BTC_WALL+DAY+NEWS',
+        }
         _REGIME_ALLOWLIST = {
-            'chop': {
-                'CONFLUENCE_DAY+NEWS',
-                'CONFLUENCE_BTC_WALL+NEWS',
-                'CONFLUENCE_BTC_WALL+OBI',
-                'CONFLUENCE_BTC_WALL+DAY+SNIPER',
-                'CONFLUENCE_DAY+OBI',
-                'CONFLUENCE_BTC_WALL+DAY+NEWS',
-            },
-            'bear-calm':  set(),  # default-deny — insufficient live data
-            'bear-storm': set(),  # default-deny — no data
-            'bull-calm':  set(),  # default-deny — backtest only, no live
+            'chop':       _CHOP_ALLOWED,
+            # 2026-04-28: mirror chop allowlist to bear-calm. Both are
+            # low-vol mean-reverting regimes. Mean-rev combos that work in
+            # chop should work in bear-calm (theory). NO live bear-calm data
+            # to confirm yet — Layer C performance feedback + Layer B vol
+            # flash provide circuit-breakers if the bet is wrong. Cost of
+            # being wrong: ~$5-10 of bleed over 12h before circuit triggers.
+            # Reward: live trading resumes in current regime.
+            'bear-calm':  _CHOP_ALLOWED,
+            'bear-storm': set(),  # default-deny — high vol, mean-rev fails
+            'bull-calm':  set(),  # default-deny — trend regime, fade fails
             'bull-storm': set(),  # default-deny — no data
         }
         _engine_name_a = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
