@@ -474,6 +474,22 @@ def status():
         'empty_list_by_coin': dict(_STATE.get('empty_list_by_coin', {})),
         'signals_total': sigs,
         'pending': len(pending),
+        'pending_signals': [
+            {
+                'coin': p.get('coin'),
+                'side': p.get('side'),
+                'pattern': p.get('pattern'),
+                'entry_price': p.get('entry_price'),
+                'swing_level': p.get('swing_level'),
+                'wick_body_ratio': round(p.get('wick_body_ratio', 0), 2),
+                'tier': p.get('tier'),
+                'regime_at_entry': p.get('regime_at_entry'),
+                'signal_bar_t': p.get('signal_bar_t'),
+                'age_sec': int(time.time() - (p.get('signal_bar_t', 0) // 1000))
+                           if p.get('signal_bar_t') else None,
+            }
+            for p in pending
+        ],
         'resolved': n_resolved,
         'tp_hits': tp,
         'sl_hits': sl,
