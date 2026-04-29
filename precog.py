@@ -8868,6 +8868,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         log(f"{coin} {sig} {signal_engine} dropped: engine_disabled (manual/auto-pause/coin-pair)")
         sig = None
 
+    # 2026-04-29: BUCKET FILTER — historical MFE-positive rate veto.
+    # Per (coin, engine, regime) bucket, block if rate of trades reaching
+    # +0.5% MFE is below floor. Implements the verified +EV insight that
+    # 4/8 recent trades had zero MFE = directionally wrong from entry,
+    # only signal rejection cuts them.
+    if sig and signal_engine and coin not in ('BTC', 'ETH'):
+        try:
+            import bucket_filter as _bf
+            try:
+                import regime_detector as _rd_bf
+                _regime_bf = (_rd_bf.get_regime() or '').lower()
+            except Exception:
+                _regime_bf = ''
+            _blocked, _reason = _bf.block_signal(coin, signal_engine, _regime_bf, sig)
+            if _blocked:
+                log(f"{coin} {sig} {signal_engine} dropped: bucket_filter ({_reason})")
+                sig = None
+        except Exception as _bfe:
+            pass  # fail-soft
+
     # 2026-04-27: orthogonal-domain confirmation — SHADOW MEASURE by default.
     # Default-off (SA_ORTHOGONAL_GATE_ENABLED=0). Records what WOULD have been
     # blocked but lets the signal through. After enough samples comparing
@@ -11055,6 +11075,16 @@ def asian_session_status():
     try:
         import asian_session as _ase
         return jsonify(_ase.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/bucket_filter_status', methods=['GET'])
+def bucket_filter_status():
+    """BUCKET_FILTER — per (coin, engine, regime) MFE-positive rate veto."""
+    try:
+        import bucket_filter as _bf
+        return jsonify(_bf.status())
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
