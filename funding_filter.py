@@ -1,10 +1,20 @@
-"""Funding rate filter. Block longs when funding > +0.1%/8h (expensive carry).
-Block shorts when funding < -0.1%/8h (you'd pay to short). Cached 5min via HL API.
+"""Funding rate filter. Block longs when funding > +0.05%/8h (expensive carry).
+Block shorts when funding < -0.05%/8h (you'd pay to short). Cached 5min via HL API.
+
+2026-04-28: tightened from 0.1%/8h to 0.05%/8h. Live KB had 3 SHORT-CHOP-NEG-FUNDING
+SL hits at funding around -0.05 to -0.07%/8h that the looser threshold missed.
+Also added regime gate — only enforce in chop/bear-calm where mean-rev signals
+shouldn't be paying funding to wait. In trending regimes, funding can be legit
+one-sided and we don't want to gate winners.
 """
-import time, threading, urllib.request, json
+import os, time, threading, urllib.request, json
 
 CACHE_TTL = 300  # 5min
-THRESHOLD_HIGH = 0.001   # 0.1% per 8h — expensive
+THRESHOLD_HIGH = float(os.environ.get('FUNDING_FILTER_THRESHOLD', '0.0005'))   # 0.05% per 8h
+GATE_REGIMES = set(r.strip().lower() for r in
+                   os.environ.get('FUNDING_FILTER_REGIMES', 'chop,bear-calm').split(',')
+                   if r.strip())  # only enforce in these regimes; empty = always
+ENABLED = os.environ.get('FUNDING_FILTER_ENABLED', '1') == '1'
 _CACHE = {}  # coin -> {rate, ts}
 _LOCK = threading.Lock()
 
@@ -36,7 +46,24 @@ def get_rate(coin):
     return c['rate']
 
 def allow_side(coin, side):
-    """Returns True if trade allowed, False if funding makes it expensive."""
+    """Returns True if trade allowed, False if funding makes it expensive.
+
+    Regime-gated: only enforces in regimes listed in FUNDING_FILTER_REGIMES
+    (default chop,bear-calm). Trending regimes pass through.
+    Fail-soft: no funding data → allow.
+    """
+    if not ENABLED:
+        return True
+    # Regime gate — only filter in non-trending regimes where mean-rev
+    # signals shouldn't pay funding to wait.
+    if GATE_REGIMES:
+        try:
+            import regime_detector as _rd
+            cur = (_rd.get_regime() or '').lower()
+            if cur and cur not in GATE_REGIMES:
+                return True  # not in a regime we filter
+        except Exception:
+            pass
     r = get_rate(coin)
     if r is None: return True  # no data = allow
     if side == 'BUY' and r > THRESHOLD_HIGH: return False  # paying to hold long
