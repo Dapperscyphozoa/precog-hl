@@ -1044,7 +1044,14 @@ _VERIFIED_ENGINES_DEFAULT = 'BB_REJ,LIQ_CSCD,PIVOT'
 
 
 def _verified_engines_only():
-    return os.environ.get('VERIFIED_ENGINES_ONLY', '1') == '1'
+    # 2026-04-29 (later): default OFF. The narrow allowlist (BB_REJ +
+    # LIQ_CSCD + PIVOT) caused signal starvation — BB_REJ silent 48h,
+    # LIQ_CSCD silent 14d. With verified-loser baseline, bad-entry kill,
+    # hour veto, Wilson auto-disable, bucket filter, cluster throttle,
+    # and per-engine TP/SL overrides all live, defenses are sufficient
+    # to let all engines fire. Drift gets auto-killed within 50 trades.
+    # Set VERIFIED_ENGINES_ONLY=1 on Render to re-narrow if needed.
+    return os.environ.get('VERIFIED_ENGINES_ONLY', '0') == '1'
 
 
 def _verified_engines_allowlist():
