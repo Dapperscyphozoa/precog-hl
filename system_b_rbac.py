@@ -106,7 +106,13 @@ class _TokenBucket:
             return False
 
     def current(self) -> float:
+        """Returns CURRENT token count, applying refill so observers see truth."""
         with self._lock:
+            now = time.time()
+            elapsed = now - self._last_refill
+            self._tokens = min(self.capacity,
+                               self._tokens + elapsed * self.refill_per_sec)
+            self._last_refill = now
             return self._tokens
 
 
@@ -192,8 +198,16 @@ def acquire(coin: str = '', reason: str = 'sb_state',
 # ─── Cached pass-throughs ────────────────────────────────────────────────
 
 def _is_429(exc: BaseException) -> bool:
-    s = str(exc)
-    return '429' in s or 'rate' in s.lower() or 'too many' in s.lower()
+    s = str(exc).lower()
+    # Cover all known HL/CloudFront formats:
+    #   "(429, None, 'null', ...)"  raw HL SDK
+    #   "HTTP 429 too many requests"
+    #   "Rate Limited"
+    #   "TooManyRequests"  (CamelCase, no space)
+    return ('429' in s
+            or 'rate' in s
+            or 'too many' in s
+            or 'toomany' in s)
 
 
 def _serve(endpoint: str, ttl_sec: int, fetch_fn, coin: str = ''):
