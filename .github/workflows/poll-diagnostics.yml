@@ -15,6 +15,11 @@ on:
         description: 'Why are you polling now?'
         required: false
         default: 'manual_check'
+  # 2026-04-29: also trigger on every push to main so the snapshot
+  # refreshes immediately after each deploy (GH Actions cron has known
+  # 5-30+ min lag on first run after workflow file changes).
+  push:
+    branches: [main]
 
 permissions:
   contents: write
@@ -43,6 +48,10 @@ jobs:
       - name: Fetch endpoints + build snapshot
         run: |
           set -e
+          set -x
+          pwd
+          ls -la
+          git status
           mkdir -p snapshots
           NOW_UTC=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
           NOW_TS=$(date -u +'%s')
@@ -90,9 +99,13 @@ jobs:
 
       - name: Commit + push
         run: |
+          set -x
+          ls -la snapshots/
+          git status
           git add snapshots/
+          git diff --cached --stat
           if git diff --cached --quiet; then
-            echo "no changes"
+            echo "no changes — exiting"
             exit 0
           fi
           git commit -m "diagnostics: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
