@@ -7149,24 +7149,42 @@ def _compute_sl_px(coin, is_long, entry, engine=None):
     """Compute SL trigger price for atomic entry. Pure — no I/O.
     Returns (sl_px_rounded, sl_pct_used) or (None, None).
 
-    2026-04-29 (revised): per-engine SL override symmetric to TP_OVERRIDE.
-    BB_REJ + PIVOT default 0.003 (30bp). Earlier 10bp SL was sub-noise
-    on 15m timeframe (typical alt 15m candle has ±15-25bp wick range);
-    trades got stopped on intracandle noise before signal could develop.
-    30bp = ~1× typical 15m ATR — wide enough to ride out noise wicks
-    while still capping loss at the engine's edge horizon.
+    2026-04-29 (LOCKED): per-engine SL override symmetric to TP_OVERRIDE.
+    BB_REJ + PIVOT default 0.015 (150bp). EARLIER ATTEMPTS WERE WRONG:
+      - PR #34 set 10bp (sub-noise on 15m timeframe — every entry stopped)
+      - PR #44 set 30bp (still too tight — verified winners had MAE up to 80bp)
+    The 150bp value is verified from data. Winning trades on 2026-04-29
+    had MAE up to 80bp before turning to MFE +86 to +265bp. Tighter SL
+    truncates the signal's working zone. See DO_NOT_TOUCH.md for full
+    evidence and lock procedure. Floor enforced via _SL_LOCK_MIN guard.
 
-    Math at 30bp TP / 30bp SL / 70% WR / maker entry / taker SL exit:
-      Win:  +30bp - 3bp (maker round-trip) = +27bp
-      Loss: -30bp - 6bp (maker entry + taker SL exit) = -36bp
-      EV: 0.7 × 27 - 0.3 × 36 = 18.9 - 10.8 = +8.1bp/trade
+    Verified-from-data winning configuration (2026-04-29 SA wins):
+      LTC SELL:    MAE -80bp → MFE +265bp → realized +$1.06
+      ADA SELL:    MAE -10bp → MFE +86bp  → realized +$0.35
+      STABLE BUY:  MAE   0bp → MFE +187bp → realized +$0.68
+      TRB SELL:    MAE   0bp → MFE +113bp → realized +$0.07
+      TRB SELL:    MAE   0bp → MFE +113bp → realized +$0.22
+      Lifetime SA WR ~75% on this config. Per-coin TP=50-100bp.
+      Tight SL would have stopped LTC at -30bp before its +265bp MFE.
 
     Other engines fall through to per-coin SL config.
     """
-    # 2026-04-29 (revised): per-engine SL = ~1× 15m ATR floor.
-    # 10bp was below 15m noise floor (intracandle wicks ±15-25bp);
-    # 30bp gives signal room to develop. Override via env.
-    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.003', 'PIVOT': '0.003'}
+    # ─── LOCKED CONFIG GUARD (2026-04-29) ────────────────────────────
+    # Verified-from-data minimum SL on BB_REJ + PIVOT is 0.015 (150bp).
+    # Tighter SL stops winning trades before MFE develops (see DO_NOT_TOUCH.md).
+    # If env override is set below 0.010 (100bp), refuse to apply and log loudly.
+    _SL_LOCK_MIN = 0.010
+    for _lk in ('SL_OVERRIDE_BB_REJ', 'SL_OVERRIDE_PIVOT'):
+        _lv = os.environ.get(_lk, '').strip()
+        if _lv:
+            try:
+                if float(_lv) < _SL_LOCK_MIN:
+                    log(f"⚠️ LOCKED CONFIG VIOLATION: {_lk}={_lv} below floor {_SL_LOCK_MIN}. "
+                        f"Ignoring env override. See DO_NOT_TOUCH.md.")
+                    os.environ.pop(_lk, None)
+            except ValueError:
+                log(f"⚠️ {_lk} unparseable: {_lv!r} — ignored")
+    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.015', 'PIVOT': '0.015'}  # LOCKED — see DO_NOT_TOUCH.md
     if engine:
         _eng_key = f'SL_OVERRIDE_{engine.upper()}'
         _eng_override = os.environ.get(_eng_key, _ENGINE_SL_DEFAULTS.get(engine.upper(), '')).strip()
