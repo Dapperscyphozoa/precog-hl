@@ -8,8 +8,8 @@ name: Poll bot diagnostics
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 min (GitHub Actions minimum)
-  workflow_dispatch:        # manual trigger
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
     inputs:
       reason:
         description: 'Why are you polling now?'
@@ -17,7 +17,7 @@ on:
         default: 'manual_check'
 
 permissions:
-  contents: write           # required to commit snapshots back to repo
+  contents: write
 
 env:
   BOT_BASE: https://precog-i8c3.onrender.com
@@ -28,33 +28,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout snapshot branch (create if missing)
+      - name: Checkout snapshot branch
         uses: actions/checkout@v4
         with:
           ref: ${{ env.SNAPSHOT_BRANCH }}
           fetch-depth: 1
           persist-credentials: true
-        continue-on-error: true
 
-      - name: Initialize snapshot branch if first run
+      - name: Configure git author
         run: |
-          if [ ! -d ".git" ]; then
-            git init
-            git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
-          fi
-          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
-            git checkout --orphan "${SNAPSHOT_BRANCH}"
-            git rm -rf --cached . 2>/dev/null || true
-            mkdir -p snapshots
-            echo "# Diagnostics snapshots" > README.md
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add README.md
-            git commit -m "init diagnostics-data branch"
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Fetch endpoints + build snapshot
-        id: snapshot
         run: |
           set -e
           mkdir -p snapshots
@@ -81,36 +67,29 @@ jobs:
             echo "  \"polled_ts\": ${NOW_TS},"
             echo "  \"workflow_run_id\": \"${GITHUB_RUN_ID}\","
             echo "  \"trigger\": \"${GITHUB_EVENT_NAME}\","
-            fetch diagnose          /diagnose          ; echo ","
-            fetch hour_veto_status  /hour_veto_status  ; echo ","
+            fetch diagnose             /diagnose             ; echo ","
+            fetch hour_veto_status     /hour_veto_status     ; echo ","
             fetch bad_entry_kill_status /bad_entry_kill_status ; echo ","
             fetch bucket_filter_status /bucket_filter_status ; echo ","
-            fetch trades_recent     /trades/recent?hours=12 ; echo ","
-            fetch perf_status       /perf_status       ; echo ","
-            fetch btcd_status       /btcd_status       ; echo ","
-            fetch precog_status     /precog_status     ; echo ","
-            fetch confluence_trades /confluence/trades?hours=12 ; echo ","
-            fetch regime_status     /regime
+            fetch trades_recent        /trades/recent?hours=12 ; echo ","
+            fetch perf_status          /perf_status          ; echo ","
+            fetch btcd_status          /btcd_status          ; echo ","
+            fetch precog_status        /precog_status        ; echo ","
+            fetch confluence_trades    /confluence/trades?hours=12 ; echo ","
+            fetch regime_status        /regime
             echo "}"
           } > "$OUT"
 
-          # also keep timestamped archive for trend analysis
           cp "$OUT" "snapshots/${NOW_TS}.json"
 
-          # Trim archive to last 288 snapshots (24h at 5min cadence) to keep
-          # the branch small and queryable.
+          # Trim archive to last 288 (24h at 5-min cadence)
           ls -1t snapshots/[0-9]*.json 2>/dev/null | tail -n +289 | xargs -r rm -f
 
-          echo "out_path=$OUT" >> "$GITHUB_OUTPUT"
-          echo "snapshot_size=$(wc -c < "$OUT")" >> "$GITHUB_OUTPUT"
-
-      - name: Commit + push snapshot
+      - name: Commit + push
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add snapshots/
           if git diff --cached --quiet; then
-            echo "no diagnostic changes — skipping commit"
+            echo "no changes"
             exit 0
           fi
           git commit -m "diagnostics: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -120,5 +99,4 @@ jobs:
             fi
             sleep $((2**i))
           done
-          echo "push failed after retries"
           exit 1
