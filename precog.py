@@ -11457,7 +11457,7 @@ def config_dump_endpoint():
                     'z':       _WILSON_AUTO_DISABLE_Z,
                 },
                 'hour_veto': {
-                    'enabled': os.environ.get('HOUR_VETO_ENABLED', '1') == '1',
+                    'enabled': os.environ.get('HOUR_VETO_ENABLED', '0') == '1',
                     'hours': sorted({int(h.strip()) for h in os.environ.get('HOUR_VETO_HOURS', '4,6,7,9,14,15,16,19').split(',') if h.strip().isdigit()}),
                 },
                 'liquidation_cascade': {
