@@ -55,7 +55,7 @@ DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
 SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '120'))
 # 2026-04-27: 180s → 120s. Faster scan cadence; same per-scan logic, more
 # checks per day. ~1.5x more fires/day, no quality reduction. Tunable via env.
-MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '16'))  # 2026-04-29: 12→16 with verified-loser baseline blocking the 4 -EV engines; remaining flow is filtered, more slots captures cleaner residue. GLOBAL_MAX_POSITIONS=20 still binds combined system.
+MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))  # 2026-04-29 (SB unlock): 16→25. SB now decoupled from SA's allowlist, so signal volume restored. 25 was the original SB design before defensive narrowing. SB blocks losers via _sb_engine_disabled (independent of SA).
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
 # 2026-04-26: optional side filter. Default permissive (both BUY,SELL). The
@@ -156,6 +156,57 @@ _state = {
     'closed_trades': [],         # list of dicts (capped at 500), newest last
 }
 _state_lock = threading.Lock()
+
+# 2026-04-29: SB-only engine block list. Decoupled from SA's
+# verified-engines-only allowlist (which strangles SB by limiting it to
+# the 5-engine SA allowlist). SB's verified losers were identified by
+# the same audit but only THESE engines belong to SB's signal space:
+#
+#   CONFLUENCE_BTC_WALL+NEWS    n=64  WR=40%  sum=-$1.72
+#   CONFLUENCE_BTC_WALL+SNIPER  n=59  WR=38%  sum=-$0.74
+#   CONFLUENCE_BTC_WALL+DAY     n=19  WR=40%  sum=-$0.51
+#
+# (HL is SA-only; +DAY+NEWS, +OBI, etc. are marginal+ — let them fire and
+#  let Wilson auto-disable + bucket filter catch any drift.)
+#
+# Operator can extend via CONF_DISABLE_ENGINES env (comma-separated tags
+# like 'CONFLUENCE_BTC_WALL+NEWS,CONFLUENCE_FUNDING+SNIPER'), supports
+# 'CONFLUENCE_BTC_WALL+*' wildcard prefix.
+_SB_VERIFIED_LOSER_BASELINE = {
+    'CONFLUENCE_BTC_WALL+NEWS',
+    'CONFLUENCE_BTC_WALL+SNIPER',
+    'CONFLUENCE_BTC_WALL+DAY',
+}
+
+
+def _sb_engine_disabled(name, coin=None):
+    """SB-only engine kill switch. Independent of SA's _engine_disabled.
+
+    Layers:
+      1. Verified-loser baseline (hardcoded SB-side -EV combos)
+      2. Manual env-driven kill list (CONF_DISABLE_ENGINES). Supports
+         exact match or '*' suffix wildcard.
+
+    Returns True if engine should be skipped for this fire.
+    SB does NOT consult precog's _engine_disabled to avoid coupling
+    to SA's verified-engines-only allowlist.
+    """
+    if not name:
+        return False
+    if os.environ.get('SB_VERIFIED_LOSER_VETO', '1') == '1' and name in _SB_VERIFIED_LOSER_BASELINE:
+        return True
+    raw = os.environ.get('CONF_DISABLE_ENGINES', '')
+    if raw:
+        for tok in raw.split(','):
+            tok = tok.strip()
+            if not tok:
+                continue
+            if tok == name:
+                return True
+            if tok.endswith('*') and name.startswith(tok[:-1]):
+                return True
+    return False
+
 
 def _log(msg):
     line = f"[{datetime.utcnow().isoformat(timespec='seconds')}Z] [CONFLUENCE] {msg}"
@@ -316,20 +367,53 @@ def _size_and_fire(coin, signal, equity):
     2026-04-25: respects FORCE_NOTIONAL_USD env override (debug mode).
     When set, all System B trades use fixed notional regardless of risk math.
     """
-    # 2026-04-27: engine kill switch. Checks (in order): manual env list,
-    # auto-pause on rolling WR, per-coin x per-engine pause on rolling WR.
+    # 2026-04-29: SB-specific engine gate. Replaces previous call to
+    # precog._engine_disabled() which would also apply SA's verified-engines-
+    # only allowlist (intended for SA only). SB needs to fire across many
+    # confluence combos (DAY+NEWS, +OBI variants, etc.) to find edge per
+    # the original design — narrowing to SA's allowlist starves SB.
+    #
+    # SB blocks ONLY: verified-loser SB engines + CONF_DISABLE_ENGINES env.
+    # SB ignores: VERIFIED_ENGINES_ONLY, VERIFIED_ENGINES_ALLOWLIST.
     try:
         _engine_tag_check = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
-        if _precog is not None and hasattr(_precog, '_engine_disabled'):
-            if _precog._engine_disabled(_engine_tag_check, coin=coin):
-                _log(f"{coin} {signal['side']} {_engine_tag_check} dropped: engine_disabled")
-                try:
-                    _state.setdefault('rejects', {})
-                    _state['rejects']['engine_disabled'] = _state['rejects'].get('engine_disabled', 0) + 1
-                except Exception: pass
-                return None
+        if _sb_engine_disabled(_engine_tag_check, coin=coin):
+            _log(f"{coin} {signal['side']} {_engine_tag_check} dropped: sb_engine_disabled")
+            try:
+                _state.setdefault('rejects', {})
+                _state['rejects']['engine_disabled'] = _state['rejects'].get('engine_disabled', 0) + 1
+            except Exception: pass
+            return None
     except Exception:
         pass
+
+    # 2026-04-29: BTCD directional filter for SB (independent of SA's
+    # apply_ticker_gate, which is locked out per operator directive).
+    # BTC Dominance (BTC/ETH ratio proxy) tells us which way alts are
+    # rotating relative to BTC. SB's confluence stacks coin-level signals
+    # but ignores the macro alt-vs-BTC regime — many SB losses are
+    # directional fights against BTCD.
+    #
+    # Block LONG alt when BTCD rising (alts weak vs BTC).
+    # Block SHORT alt when BTCD falling (alts strong vs BTC).
+    # Allow when BTCD is flat (no macro signal).
+    # BTC itself never gated (BTCD is computed from BTC).
+    #
+    # Tunable via SB_BTCD_FILTER (default 1). Disable with =0 if proving
+    # too restrictive on a regime.
+    if os.environ.get('SB_BTCD_FILTER', '1') == '1':
+        try:
+            import btc_dominance as _btcd_sb
+            _bd_blocked, _bd_reason = _btcd_sb.block_alt_side(coin, signal['side'])
+            if _bd_blocked:
+                _log(f"{coin} {signal['side']} CONFLUENCE dropped: btcd ({_bd_reason})")
+                try:
+                    _state.setdefault('rejects', {})
+                    _state['rejects']['btcd'] = _state['rejects'].get('btcd', 0) + 1
+                except Exception: pass
+                return None
+        except Exception:
+            pass  # fail-soft: BTCD module error doesn't block trades
 
     # 2026-04-27: 5m confirmation gate (shared with precog signals).
     try:
@@ -1422,6 +1506,24 @@ def status():
             out['engine_stats'] = ce.status()
     except Exception as e:
         out['engine_stats_err'] = f"{type(e).__name__}: {e}"
+    # 2026-04-29: SB-only filter state — surface every gate active on SB.
+    btcd_state = None
+    try:
+        import btc_dominance as _btcd_st
+        btcd_state = _btcd_st.status()
+    except Exception as _bde:
+        btcd_state = {'err': f'{type(_bde).__name__}: {_bde}'}
+    out['sb_filter'] = {
+        'verified_loser_veto_enabled': os.environ.get('SB_VERIFIED_LOSER_VETO', '1') == '1',
+        'verified_loser_baseline':     sorted(_SB_VERIFIED_LOSER_BASELINE),
+        'conf_disable_engines_env':    os.environ.get('CONF_DISABLE_ENGINES', ''),
+        'max_positions':               MAX_POSITIONS,
+        'risk_pct':                    RISK_PCT,
+        'allowed_sides':               sorted(ALLOWED_SIDES) if ALLOWED_SIDES else None,
+        'decoupled_from_sa_allowlist': True,
+        'btcd_filter_enabled':         os.environ.get('SB_BTCD_FILTER', '1') == '1',
+        'btcd_state':                  btcd_state,
+    }
     return out
 
 

@@ -11502,6 +11502,46 @@ def config_dump_endpoint():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/btcd_backtest', methods=['GET'])
+def btcd_backtest_endpoint():
+    """Walk full ledger, classify each closed trade by BTCD direction.
+
+    Tests whether a BTCD-direction filter (only fire when side aligns with
+    alts implication of BTCD) flips engines from -EV to +EV.
+
+    Args:
+      ?engines=HL,CONFLUENCE_BTC_WALL+NEWS  comma-separated filter (default all)
+      ?lookback_h=4                         BTCD change window (1, 4, 24)
+      ?threshold=0.002                      |pct_change| boundary (e.g. 0.002 = 0.2%)
+      ?days=14                              ledger lookback
+
+    Returns per-engine baseline / aligned-only / misaligned scenarios with
+    Wilson CIs and recommendation flag.
+    """
+    try:
+        import btcd_backtest as _bb
+        eng_arg = flask_request.args.get('engines', '').strip()
+        engines = None
+        if eng_arg:
+            engines = {e.strip() for e in eng_arg.split(',') if e.strip()}
+        try:
+            lookback_h = int(flask_request.args.get('lookback_h', '4'))
+        except Exception:
+            lookback_h = 4
+        try:
+            threshold = float(flask_request.args.get('threshold', '0.002'))
+        except Exception:
+            threshold = 0.002
+        try:
+            days = int(flask_request.args.get('days', '14'))
+        except Exception:
+            days = 14
+        return jsonify(_bb.audit(engines=engines, lookback_h=lookback_h,
+                                 threshold=threshold, days=days))
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/edge_audit', methods=['GET'])
 def edge_audit_endpoint():
     """Per-engine, per-coin, per-regime, per-hour breakdown with Wilson CIs.
