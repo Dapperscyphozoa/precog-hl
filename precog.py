@@ -8777,9 +8777,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"funding_mr err {coin}: {e}")
     # Quaternary: liquidation cascade fade
+    # 2026-04-29: env-tunable max_age. Tighter window (e.g., 60s) catches
+    # only fresh cascades; the audit recommended 30s for "just-cascaded"
+    # fades. Default 180 preserves prior behavior.
     if not sig:
         try:
-            casc = liquidation_ws.get_cascade(coin, max_age_sec=180)
+            _liq_max_age = int(os.environ.get('LIQ_CSCD_MAX_AGE_S', '180'))
+            casc = liquidation_ws.get_cascade(coin, max_age_sec=_liq_max_age)
             if casc:
                 sig = casc['fade_direction']; bar_ts = int(time.time()*1000); signal_engine = 'LIQ_CSCD'
                 log(f"LIQ-CASCADE {coin} fade {sig} (${casc['total_usd']/1e6:.1f}M liqs)")
