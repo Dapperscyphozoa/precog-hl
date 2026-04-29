@@ -5849,6 +5849,18 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
     if not btc_correlation.allow_alt_trade(coin, side):
         reasons.append('btc_corr')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'btc_correlation_block')
+    # 2026-04-28: BTC Dominance gate. More informative than raw BTC direction —
+    # captures alt-vs-BTC divergence. Block LONG alts when BTCD rising (alts
+    # weak), block SHORT alts when BTCD falling (alts strong). Tunable via
+    # BTCD_GATE_ENABLED. Fail-soft: returns False (no block) on no data.
+    try:
+        import btc_dominance as _btcd
+        _btcd_blocked, _btcd_reason = _btcd.block_alt_side(coin, side)
+        if _btcd_blocked:
+            reasons.append(f'btcd_{_btcd_reason}')
+            _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', f'btcd_{_btcd_reason}')
+    except Exception as _btcd_e:
+        pass  # fail-soft
     passed = len(reasons) == 0
     if return_reasons:
         return passed, reasons
@@ -10972,6 +10984,16 @@ def perf_status():
     try:
         import position_feedback as _pf
         return jsonify(_pf.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/btcd_status', methods=['GET'])
+def btcd_status():
+    """BTC Dominance proxy — alt-vs-BTC divergence gate."""
+    try:
+        import btc_dominance as _btcd
+        return jsonify(_btcd.status())
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
