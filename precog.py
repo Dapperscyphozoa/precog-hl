@@ -8868,6 +8868,26 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         log(f"{coin} {sig} {signal_engine} dropped: engine_disabled (manual/auto-pause/coin-pair)")
         sig = None
 
+    # 2026-04-29: BUCKET FILTER — historical MFE-positive rate veto.
+    # Per (coin, engine, regime) bucket, block if rate of trades reaching
+    # +0.5% MFE is below floor. Implements the verified +EV insight that
+    # 4/8 recent trades had zero MFE = directionally wrong from entry,
+    # only signal rejection cuts them.
+    if sig and signal_engine and coin not in ('BTC', 'ETH'):
+        try:
+            import bucket_filter as _bf
+            try:
+                import regime_detector as _rd_bf
+                _regime_bf = (_rd_bf.get_regime() or '').lower()
+            except Exception:
+                _regime_bf = ''
+            _blocked, _reason = _bf.block_signal(coin, signal_engine, _regime_bf, sig)
+            if _blocked:
+                log(f"{coin} {sig} {signal_engine} dropped: bucket_filter ({_reason})")
+                sig = None
+        except Exception as _bfe:
+            pass  # fail-soft
+
     # 2026-04-27: orthogonal-domain confirmation — SHADOW MEASURE by default.
     # Default-off (SA_ORTHOGONAL_GATE_ENABLED=0). Records what WOULD have been
     # blocked but lets the signal through. After enough samples comparing
@@ -11055,6 +11075,44 @@ def asian_session_status():
     try:
         import asian_session as _ase
         return jsonify(_ase.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/bucket_filter_status', methods=['GET'])
+def bucket_filter_status():
+    """BUCKET_FILTER — per (coin, engine, regime) MFE-positive rate veto."""
+    try:
+        import bucket_filter as _bf
+        return jsonify(_bf.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/regime_lag_audit', methods=['GET'])
+def regime_lag_audit():
+    """Empirical test: was the regime classifier lagging on losing chop trades?
+
+    Query args:
+      threshold_pct=0.01  fraction (1% default)
+      hours=1             ±N hours window around entry
+      max_rows=2000       cap on rows scanned
+    """
+    try:
+        import regime_lag_audit as _rla
+        try:
+            thresh = float(flask_request.args.get('threshold_pct', '0.01'))
+        except Exception:
+            thresh = 0.01
+        try:
+            hours = int(flask_request.args.get('hours', '1'))
+        except Exception:
+            hours = 1
+        try:
+            max_rows = int(flask_request.args.get('max_rows', '2000'))
+        except Exception:
+            max_rows = 2000
+        return jsonify(_rla.audit(threshold_pct=thresh, hours_window=hours, max_rows=max_rows))
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
