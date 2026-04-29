@@ -43,6 +43,31 @@ or `DISABLE_ENGINES`. SA's allowlist no longer affects SB.
 | `CLUSTER_THROTTLE_ENABLED` | `1` | Per (engine, side) burst limit (3 fires/5min). Kept on as defense. |
 | `CONF_MIN_SYS` | `2` | Min systems agreeing for confluence fire. |
 | `CONF_MIN_DOMAINS` | `2` | Min orthogonal data-domains agreeing. |
+| **`SB_BTCD_FILTER`** | **`1`** | **BTC Dominance directional filter (see below).** |
+
+## BTCD directional filter
+
+SB stacks coin-level signals (BTC_WALL, NEWS, SNIPER, DAY) but ignores
+the macro alt-vs-BTC regime — many SB losses are directional fights
+against BTC Dominance.
+
+`SB_BTCD_FILTER=1` (default) calls `btc_dominance.block_alt_side(coin, side)`
+after the SB engine kill switch. Logic:
+
+| BTCD trend | Alt-vs-BTC | Block LONG alt | Block SHORT alt |
+|---|---|---|---|
+| Rising | BTC outperforms | ✓ | — |
+| Falling | Alts outperform | — | ✓ |
+| Flat / unknown | No edge | — | — |
+
+`BTC` itself is never gated (BTCD is computed from BTC).
+
+The shared `btc_dominance.py` module is consulted but **not modified** —
+SA still uses the same module via `apply_ticker_gate`. Both systems call
+the same function; neither contaminates the other.
+
+`block_alt_side` returns `(blocked: bool, reason: str)`. SB-side rejection
+counter `_state['rejects']['btcd']` increments on every block.
 
 ## Status visibility
 

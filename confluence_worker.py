@@ -387,6 +387,34 @@ def _size_and_fire(coin, signal, equity):
     except Exception:
         pass
 
+    # 2026-04-29: BTCD directional filter for SB (independent of SA's
+    # apply_ticker_gate, which is locked out per operator directive).
+    # BTC Dominance (BTC/ETH ratio proxy) tells us which way alts are
+    # rotating relative to BTC. SB's confluence stacks coin-level signals
+    # but ignores the macro alt-vs-BTC regime — many SB losses are
+    # directional fights against BTCD.
+    #
+    # Block LONG alt when BTCD rising (alts weak vs BTC).
+    # Block SHORT alt when BTCD falling (alts strong vs BTC).
+    # Allow when BTCD is flat (no macro signal).
+    # BTC itself never gated (BTCD is computed from BTC).
+    #
+    # Tunable via SB_BTCD_FILTER (default 1). Disable with =0 if proving
+    # too restrictive on a regime.
+    if os.environ.get('SB_BTCD_FILTER', '1') == '1':
+        try:
+            import btc_dominance as _btcd_sb
+            _bd_blocked, _bd_reason = _btcd_sb.block_alt_side(coin, signal['side'])
+            if _bd_blocked:
+                _log(f"{coin} {signal['side']} CONFLUENCE dropped: btcd ({_bd_reason})")
+                try:
+                    _state.setdefault('rejects', {})
+                    _state['rejects']['btcd'] = _state['rejects'].get('btcd', 0) + 1
+                except Exception: pass
+                return None
+        except Exception:
+            pass  # fail-soft: BTCD module error doesn't block trades
+
     # 2026-04-27: 5m confirmation gate (shared with precog signals).
     try:
         if _precog is not None and hasattr(_precog, '_confirm_5m'):
@@ -1479,6 +1507,12 @@ def status():
     except Exception as e:
         out['engine_stats_err'] = f"{type(e).__name__}: {e}"
     # 2026-04-29: SB-only filter state — surface every gate active on SB.
+    btcd_state = None
+    try:
+        import btc_dominance as _btcd_st
+        btcd_state = _btcd_st.status()
+    except Exception as _bde:
+        btcd_state = {'err': f'{type(_bde).__name__}: {_bde}'}
     out['sb_filter'] = {
         'verified_loser_veto_enabled': os.environ.get('SB_VERIFIED_LOSER_VETO', '1') == '1',
         'verified_loser_baseline':     sorted(_SB_VERIFIED_LOSER_BASELINE),
@@ -1487,6 +1521,8 @@ def status():
         'risk_pct':                    RISK_PCT,
         'allowed_sides':               sorted(ALLOWED_SIDES) if ALLOWED_SIDES else None,
         'decoupled_from_sa_allowlist': True,
+        'btcd_filter_enabled':         os.environ.get('SB_BTCD_FILTER', '1') == '1',
+        'btcd_state':                  btcd_state,
     }
     return out
 
