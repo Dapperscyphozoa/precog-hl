@@ -83,6 +83,7 @@ jobs:
             echo "  \"trigger\": \"${GITHUB_EVENT_NAME}\","
             fetch diagnose          /diagnose          ; echo ","
             fetch hour_veto_status  /hour_veto_status  ; echo ","
+            fetch bad_entry_kill_status /bad_entry_kill_status ; echo ","
             fetch bucket_filter_status /bucket_filter_status ; echo ","
             fetch trades_recent     /trades/recent?hours=12 ; echo ","
             fetch perf_status       /perf_status       ; echo ","
