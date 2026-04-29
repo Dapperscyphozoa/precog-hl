@@ -943,10 +943,42 @@ def _btc_macro_status_safe():
         return {}
 
 
+# 2026-04-29: VERIFIED LOSER BASELINE. Full /analyze audit identified four
+# engines with statistically-meaningful negative sum_pnl ex-kFLOKI:
+#   HL                          n=24  WR 38%  sum -$5.29
+#   CONFLUENCE_BTC_WALL+NEWS    n=64  WR 40%  sum -$1.72
+#   CONFLUENCE_BTC_WALL+SNIPER  n=56  WR 35%  sum -$0.77
+#   CONFLUENCE_BTC_WALL+DAY     n=19         sum -$0.51
+# Combined recovery if blocked: +$8.29. Hardcoded as Layer 0 so even without
+# DISABLE_ENGINES env they are blocked. Tunable via VERIFIED_LOSER_VETO_ENABLED.
+_VERIFIED_LOSER_VETO_ENABLED = os.environ.get('VERIFIED_LOSER_VETO_ENABLED', '1') == '1'
+_VERIFIED_LOSER_BASELINE = {
+    'HL',
+    'CONFLUENCE_BTC_WALL+NEWS',
+    'CONFLUENCE_BTC_WALL+SNIPER',
+    'CONFLUENCE_BTC_WALL+DAY',
+}
+
+# 2026-04-29: BB_REJ_ONLY_MODE. From /analyze, BB_REJ is the only engine
+# with verified positive expectancy: n=23, WR 70%, mean +$0.032, sum +$0.35.
+# Wilson lower bound on WR ≈ 40%. Real edge.
+# When BB_REJ_ONLY_MODE=1, _engine_disabled returns True for any engine
+# other than BB_REJ. One env var, no DISABLE_ENGINES list to maintain.
+# Set BB_REJ_ONLY_MODE=0 (or unset) to revert to normal multi-engine.
+def _bb_rej_only_mode():
+    # 2026-04-29: default ON — godmode action 1. BB_REJ is the only verified
+    # +EV engine (n=23, WR 70%, sum +$0.35). Concentrating fires on it tests
+    # whether the system has any repeatable edge over ~100 closes. Set
+    # BB_REJ_ONLY_MODE=0 on Render to disable and resume multi-engine.
+    return os.environ.get('BB_REJ_ONLY_MODE', '1') == '1'
+
+
 def _engine_disabled(name, coin=None):
     """Return True if engine should be skipped for this fire.
 
-    Three layers:
+    Layers:
+      0a. BB_REJ_ONLY_MODE: blocks everything except BB_REJ (env-toggled)
+      0b. Verified-loser baseline (hardcoded list of -EV engines from audit)
       1. Manual env-driven kill list (DISABLE_ENGINES)
       2. Automatic engine-level pause (rolling WR < threshold)
       3. Per-coin x per-engine pause (this coin+engine pair has negative
@@ -954,6 +986,12 @@ def _engine_disabled(name, coin=None):
     """
     if not name:
         return False
+    # 0a. BB_REJ_ONLY_MODE
+    if _bb_rej_only_mode() and name != 'BB_REJ':
+        return True
+    # 0b. Verified-loser baseline
+    if _VERIFIED_LOSER_VETO_ENABLED and name in _VERIFIED_LOSER_BASELINE:
+        return True
     # 1. Manual env-driven kill list (live-readable)
     _disabled_raw = _disabled_engines_live()
     if _disabled_raw:
@@ -5850,6 +5888,18 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
     if _global_pos_count_blocks():
         reasons.append('global_max_positions')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'global_max_positions_block')
+    # 2026-04-29: HOUR-OF-DAY VETO. From full data audit, UTC hours
+    # 04/06/07/09/14/15/16/19 had cumulative -$13.55 P&L. Block fires
+    # during those hours across BOTH systems (apply_ticker_gate runs
+    # for System A and System B). Tunable via HOUR_VETO_ENABLED +
+    # HOUR_VETO_HOURS env (no restart needed).
+    try:
+        import hour_veto as _hv_g
+        _hv_blocked, _hv_h, _hv_reason = _hv_g.blocked()
+        if _hv_blocked:
+            reasons.append(f'hour_veto_utc{_hv_h:02d}')
+            _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'hour_veto_block', {'hour_utc': _hv_h})
+    except Exception: pass
     if not btc_correlation.allow_alt_trade(coin, side):
         # 2026-04-29: btc_corr DEFAULT-DISABLED. BTCD gate (alt-vs-BTC
         # divergence) is the more accurate signal and runs separately.
@@ -5963,7 +6013,13 @@ MAX_POSITIONS = int(os.environ.get('MAX_POSITIONS', '10'))  # 10 default (was 25
 # System B=12 = 22 max possible. At $44 notional × 22 = $968 nominal on
 # $522 equity = 1.85x leverage. Global cap prevents combined-system
 # clusters. Both systems check this cap before accepting new entries.
-GLOBAL_MAX_POSITIONS = int(os.environ.get('GLOBAL_MAX_POSITIONS', '12'))
+# 2026-04-29 (later): bumped 12 → 20. With verified-loser engines
+# blocked (Layer 0), hour veto, and bad-entry kill all filtering the
+# input stream, the remaining flow is the cleaner residue. More
+# concurrent slots = more chances to capture BB_REJ-class winners
+# without amplifying the historical losers that are now blocked.
+# At $44 notional × 20 = $880 / $520 equity ≈ 1.7x leverage.
+GLOBAL_MAX_POSITIONS = int(os.environ.get('GLOBAL_MAX_POSITIONS', '20'))
 
 
 def _global_pos_count_blocks():
@@ -10347,6 +10403,38 @@ def main():
                                         _mm_pos['mae_pct'] = _mm_raw
                             except Exception:
                                 pass
+                            # ─── BAD-ENTRY KILL (2026-04-29) ────────────────────
+                            # Verified leak: 58 trades had bad_entry_no_mfe pattern
+                            # summing -$8.97. /analyze excursion bucket. At 60s
+                            # post-entry, if MFE has not exceeded BAD_ENTRY_MIN_MFE
+                            # (default 5bp), emit FORCE_CLOSE intent. Bounded to
+                            # 60-90s window — after 90s, PROFIT_LOCK/TRAIL/SL own
+                            # the trade. Idempotent via bad_entry_killed flag.
+                            try:
+                                if os.environ.get('BAD_ENTRY_KILL', '1') == '1':
+                                    _be_min_mfe = float(os.environ.get('BAD_ENTRY_MIN_MFE', '0.0005'))
+                                    _be_age_sec = float(os.environ.get('BAD_ENTRY_AGE_SEC', '60'))
+                                    _be_max_age = float(os.environ.get('BAD_ENTRY_MAX_AGE_SEC', '90'))
+                                    _be_opened = float(_mm_pos.get('opened_at') or 0)
+                                    _be_age = (time.time() - _be_opened) if _be_opened else 0
+                                    _be_mfe = float(_mm_pos.get('mfe_pct') or 0)
+                                    _be_killed = bool(_mm_pos.get('bad_entry_killed'))
+                                    if (not _be_killed
+                                            and _be_age >= _be_age_sec
+                                            and _be_age <= _be_max_age
+                                            and _be_mfe < _be_min_mfe):
+                                        _mm_pos['bad_entry_killed'] = True
+                                        if _INTENTS_OK and _intents is not None:
+                                            _be_tid = None
+                                            if _LEDGER_OK and _ledger is not None:
+                                                try: _be_tid = _ledger.latest_open_trade_id_for_coin(_pl_coin)
+                                                except Exception: pass
+                                            _intents.emit('FORCE_CLOSE', _pl_coin,
+                                                          trade_id=_be_tid,
+                                                          reason='bad_entry_no_mfe')
+                                            log(f"{_pl_coin} BAD_ENTRY_KILL: age={_be_age:.0f}s mfe={_be_mfe*100:.3f}% < {_be_min_mfe*100:.2f}% — FORCE_CLOSE emitted")
+                            except Exception as _be_e:
+                                log(f"bad_entry_kill err {_pl_coin}: {_be_e}")
                             _pl_action = _profit_lock_check(_pl_coin, _pl_lp, _pl_mark)
                             if _pl_action == 'trail':
                                 # 2026-04-27: at +1.5% MFE, hand off to TRAIL_LADDER
@@ -11085,6 +11173,16 @@ def bucket_filter_status():
     try:
         import bucket_filter as _bf
         return jsonify(_bf.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/hour_veto_status', methods=['GET'])
+def hour_veto_status():
+    """HOUR_VETO — UTC hour-of-day signal block list."""
+    try:
+        import hour_veto as _hv
+        return jsonify(_hv.status())
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
