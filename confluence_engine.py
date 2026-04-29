@@ -859,6 +859,17 @@ def eval_coin(coin, bars_15m, now_ts=None):
             'bull-calm':  set(),  # default-deny — trend regime, fade fails
             'bull-storm': set(),  # default-deny — no data
         }
+        # 2026-04-29: ADD env-expandable allowlist per regime. Lets user
+        # whitelist specific combos in any regime without code change.
+        # Format: comma-separated engine names. Adds to (not replaces) the
+        # baked-in set.
+        # Example: REGIME_ALLOWLIST_BULL_CALM=CONFLUENCE_DAY+OBI,CONFLUENCE_BTC_WALL+OI+SNIPER
+        for _r in ('chop', 'bear-calm', 'bear-storm', 'bull-calm', 'bull-storm'):
+            _env_key = 'REGIME_ALLOWLIST_' + _r.upper().replace('-', '_')
+            _add_raw = _os.environ.get(_env_key, '').strip()
+            if _add_raw:
+                _add = {c.strip() for c in _add_raw.split(',') if c.strip()}
+                _REGIME_ALLOWLIST[_r] = _REGIME_ALLOWLIST[_r] | _add
         _engine_name_a = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
         try:
             import regime_detector as _rd_allow
