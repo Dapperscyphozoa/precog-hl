@@ -11329,6 +11329,33 @@ def hour_veto_status():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/edge_audit', methods=['GET'])
+def edge_audit_endpoint():
+    """Per-engine, per-coin, per-regime, per-hour breakdown with Wilson CIs.
+
+    Args:
+      ?engine=BB_REJ      filter to one engine (default: top 10 engines)
+      ?days=7             lookback
+      ?min_n=3            min sample for "recommended_keep" flag
+      ?target_wr_lcb=0.55 required Wilson WR lower bound for keep flag
+    """
+    try:
+        import edge_audit as _ea
+        eng = flask_request.args.get('engine', '').strip() or None
+        try:
+            days = int(flask_request.args.get('days', '7'))
+        except Exception: days = 7
+        try:
+            min_n = int(flask_request.args.get('min_n', '3'))
+        except Exception: min_n = 3
+        try:
+            tgt = float(flask_request.args.get('target_wr_lcb', '0.55'))
+        except Exception: tgt = 0.55
+        return jsonify(_ea.audit(engine=eng, days=days, min_n=min_n, target_wr_lcb=tgt))
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/bad_entry_kill_status', methods=['GET'])
 def bad_entry_kill_status():
     """BAD_ENTRY_KILL — 60-90s no-MFE position cutter (inline in PROFIT_LOCK loop).
