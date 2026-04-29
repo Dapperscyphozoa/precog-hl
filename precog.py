@@ -5846,6 +5846,10 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
     if not funding_filter.allow_side(coin, side):
         reasons.append('funding')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'funding_block')
+    # 2026-04-29: GLOBAL position cap. Prevent combined-system over-leverage.
+    if _global_pos_count_blocks():
+        reasons.append('global_max_positions')
+        _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'global_max_positions_block')
     if not btc_correlation.allow_alt_trade(coin, side):
         # 2026-04-29: btc_corr DEFAULT-DISABLED. BTCD gate (alt-vs-BTC
         # divergence) is the more accurate signal and runs separately.
@@ -5954,6 +5958,22 @@ TP_MULTIPLIER = 1.0  # Set to 1.0 — TPs now OOS-tuned PER COIN (no global mult
                      # Per-coin 15m OOS optimization: PROMPT 10%, ETH 10%, ALT 6%, ASTER 6%, etc.
                      # Prior value 2.0 was bandaid before per-coin tuning existed.
 MAX_POSITIONS = int(os.environ.get('MAX_POSITIONS', '10'))  # 10 default (was 25  # 2026-04-22: raised 8 → 25 for data-gathering phase.
+
+# 2026-04-29: GLOBAL position cap across both systems. System A=10 +
+# System B=12 = 22 max possible. At $44 notional × 22 = $968 nominal on
+# $522 equity = 1.85x leverage. Global cap prevents combined-system
+# clusters. Both systems check this cap before accepting new entries.
+GLOBAL_MAX_POSITIONS = int(os.environ.get('GLOBAL_MAX_POSITIONS', '12'))
+
+
+def _global_pos_count_blocks():
+    """Return True if total open positions across both systems >= global cap.
+    Counts via get_all_positions_live() (HL authoritative)."""
+    try:
+        live = get_all_positions_live() or {}
+        return len(live) >= GLOBAL_MAX_POSITIONS
+    except Exception:
+        return False  # fail-soft
                     # With the signal-generator bias fix live, signals are
                     # now properly filtered at 3 layers (conv floor, MTF gate,
                     # R:R floor). The tight filtering means the remaining

@@ -1161,6 +1161,13 @@ def _scan_once():
             # AND authoritative exchange snapshot — see _exchange_coins above)
             if _in_position(coin, exchange_coins=_exchange_coins):
                 _bump('in_position'); continue
+            # 2026-04-29: GLOBAL position cap (across both systems)
+            try:
+                if _precog and hasattr(_precog, '_global_pos_count_blocks') \
+                        and _precog._global_pos_count_blocks():
+                    _bump('global_max_positions'); continue
+            except Exception:
+                pass  # fail-soft
             # Fetch + evaluate (Fix 1: only fully-closed bars)
             bars = _fetch_15m_bars(coin, 800)
             if not bars:
