@@ -8789,6 +8789,27 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 log(f"LIQ-CASCADE {coin} fade {sig} (${casc['total_usd']/1e6:.1f}M liqs)")
         except Exception as e:
             log(f"liq cascade err {coin}: {e}")
+    # 2026-04-29: ASIAN_SESSION — calendar-driven directional bias engine.
+    # Fires once per (coin, session_hour, date) when 00:00 or 08:00 UTC
+    # produces an impulse > 0.10% in first 90s. 5min hold, 0.4% TP, 0.5% SL.
+    # Tunable via ASIAN_SESSION_* env. Fail-soft on fetch errors.
+    if not sig:
+        try:
+            import asian_session as _ase
+            _in_sess, _, _ = _ase._is_in_session_window()
+            if _in_sess:
+                try:
+                    _bars_1m = okx_fetch.fetch_klines(coin, '1m', 5)
+                except Exception:
+                    _bars_1m = None
+                if _bars_1m:
+                    _ase_sig = _ase.poll_and_signal(coin, _bars_1m)
+                    if _ase_sig:
+                        sig = _ase_sig['side']; bar_ts = int(time.time()*1000); signal_engine = 'ASIAN_SESSION'
+                        log(f"ASIAN-SESSION {coin} {sig} move={_ase_sig['move_pct']*100:+.3f}% "
+                            f"hour={_ase_sig['session_hour']:02d}:00")
+        except Exception as e:
+            log(f"asian_session err {coin}: {e}")
     # Quinary: spoof detection fade
     if not sig:
         try:
@@ -11024,6 +11045,16 @@ def btcd_status():
     try:
         import btc_dominance as _btcd
         return jsonify(_btcd.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/asian_session_status', methods=['GET'])
+def asian_session_status():
+    """ASIAN_SESSION_OPEN — calendar-driven directional bias engine."""
+    try:
+        import asian_session as _ase
+        return jsonify(_ase.status())
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
