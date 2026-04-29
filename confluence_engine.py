@@ -847,14 +847,13 @@ def eval_coin(coin, bars_15m, now_ts=None):
         }
         _REGIME_ALLOWLIST = {
             'chop':       _CHOP_ALLOWED,
-            # 2026-04-28: mirror chop allowlist to bear-calm. Both are
-            # low-vol mean-reverting regimes. Mean-rev combos that work in
-            # chop should work in bear-calm (theory). NO live bear-calm data
-            # to confirm yet — Layer C performance feedback + Layer B vol
-            # flash provide circuit-breakers if the bet is wrong. Cost of
-            # being wrong: ~$5-10 of bleed over 12h before circuit triggers.
-            # Reward: live trading resumes in current regime.
-            'bear-calm':  _CHOP_ALLOWED,
+            # 2026-04-28: tried mirroring chop → bear-calm. RESULT: BTC_WALL+NEWS
+            # went 0/10 WR=0% net -$2.00 over 12h in bear-calm. Same engine wins
+            # 50% in chop. Bear-calm is NOT chop — alts continue trending down
+            # (or sideways grinding) where mean-rev fades fail. REVERTED to
+            # default-deny on 2026-04-29 after verified -$3+ damage.
+            # Cost-of-experiment: confirmed.
+            'bear-calm':  set(),  # default-deny — chop combos verified to FAIL in bear-calm
             'bear-storm': set(),  # default-deny — high vol, mean-rev fails
             'bull-calm':  set(),  # default-deny — trend regime, fade fails
             'bull-storm': set(),  # default-deny — no data
