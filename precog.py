@@ -896,6 +896,73 @@ _AUTO_PAUSE_LOOKBACK_H = float(os.environ.get('ENGINE_AUTO_PAUSE_LOOKBACK_H', '2
 # trend over 5 trades pauses the engine".
 _AUTO_PAUSE_MIN_EV_USD = float(os.environ.get('ENGINE_AUTO_PAUSE_MIN_EV_USD', '-0.05'))
 
+_WILSON_AUTO_DISABLE_ENABLED = os.environ.get('WILSON_AUTO_DISABLE_ENABLED', '1') == '1'
+_WILSON_AUTO_DISABLE_N = int(os.environ.get('WILSON_AUTO_DISABLE_N', '50'))
+_WILSON_AUTO_DISABLE_LOOKBACK_H = float(os.environ.get('WILSON_AUTO_DISABLE_LOOKBACK_H', '168'))  # 7 days
+_WILSON_AUTO_DISABLE_Z = float(os.environ.get('WILSON_AUTO_DISABLE_Z', '1.645'))  # 95% one-sided
+
+
+def _engine_wilson_negative(name):
+    """Return True if engine's net-of-fees mean PnL has a 95% one-sided
+    upper-confidence-bound below zero over last N trades. I.e., we are
+    statistically confident the engine is -EV.
+
+    Computes mean ± z * stderr / sqrt(n) on per-trade PnL. If
+    mean + z*stderr/sqrt(n) < 0 → engine is "Wilson-negative" → disable.
+
+    Uses lookback of WILSON_AUTO_DISABLE_LOOKBACK_H hours (default 7d) over
+    last WILSON_AUTO_DISABLE_N trades (default 50). Below n=20, returns
+    False (insufficient data — fail-soft).
+
+    Tunable via env (live-readable on each call).
+    """
+    if not name or not _WILSON_AUTO_DISABLE_ENABLED:
+        return False
+    if name in ('RECONCILED', 'untagged_legacy'):
+        return False
+    try:
+        import trade_ledger as _tl_w
+        import math as _m
+        # Pull last N trades worth of PnL
+        cutoff = time.time() - _WILSON_AUTO_DISABLE_LOOKBACK_H * 3600.0
+        pnls = []
+        with _tl_w._LOCK:
+            for tid, row in _tl_w._INDEX['by_trade_id'].items():
+                if (row.get('engine') or '') != name:
+                    continue
+                if row.get('event_type') != 'CLOSE':
+                    continue
+                ts_iso = row.get('timestamp', '')
+                if not ts_iso:
+                    continue
+                try:
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(str(ts_iso).replace('Z', '+00:00')).timestamp()
+                except Exception:
+                    continue
+                if ts < cutoff:
+                    continue
+                try:
+                    p = float(row.get('pnl', '') or 0)
+                except (TypeError, ValueError):
+                    continue
+                pnls.append((ts, p))
+        if len(pnls) < 20:
+            return False  # insufficient samples
+        pnls.sort(key=lambda x: -x[0])
+        recent = [p for _, p in pnls[:_WILSON_AUTO_DISABLE_N]]
+        n = len(recent)
+        mean = sum(recent) / n
+        if n < 2:
+            return False
+        var = sum((p - mean) ** 2 for p in recent) / (n - 1)
+        stderr = (var ** 0.5) / (n ** 0.5)
+        upper = mean + _WILSON_AUTO_DISABLE_Z * stderr
+        return upper < 0
+    except Exception:
+        return False
+
+
 def _engine_auto_paused(name):
     """Return True if engine is auto-paused due to recent poor WR OR poor $ EV.
 
@@ -959,25 +1026,31 @@ _VERIFIED_LOSER_BASELINE = {
     'CONFLUENCE_BTC_WALL+DAY',
 }
 
-# 2026-04-29: BB_REJ_ONLY_MODE. From /analyze, BB_REJ is the only engine
-# with verified positive expectancy: n=23, WR 70%, mean +$0.032, sum +$0.35.
-# Wilson lower bound on WR ≈ 40%. Real edge.
-# When BB_REJ_ONLY_MODE=1, _engine_disabled returns True for any engine
-# other than BB_REJ. One env var, no DISABLE_ENGINES list to maintain.
-# Set BB_REJ_ONLY_MODE=0 (or unset) to revert to normal multi-engine.
-def _bb_rej_only_mode():
-    # 2026-04-29: default ON — godmode action 1. BB_REJ is the only verified
-    # +EV engine (n=23, WR 70%, sum +$0.35). Concentrating fires on it tests
-    # whether the system has any repeatable edge over ~100 closes. Set
-    # BB_REJ_ONLY_MODE=0 on Render to disable and resume multi-engine.
-    return os.environ.get('BB_REJ_ONLY_MODE', '1') == '1'
+# 2026-04-29: VERIFIED_ENGINES_ALLOWLIST. BB_REJ has verified positive
+# expectancy (n=23 WR 70% sum +$0.35). LIQ_CSCD is a verified-microstructure
+# engine that fires on liquidation cascades — distinct from candle-pattern
+# engines, plausibly orthogonal edge. When VERIFIED_ENGINES_ONLY=1, only
+# engines in VERIFIED_ENGINES_ALLOWLIST fire. Single env knob replaces
+# DISABLE_ENGINES gymnastics. Default ON with both verified engines allowed.
+# To disable: VERIFIED_ENGINES_ONLY=0.
+# To narrow further (BB_REJ only): VERIFIED_ENGINES_ALLOWLIST='BB_REJ'.
+_VERIFIED_ENGINES_DEFAULT = 'BB_REJ,LIQ_CSCD'
+
+
+def _verified_engines_only():
+    return os.environ.get('VERIFIED_ENGINES_ONLY', '1') == '1'
+
+
+def _verified_engines_allowlist():
+    raw = os.environ.get('VERIFIED_ENGINES_ALLOWLIST', _VERIFIED_ENGINES_DEFAULT) or _VERIFIED_ENGINES_DEFAULT
+    return {tok.strip() for tok in raw.split(',') if tok.strip()}
 
 
 def _engine_disabled(name, coin=None):
     """Return True if engine should be skipped for this fire.
 
     Layers:
-      0a. BB_REJ_ONLY_MODE: blocks everything except BB_REJ (env-toggled)
+      0a. VERIFIED_ENGINES_ONLY: only engines in VERIFIED_ENGINES_ALLOWLIST fire
       0b. Verified-loser baseline (hardcoded list of -EV engines from audit)
       1. Manual env-driven kill list (DISABLE_ENGINES)
       2. Automatic engine-level pause (rolling WR < threshold)
@@ -986,8 +1059,8 @@ def _engine_disabled(name, coin=None):
     """
     if not name:
         return False
-    # 0a. BB_REJ_ONLY_MODE
-    if _bb_rej_only_mode() and name != 'BB_REJ':
+    # 0a. VERIFIED_ENGINES_ONLY allowlist
+    if _verified_engines_only() and name not in _verified_engines_allowlist():
         return True
     # 0b. Verified-loser baseline
     if _VERIFIED_LOSER_VETO_ENABLED and name in _VERIFIED_LOSER_BASELINE:
@@ -1003,8 +1076,12 @@ def _engine_disabled(name, coin=None):
                 return True
             if tok.endswith('*') and name.startswith(tok[:-1]):
                 return True
-    # 2. Automatic engine-level pause
+    # 2. Automatic engine-level pause (short-window WR/EV)
     if _engine_auto_paused(name):
+        return True
+    # 2.5. Wilson-CI auto-disable (long-window, 50 trades, statistical
+    # confidence that engine is -EV)
+    if _engine_wilson_negative(name):
         return True
     # 3. Per-coin x per-engine pause
     if coin and _coin_engine_paused(coin, name):
@@ -7040,9 +7117,37 @@ def _compute_sl_px(coin, is_long, entry):
         return float(trigger_px), float(sl_pct)
 
 
-def _compute_tp_px(coin, is_long, entry):
+def _compute_tp_px(coin, is_long, entry, engine=None):
     """Compute TP trigger price for atomic entry. Pure — no I/O.
-    Returns (tp_px_rounded, tp_pct_used) or (None, None)."""
+    Returns (tp_px_rounded, tp_pct_used) or (None, None).
+
+    2026-04-29: per-engine TP override. If TP_OVERRIDE_<ENGINE> env is set
+    (e.g. TP_OVERRIDE_BB_REJ=0.001 = 10bp), it replaces the per-coin config
+    TP for fires from that engine. Lets us force WR-maximizing TP on a
+    specific engine without disturbing per-coin tunes for others.
+    """
+    # 2026-04-29: per-engine TP override (godmode action 4).
+    # BB_REJ default 0.001 (10bp) — WR-maximizing TP from /analyze
+    # tp_optimization. Other engines have no default (fall through to
+    # per-coin config). Env overrides default.
+    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.001'}
+    if engine:
+        _eng_key = f'TP_OVERRIDE_{engine.upper()}'
+        _eng_override = os.environ.get(_eng_key, _ENGINE_TP_DEFAULTS.get(engine.upper(), '')).strip()
+        if _eng_override:
+            try:
+                tp_pct = float(_eng_override)
+                if tp_pct > 0:
+                    if MAX_TP_PCT > 0 and tp_pct > MAX_TP_PCT:
+                        tp_pct = MAX_TP_PCT
+                    entry = float(entry)
+                    trigger_px = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
+                    try:
+                        return float(round_price(coin, trigger_px)), float(tp_pct)
+                    except Exception:
+                        return float(trigger_px), float(tp_pct)
+            except (TypeError, ValueError):
+                pass  # fall through to per-coin config
     cfg = None
     try:
         if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
@@ -7070,7 +7175,7 @@ def _compute_tp_px(coin, is_long, entry):
         return float(trigger_px), float(tp_pct)
 
 
-def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
+def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None, engine=None):
     """Single entry-point that routes to atomic OR legacy based on flag.
 
     Returns dict:
@@ -7197,7 +7302,7 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None):
 
         is_long = bool(is_buy)
         sl_px, sl_pct = _compute_sl_px(coin, is_long, mark_px)
-        tp_px, tp_pct = _compute_tp_px(coin, is_long, mark_px)
+        tp_px, tp_pct = _compute_tp_px(coin, is_long, mark_px, engine=engine)
         if sl_px is None or tp_px is None:
             # Can't form a complete bracket — fall back to legacy.
             log(f"{coin} atomic skipped: sl_px={sl_px} tp_px={tp_px} → legacy")
@@ -7398,6 +7503,15 @@ def _place_impl(coin, is_buy, size, cloid=None):
                 except Exception: pass
     except Exception as e:
         log(f"maker place err {coin}: {e}")
+
+    # 2026-04-29: MAKER_ONLY_ENTRY (default 1). Skip taker fallback when set.
+    # Halves round-trip fees (maker 0.045% × 2 vs taker 0.09% × 2). Preserves
+    # +EV math at fee-bound notionals — godmode showed taker fees push
+    # BB_REJ math from ~breakeven to -EV. Set MAKER_ONLY_ENTRY=0 to restore
+    # taker fallback if maker fill rate proves too low.
+    if os.environ.get('MAKER_ONLY_ENTRY', '1') == '1':
+        log(f"MAKER_ONLY_ENTRY {coin} {'BUY' if is_buy else 'SELL'}: maker did not fill, skipping taker fallback")
+        return None
 
     # TAKER fallback (Ioc) — refresh price in case market moved
     px = get_mid(coin) or px
@@ -9864,7 +9978,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 # enforce_position_protection. When flag=0 (default),
                 # dispatcher calls legacy place() and atomic_used=False;
                 # enforce runs normally.
-                _dr = _dispatch_entry(coin, False, sz, cloid=_cloid, trade_id=_trade_id)
+                _dr = _dispatch_entry(coin, False, sz, cloid=_cloid, trade_id=_trade_id, engine=signal_engine)
                 fill_px = _dr['fill_px']
                 _atomic_used = _dr['atomic_used']
                 _atomic_sl_pct = _dr.get('sl_pct')
@@ -9988,7 +10102,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 _trade_id = _ledger.new_trade_id() if _LEDGER_OK and _ledger else None
                 _cloid = (f"{_trade_id[:8]}{coin[:4]}{'L'}"[:16]) if _trade_id else None
                 # 2026-04-25: route entry through _dispatch_entry. See SELL site for rationale.
-                _dr = _dispatch_entry(coin, True, sz, cloid=_cloid, trade_id=_trade_id)
+                _dr = _dispatch_entry(coin, True, sz, cloid=_cloid, trade_id=_trade_id, engine=signal_engine)
                 fill_px = _dr['fill_px']
                 _atomic_used = _dr['atomic_used']
                 _atomic_sl_pct = _dr.get('sl_pct')
