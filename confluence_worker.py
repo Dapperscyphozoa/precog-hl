@@ -55,7 +55,7 @@ DRY_RUN         = os.environ.get('CONFLUENCE_DRY_RUN', '1') == '1'
 SCAN_INTERVAL_S = int(os.environ.get('CONFLUENCE_SCAN_INTERVAL', '120'))
 # 2026-04-27: 180s → 120s. Faster scan cadence; same per-scan logic, more
 # checks per day. ~1.5x more fires/day, no quality reduction. Tunable via env.
-MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '25'))  # 2026-04-29: reverted 12→25 (System B was profitable pre-#18; throttle suspected of killing edge)
+MAX_POSITIONS   = int(os.environ.get('CONFLUENCE_MAX_POSITIONS', '16'))  # 2026-04-29: 12→16 with verified-loser baseline blocking the 4 -EV engines; remaining flow is filtered, more slots captures cleaner residue. GLOBAL_MAX_POSITIONS=20 still binds combined system.
 RISK_PCT        = float(os.environ.get('CONFLUENCE_RISK_PCT', '0.01'))
 
 # 2026-04-26: optional side filter. Default permissive (both BUY,SELL). The
