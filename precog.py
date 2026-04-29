@@ -11089,6 +11089,34 @@ def bucket_filter_status():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/regime_lag_audit', methods=['GET'])
+def regime_lag_audit():
+    """Empirical test: was the regime classifier lagging on losing chop trades?
+
+    Query args:
+      threshold_pct=0.01  fraction (1% default)
+      hours=1             ±N hours window around entry
+      max_rows=2000       cap on rows scanned
+    """
+    try:
+        import regime_lag_audit as _rla
+        try:
+            thresh = float(flask_request.args.get('threshold_pct', '0.01'))
+        except Exception:
+            thresh = 0.01
+        try:
+            hours = int(flask_request.args.get('hours', '1'))
+        except Exception:
+            hours = 1
+        try:
+            max_rows = int(flask_request.args.get('max_rows', '2000'))
+        except Exception:
+            max_rows = 2000
+        return jsonify(_rla.audit(threshold_pct=thresh, hours_window=hours, max_rows=max_rows))
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/lifecycle', methods=['GET'])
 def lifecycle_status():
     """Step 4 — full lifecycle observability with circuit breaker + multi-tier drift."""
