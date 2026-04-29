@@ -11089,6 +11089,22 @@ def bucket_filter_status():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/diagnose', methods=['GET'])
+def diagnose_endpoint():
+    """One-shot full diagnostic: System A vs B P&L across windows, per-engine
+    breakdown, cutover detection, deploy correlation. Replaces 5+ separate
+    endpoint queries with one URL."""
+    try:
+        import diagnose as _dx
+        try:
+            hours_back = int(flask_request.args.get('hours_back', '168'))
+        except Exception:
+            hours_back = 168
+        return jsonify(_dx.diagnose(hours_back=hours_back))
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/regime_lag_audit', methods=['GET'])
 def regime_lag_audit():
     """Empirical test: was the regime classifier lagging on losing chop trades?
