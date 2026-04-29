@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timezone
 
 
-ENABLED = os.environ.get('HOUR_VETO_ENABLED', '1') == '1'
+ENABLED = os.environ.get('HOUR_VETO_ENABLED', '0') == '1'
 _RAW = os.environ.get('HOUR_VETO_HOURS', '4,6,7,9,14,15,16,19')
 BLOCKED_HOURS = set()
 for tok in _RAW.split(','):
