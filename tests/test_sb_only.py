@@ -100,6 +100,45 @@ class TestSBStatusVisibility(unittest.TestCase):
         self.assertIn("'decoupled_from_sa_allowlist': True", s)
 
 
+class TestSBBTCDFilter(unittest.TestCase):
+    """Verify SB has its own BTCD directional filter, calling btc_dominance.
+    block_alt_side directly rather than going through SA's apply_ticker_gate."""
+
+    def test_btcd_filter_wired_in_size_and_fire(self):
+        s = _src('confluence_worker.py')
+        self.assertIn("os.environ.get('SB_BTCD_FILTER', '1')", s,
+                      'SB_BTCD_FILTER env should default 1')
+        self.assertIn('import btc_dominance as _btcd_sb', s)
+        self.assertIn('_btcd_sb.block_alt_side(coin, signal', s)
+
+    def test_btcd_reject_counter_in_state(self):
+        s = _src('confluence_worker.py')
+        self.assertIn("_state['rejects']['btcd']", s,
+                      'BTCD-blocked trades should bump btcd reject counter')
+
+    def test_btcd_state_in_status(self):
+        s = _src('confluence_worker.py')
+        self.assertIn("'btcd_filter_enabled'", s)
+        self.assertIn("'btcd_state'", s)
+
+    def test_btcd_does_not_route_through_sa_gate(self):
+        s = _src('confluence_worker.py')
+        # SB must not CALL apply_ticker_gate (re-coupling to SA). Comments
+        # may mention it; only function calls are forbidden.
+        self.assertNotIn('apply_ticker_gate(', s,
+                         'SB must not call SA\'s apply_ticker_gate()')
+        self.assertNotIn('_precog.apply_ticker_gate', s)
+
+    def test_btcd_module_signature_unchanged(self):
+        """Verify btc_dominance.block_alt_side(coin, side) signature exists.
+        SB depends on this contract."""
+        s = _src('btc_dominance.py')
+        self.assertIn('def block_alt_side(coin, side):', s)
+        # The contract: returns (blocked: bool, reason: str)
+        self.assertIn('return False,', s)
+        self.assertIn('return True,', s)
+
+
 class TestSALockout(unittest.TestCase):
     """Verify this PR doesn't change SA. precog.py should be untouched
     relative to origin/main."""
@@ -113,6 +152,18 @@ class TestSALockout(unittest.TestCase):
         self.assertEqual(
             result.stdout.strip(), '',
             f'precog.py must be unchanged vs main (SA lockout). Diff: {result.stdout}'
+        )
+
+    def test_no_btc_dominance_modifications(self):
+        """We import btc_dominance but must not modify it (shared infra)."""
+        import subprocess
+        result = subprocess.run(
+            ['git', 'diff', '--name-only', 'origin/main', 'HEAD', '--', 'btc_dominance.py'],
+            capture_output=True, text=True, cwd=ROOT,
+        )
+        self.assertEqual(
+            result.stdout.strip(), '',
+            f'btc_dominance.py must be unchanged (shared infra). Diff: {result.stdout}'
         )
 
 
