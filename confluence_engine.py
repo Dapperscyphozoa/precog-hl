@@ -172,7 +172,7 @@ _RECENT_FIRES = defaultdict(list)  # (engine_name, side) -> [ts, ts, ...]
 _RECENT_FIRES_LOCK = threading.Lock()
 CLUSTER_MAX_FIRES = int(_os_minsys.environ.get('CLUSTER_MAX_FIRES', '3'))
 CLUSTER_WINDOW_S = int(_os_minsys.environ.get('CLUSTER_WINDOW_S', '300'))
-CLUSTER_THROTTLE_ENABLED = _os_minsys.environ.get('CLUSTER_THROTTLE_ENABLED', '1') == '1'
+CLUSTER_THROTTLE_ENABLED = _os_minsys.environ.get('CLUSTER_THROTTLE_ENABLED', '0') == '1'  # 2026-04-29: default off — System B was profitable pre-#19; throttle suspected of dropping 2nd-Nth fires of profitable wall+news clusters
 
 import sys as _sys
 def _log_err(msg):
