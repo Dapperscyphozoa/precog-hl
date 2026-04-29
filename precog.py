@@ -7151,14 +7151,23 @@ def _compute_tp_px(coin, is_long, entry, engine=None):
     TP for fires from that engine. Lets us force WR-maximizing TP on a
     specific engine without disturbing per-coin tunes for others.
     """
-    # 2026-04-29: per-engine TP override (godmode action 4).
-    # BB_REJ default 0.001 (10bp) — WR-maximizing TP from /analyze
-    # tp_optimization, paired with 10bp SL for 1:1 R:R structural +EV.
-    # LIQ_CSCD default 0.005 (50bp) — liquidation cascades produce
-    # 30-100bp moves; tighter TP clips winners early.
-    # Other engines have no default (fall through to per-coin config).
-    # Env overrides default.
-    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.001', 'LIQ_CSCD': '0.005'}
+    # 2026-04-29 (revised from live data): per-engine TP override.
+    #
+    # BB_REJ MFE distribution from /edge_audit?engine=BB_REJ&days=14
+    # (n=13, WR=87.5% on lifetime config):
+    #   reach +5bp:  53.8%
+    #   reach +10bp: 46.2%
+    #   reach +30bp: 46.2%   ← every winner that hits 10bp ALSO hits 30bp
+    #   reach +100bp: 15.4%
+    #
+    # 10bp TP clips winners short. Same 46% WR at 30bp TP gives 3× the
+    # $ per win. With 10bp SL fixed, math goes from -5.4bp to +2.4bp/trade.
+    # This is data-driven, not theoretical — every winner already runs
+    # past 10bp.
+    #
+    # LIQ_CSCD: 50bp default. Liquidation cascades produce 30-100bp moves;
+    # tighter TP clips winners. (n=0 in 14d, awaiting first fires.)
+    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.003', 'LIQ_CSCD': '0.005'}
     if engine:
         _eng_key = f'TP_OVERRIDE_{engine.upper()}'
         _eng_override = os.environ.get(_eng_key, _ENGINE_TP_DEFAULTS.get(engine.upper(), '')).strip()
