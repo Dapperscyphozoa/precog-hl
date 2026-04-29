@@ -145,6 +145,18 @@ def submit_atomic(exchange, coin, is_buy, size, mark_px, sl_px, tp_px,
     cloid_sl    = _make_cloid_obj(trade_id, '_S')
     cloid_tp    = _make_cloid_obj(trade_id, '_T')
 
+    # 2026-04-29: ENTRY_TIF env. Default 'Ioc' (taker, guaranteed fill within
+    # slip cap). 'Alo' = post-only maker entry (rebate, but may not fill if
+    # would cross spread). With Alo, slip_pct is ignored and limit is at
+    # mark_px (touch). If Alo gets rejected (would cross), the bulk_orders
+    # call returns error for that leg; SL/TP placements are wasted.
+    # Recommend: ENTRY_TIF=Alo only after observing fill rate >70% over 24h.
+    _entry_tif = os.environ.get('ENTRY_TIF', 'Ioc')
+    if _entry_tif not in ('Ioc', 'Alo'):
+        _entry_tif = 'Ioc'
+    if _entry_tif == 'Alo':
+        # Maker: limit at mark (touch), no slip
+        entry_limit_px = float(price_rounder(coin, mark_px)) if price_rounder else float(mark_px)
     orders = [
         # 0: entry
         {
@@ -152,7 +164,7 @@ def submit_atomic(exchange, coin, is_buy, size, mark_px, sl_px, tp_px,
             "is_buy": bool(is_buy),
             "sz": float(size),
             "limit_px": float(entry_limit_px),
-            "order_type": {"limit": {"tif": "Ioc"}},
+            "order_type": {"limit": {"tif": _entry_tif}},
             "reduce_only": False,
             "cloid": cloid_entry,
         },

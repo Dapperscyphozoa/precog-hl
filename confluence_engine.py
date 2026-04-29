@@ -26,6 +26,7 @@ Public API:
       stamp cooldown post-fill
 """
 import time
+import threading
 import numpy as np
 from collections import defaultdict
 
@@ -161,6 +162,17 @@ _STATS = {
     'signals_yielded':    0,   # eval_coin returned a signal dict
     'errors':             0,
 }
+
+# 2026-04-29: cluster throttle. Track recent fires per (engine, side) to
+# prevent N+ same-direction same-engine entries within a short window
+# (the 14-position cluster pattern at 14:48 caused -$2 to -$5 of cluster
+# loss). Tunable via CLUSTER_THROTTLE_ENABLED, CLUSTER_MAX_FIRES,
+# CLUSTER_WINDOW_S env. Defaults: 3 fires per (engine, side) per 5min.
+_RECENT_FIRES = defaultdict(list)  # (engine_name, side) -> [ts, ts, ...]
+_RECENT_FIRES_LOCK = threading.Lock()
+CLUSTER_MAX_FIRES = int(_os_minsys.environ.get('CLUSTER_MAX_FIRES', '3'))
+CLUSTER_WINDOW_S = int(_os_minsys.environ.get('CLUSTER_WINDOW_S', '300'))
+CLUSTER_THROTTLE_ENABLED = _os_minsys.environ.get('CLUSTER_THROTTLE_ENABLED', '1') == '1'
 
 import sys as _sys
 def _log_err(msg):
@@ -868,6 +880,28 @@ def eval_coin(coin, bars_15m, now_ts=None):
                 )
                 return None
 
+    # 2026-04-29: CLUSTER THROTTLE. Prevent N+ same (engine, side) fires
+    # within a short window. Live data: 14 SHORTs on BTC_WALL+NEWS in 2 min
+    # at 14:48 UTC, all underwater simultaneously. Cluster cap reduces
+    # correlated-loss exposure. Default: 3 fires per (engine, side) per 5min.
+    if CLUSTER_THROTTLE_ENABLED:
+        _engine_name_throttle = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
+        _key_throttle = (_engine_name_throttle, best_side)
+        _now_ts = int(time.time())
+        with _RECENT_FIRES_LOCK:
+            recent = [t for t in _RECENT_FIRES[_key_throttle]
+                      if _now_ts - t < CLUSTER_WINDOW_S]
+            _RECENT_FIRES[_key_throttle] = recent
+            if len(recent) >= CLUSTER_MAX_FIRES:
+                _STATS.setdefault('cluster_throttled', 0)
+                _STATS['cluster_throttled'] += 1
+                _STATS.setdefault('cluster_throttled_detail', {})
+                _ck = f'{_engine_name_throttle}|{best_side}'
+                _STATS['cluster_throttled_detail'][_ck] = (
+                    _STATS['cluster_throttled_detail'].get(_ck, 0) + 1
+                )
+                return None
+
     # 2026-04-28: LAYER A — per-(engine, regime) blocklist.
     # Generalizes the SNIPER chop gate. Live 24h audit identified persistent
     # bleeders by regime:
@@ -978,6 +1012,11 @@ def eval_coin(coin, bars_15m, now_ts=None):
             return None
 
     _STATS['signals_yielded'] += 1
+    # Cluster throttle bookkeeping: record this fire
+    if CLUSTER_THROTTLE_ENABLED:
+        _engine_yield = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
+        with _RECENT_FIRES_LOCK:
+            _RECENT_FIRES[(_engine_yield, best_side)].append(int(time.time()))
     # 2026-04-27: track per-system contribution to confluence signals
     if 'LIQ' in by_side[best_side]:
         _STATS.setdefault('liq_contributed', 0)
