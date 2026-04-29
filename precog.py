@@ -1034,24 +1034,29 @@ _VERIFIED_LOSER_BASELINE = {
 # DISABLE_ENGINES gymnastics. Default ON with both verified engines allowed.
 # To disable: VERIFIED_ENGINES_ONLY=0.
 # To narrow further (BB_REJ only): VERIFIED_ENGINES_ALLOWLIST='BB_REJ'.
-# 2026-04-29 (later): added PIVOT to default allowlist. /edge_audit
-# showed PIVOT n=17 WR=75% (LCB ~52%) over 7d. Under the new 30bp/10bp
-# framework with bad-entry-kill cap, math projects +13bp/trade. Triples
-# signal flow vs BB_REJ-only and BB_REJ has been silent ~48h. Wilson
-# auto-disable will catch it within 50 trades if WR collapses under
-# the tighter SL.
-_VERIFIED_ENGINES_DEFAULT = 'BB_REJ,LIQ_CSCD,PIVOT'
+# 2026-04-29 (final): curated verified-positive allowlist.
+# Engines with positive lifetime sum_pnl (ex-kFLOKI phantom) per /edge_audit:
+#   BB_REJ                  n=23 WR=70%  sum=+$0.35   verified +EV
+#   CONFLUENCE_DAY+NEWS     n=15 WR=36%  sum=+$1.51   high mean PnL (wide winners)
+#   CONFLUENCE_DAY+SNIPER   n=5  WR=80%  sum=+$0.03   small n but clean
+#   PIVOT                   n=32 WR=73%  sum=-$0.94   high WR; tight 10bp SL fixes loss size
+#   LIQ_CSCD                n=0 in 14d   threshold-tuned (now $150k from $400k)
+# Excluded: BTC_WALL+* combos (verified or marginal losers),
+# untagged_legacy, RECONCILED (noise), and any engine without
+# positive sample evidence.
+# Going wider than this re-introduced known marginal-negative engines
+# (PR #40 default-OFF was over-correction). Going narrower (BB_REJ-only)
+# caused signal starvation. This list is the equilibrium.
+_VERIFIED_ENGINES_DEFAULT = 'BB_REJ,LIQ_CSCD,PIVOT,CONFLUENCE_DAY+NEWS,CONFLUENCE_DAY+SNIPER'
 
 
 def _verified_engines_only():
-    # 2026-04-29 (later): default OFF. The narrow allowlist (BB_REJ +
-    # LIQ_CSCD + PIVOT) caused signal starvation — BB_REJ silent 48h,
-    # LIQ_CSCD silent 14d. With verified-loser baseline, bad-entry kill,
-    # hour veto, Wilson auto-disable, bucket filter, cluster throttle,
-    # and per-engine TP/SL overrides all live, defenses are sufficient
-    # to let all engines fire. Drift gets auto-killed within 50 trades.
-    # Set VERIFIED_ENGINES_ONLY=1 on Render to re-narrow if needed.
-    return os.environ.get('VERIFIED_ENGINES_ONLY', '0') == '1'
+    # 2026-04-29 (final): default ON with the curated allowlist above.
+    # The verified-loser baseline blocks the worst engines hardcoded;
+    # this allowlist additionally blocks marginal/unknown engines.
+    # Set VERIFIED_ENGINES_ONLY=0 on Render to disable allowlist entirely
+    # (everything except verified-loser baseline fires).
+    return os.environ.get('VERIFIED_ENGINES_ONLY', '1') == '1'
 
 
 def _verified_engines_allowlist():
