@@ -5847,11 +5847,12 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
         reasons.append('funding')
         _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'funding_block')
     if not btc_correlation.allow_alt_trade(coin, side):
-        # 2026-04-29: BTCD gate is the more accurate signal (alt-vs-BTC
-        # divergence vs binary BTC direction). Set BTC_CORR_DISABLED=1 on
-        # Render to make BTCD primary and skip btc_corr entirely. Default
-        # keeps both as defense-in-depth.
-        if os.environ.get('BTC_CORR_DISABLED', '0') != '1':
+        # 2026-04-29: btc_corr DEFAULT-DISABLED. BTCD gate (alt-vs-BTC
+        # divergence) is the more accurate signal and runs separately.
+        # Both-active produced 2 "all blocked" conflict states that froze
+        # the bot in BTC up+BTCD up and BTC down+BTCD down conditions.
+        # Set BTC_CORR_DISABLED=0 on Render to re-enable defense-in-depth.
+        if os.environ.get('BTC_CORR_DISABLED', '1') != '1':
             reasons.append('btc_corr')
             _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', 'btc_correlation_block')
     # 2026-04-28: BTC Dominance gate. More informative than raw BTC direction —
