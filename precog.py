@@ -1034,7 +1034,13 @@ _VERIFIED_LOSER_BASELINE = {
 # DISABLE_ENGINES gymnastics. Default ON with both verified engines allowed.
 # To disable: VERIFIED_ENGINES_ONLY=0.
 # To narrow further (BB_REJ only): VERIFIED_ENGINES_ALLOWLIST='BB_REJ'.
-_VERIFIED_ENGINES_DEFAULT = 'BB_REJ,LIQ_CSCD'
+# 2026-04-29 (later): added PIVOT to default allowlist. /edge_audit
+# showed PIVOT n=17 WR=75% (LCB ~52%) over 7d. Under the new 30bp/10bp
+# framework with bad-entry-kill cap, math projects +13bp/trade. Triples
+# signal flow vs BB_REJ-only and BB_REJ has been silent ~48h. Wilson
+# auto-disable will catch it within 50 trades if WR collapses under
+# the tighter SL.
+_VERIFIED_ENGINES_DEFAULT = 'BB_REJ,LIQ_CSCD,PIVOT'
 
 
 def _verified_engines_only():
@@ -7107,7 +7113,7 @@ def _compute_sl_px(coin, is_long, entry, engine=None):
     """
     # 2026-04-29: per-engine SL override (godmode profit move).
     # BB_REJ at 10bp SL pairs with 10bp TP for 1:1 R:R at 70% WR.
-    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.001'}
+    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.001', 'PIVOT': '0.001'}
     if engine:
         _eng_key = f'SL_OVERRIDE_{engine.upper()}'
         _eng_override = os.environ.get(_eng_key, _ENGINE_SL_DEFAULTS.get(engine.upper(), '')).strip()
@@ -7167,7 +7173,7 @@ def _compute_tp_px(coin, is_long, entry, engine=None):
     #
     # LIQ_CSCD: 50bp default. Liquidation cascades produce 30-100bp moves;
     # tighter TP clips winners. (n=0 in 14d, awaiting first fires.)
-    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.003', 'LIQ_CSCD': '0.005'}
+    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.003', 'LIQ_CSCD': '0.005', 'PIVOT': '0.003'}
     if engine:
         _eng_key = f'TP_OVERRIDE_{engine.upper()}'
         _eng_override = os.environ.get(_eng_key, _ENGINE_TP_DEFAULTS.get(engine.upper(), '')).strip()
@@ -11334,6 +11340,85 @@ def hour_veto_status():
     try:
         import hour_veto as _hv
         return jsonify(_hv.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/config_dump', methods=['GET'])
+def config_dump_endpoint():
+    """Live deploy verification — returns the actual env values + code defaults
+    that drive the verified-engine allowlist, TP/SL overrides, kill switches,
+    and other profit-relevant settings. No more "is it really set?" guessing.
+    """
+    try:
+        verified_only = os.environ.get('VERIFIED_ENGINES_ONLY', '1') == '1'
+        allowlist_raw = os.environ.get('VERIFIED_ENGINES_ALLOWLIST', _VERIFIED_ENGINES_DEFAULT) or _VERIFIED_ENGINES_DEFAULT
+        allowlist = sorted({tok.strip() for tok in allowlist_raw.split(',') if tok.strip()})
+        return jsonify({
+            'now_utc': datetime.utcnow().isoformat() + 'Z',
+            'git_sha': os.environ.get('RENDER_GIT_COMMIT', 'unknown')[:12],
+            'verified_engines': {
+                'verified_engines_only':       verified_only,
+                'allowlist_default_in_code':   _VERIFIED_ENGINES_DEFAULT,
+                'allowlist_effective':         allowlist,
+                'env_var_set':                 'VERIFIED_ENGINES_ALLOWLIST' in os.environ,
+            },
+            'verified_loser_baseline': {
+                'enabled': _VERIFIED_LOSER_VETO_ENABLED,
+                'engines': sorted(_VERIFIED_LOSER_BASELINE),
+            },
+            'tp_sl_overrides_per_engine': {
+                'tp_overrides_default_in_code': {
+                    'BB_REJ':   '0.003',
+                    'LIQ_CSCD': '0.005',
+                    'PIVOT':    '0.003',
+                },
+                'sl_overrides_default_in_code': {
+                    'BB_REJ': '0.001',
+                    'PIVOT':  '0.001',
+                },
+                'tp_env_set': {
+                    'BB_REJ':   'TP_OVERRIDE_BB_REJ' in os.environ,
+                    'LIQ_CSCD': 'TP_OVERRIDE_LIQ_CSCD' in os.environ,
+                    'PIVOT':    'TP_OVERRIDE_PIVOT' in os.environ,
+                },
+                'sl_env_set': {
+                    'BB_REJ': 'SL_OVERRIDE_BB_REJ' in os.environ,
+                    'PIVOT':  'SL_OVERRIDE_PIVOT' in os.environ,
+                },
+            },
+            'execution': {
+                'maker_only_entry': os.environ.get('MAKER_ONLY_ENTRY', '1') == '1',
+                'force_notional_usd': float(os.environ.get('FORCE_NOTIONAL_USD', '44')),
+                'global_max_positions': GLOBAL_MAX_POSITIONS,
+            },
+            'kills_and_filters': {
+                'bad_entry_kill': {
+                    'enabled': os.environ.get('BAD_ENTRY_KILL', '1') == '1',
+                    'min_mfe_pct': float(os.environ.get('BAD_ENTRY_MIN_MFE', '0.0005')) * 100,
+                    'age_sec':     int(os.environ.get('BAD_ENTRY_AGE_SEC', '60')),
+                    'max_age_sec': int(os.environ.get('BAD_ENTRY_MAX_AGE_SEC', '90')),
+                },
+                'wilson_auto_disable': {
+                    'enabled': _WILSON_AUTO_DISABLE_ENABLED,
+                    'n':       _WILSON_AUTO_DISABLE_N,
+                    'lookback_h': _WILSON_AUTO_DISABLE_LOOKBACK_H,
+                    'z':       _WILSON_AUTO_DISABLE_Z,
+                },
+                'hour_veto': {
+                    'enabled': os.environ.get('HOUR_VETO_ENABLED', '1') == '1',
+                    'hours': sorted({int(h.strip()) for h in os.environ.get('HOUR_VETO_HOURS', '4,6,7,9,14,15,16,19').split(',') if h.strip().isdigit()}),
+                },
+                'liquidation_cascade': {
+                    'usd_threshold': float(os.environ.get('LIQ_CASCADE_USD_THRESHOLD', '150000')),
+                    'window_sec': 60,
+                    'max_age_sec': int(os.environ.get('LIQ_CSCD_MAX_AGE_S', '180')),
+                },
+            },
+            'manual_disables': {
+                'DISABLE_ENGINES_env': os.environ.get('DISABLE_ENGINES', ''),
+            },
+        })
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 

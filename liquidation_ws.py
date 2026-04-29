@@ -10,11 +10,16 @@ except ImportError:
     websocket = None
 
 import os as _os
-CASCADE_USD_THRESHOLD = float(_os.environ.get('LIQ_CASCADE_USD_THRESHOLD', '400000'))
+CASCADE_USD_THRESHOLD = float(_os.environ.get('LIQ_CASCADE_USD_THRESHOLD', '150000'))
 # 2026-04-27 (later): 750k → 400k. /confluence engine_stats showed zero
 # liq_contributed across 398 evals — current regime quiet, 750k threshold
 # rarely met. 400k captures meaningful one-direction flush events without
 # tripping on every minor liq. Override via env to revert.
+# 2026-04-29: 400k → 150k. /edge_audit?engine=LIQ_CSCD&days=14 returned
+# zero closes — engine has been completely silent. The 400k threshold
+# is too tight for the current low-vol regime. 150k captures
+# meaningful cluster events on altcoins where $400k single-direction
+# in 60s rarely happens. Wilson auto-disable will catch any drift.
 CASCADE_WINDOW_SEC = 60
 WHALE_LIQ_USD = 100_000             # single liq >$100k = whale
 
