@@ -214,6 +214,16 @@ def _load_state():
     except Exception as e:
         _log(f"state load err: {e}")
 
+# System B RBAC — token-bucketed HL reads (SA path untouched)
+try:
+    import system_b_rbac as _rbac
+    _RBAC_OK = True
+except Exception as _re:
+    _rbac = None
+    _RBAC_OK = False
+    print(f"[sb_rbac] import err (non-fatal): {_re}", flush=True)
+
+
 def _fetch_15m_bars(coin, n_bars=800):
     """Use OKX as candle source (drop-in for HL info.candles_snapshot).
     Returns list of {t, o, h, l, c, v} with ONLY fully-closed bars aligned
@@ -607,7 +617,7 @@ def _try_rotate_stale_flat():
     coin_to_evict, pos = candidates[0]
     # Compute current raw for the close log line
     try:
-        mids = _precog.info.all_mids()
+        mids = _rbac.get_mids(_precog) if _RBAC_OK else (_precog.info.all_mids() or {})
         mark = float(mids.get(coin_to_evict, 0))
         entry = float(pos.get('entry') or 0)
         is_buy = pos.get('side') == 'BUY'
@@ -665,7 +675,7 @@ def _monitor_exits():
         import random as _r
         for _attempt in range(3):
             try:
-                mids = _precog.info.all_mids() or {}
+                mids = _rbac.get_mids(_precog) if _RBAC_OK else (_precog.info.all_mids() or {})
                 break
             except Exception as e:
                 _es = str(e)
@@ -769,7 +779,7 @@ def _monitor_exits():
                     and not pos.get('partial_tp_taken')):
                 try:
                     # Query authoritative size from exchange
-                    _us = _precog.info.user_state(_precog.WALLET)
+                    _us = _rbac.get_user_state(_precog) if _RBAC_OK else _precog.info.user_state(_precog.WALLET)
                     _full_sz = 0.0
                     for _p in _us.get('assetPositions', []):
                         if _p.get('position', {}).get('coin') == coin:
@@ -878,7 +888,7 @@ def _close_position(coin, reason, pnl=None):
                 _mids = {}
                 for _att in range(3):
                     try:
-                        _mids = _precog.info.all_mids() or {}
+                        _mids = _rbac.get_mids(_precog) if _RBAC_OK else (_precog.info.all_mids() or {})
                         break
                     except Exception as _ce:
                         _ces = str(_ce)
@@ -893,7 +903,7 @@ def _close_position(coin, reason, pnl=None):
                     is_buy_close = (pos['side'] == 'SELL')  # opposite side
                     # conservative size read from account
                     try:
-                        state = _precog.info.user_state(_precog.WALLET)
+                        state = _rbac.get_user_state(_precog) if _RBAC_OK else _precog.info.user_state(_precog.WALLET)
                         sz = 0.0
                         for p in state.get('assetPositions', []):
                             if p.get('position', {}).get('coin') == coin:
@@ -1065,7 +1075,7 @@ def _scan_once():
     else:
         try:
             # Pull universe + asset contexts in one call. Contexts have dayNtlVlm.
-            _meta_ctxs = _precog.info.meta_and_asset_ctxs() if hasattr(_precog, 'info') else None
+            _meta_ctxs = (_rbac.get_meta_ctxs(_precog) if _RBAC_OK else (_precog.info.meta_and_asset_ctxs() if hasattr(_precog, 'info') else None))
             if _meta_ctxs and len(_meta_ctxs) >= 2:
                 _meta = _meta_ctxs[0]
                 _ctxs = _meta_ctxs[1]
@@ -1096,7 +1106,7 @@ def _scan_once():
             SHADOW_UNIVERSE = []
 
     try:
-        equity = _precog.get_balance()
+        equity = _rbac.get_balance_cached(_precog) if _RBAC_OK else _precog.get_balance()
     except Exception as e:
         _log(f"balance read err: {e}")
         return
@@ -1122,7 +1132,7 @@ def _scan_once():
     # ONE REST call per 5min scan; minimal rate-limit impact.
     _exchange_coins = None
     try:
-        _us = _precog.info.user_state(_precog.WALLET)
+        _us = _rbac.get_user_state(_precog) if _RBAC_OK else _precog.info.user_state(_precog.WALLET)
         _ec = set()
         for _p in _us.get('assetPositions', []):
             _pos = _p.get('position', {}) if isinstance(_p, dict) else {}
@@ -1294,7 +1304,7 @@ def _scan_once():
         try:
             def _price_fn(c):
                 try:
-                    return float(_precog.info.all_mids().get(c, 0))
+                    return float((_rbac.get_mids(_precog) if _RBAC_OK else (_precog.info.all_mids() or {})).get(c, 0))
                 except Exception:
                     return None
             _shadow.resolve_pending(_price_fn)
