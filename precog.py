@@ -7096,9 +7096,34 @@ def _apply_sl_cap(sl_pct):
     return sl_pct
 
 
-def _compute_sl_px(coin, is_long, entry):
+def _compute_sl_px(coin, is_long, entry, engine=None):
     """Compute SL trigger price for atomic entry. Pure — no I/O.
-    Returns (sl_px_rounded, sl_pct_used) or (None, None)."""
+    Returns (sl_px_rounded, sl_pct_used) or (None, None).
+
+    2026-04-29: per-engine SL override symmetric to TP_OVERRIDE_<ENGINE>.
+    BB_REJ default 0.001 (10bp) — matches TP_OVERRIDE_BB_REJ=10bp to make
+    BB_REJ a 1:1 R:R play. With measured 70% WR, this is structurally
+    +EV after fees. Other engines fall through to per-coin SL config.
+    """
+    # 2026-04-29: per-engine SL override (godmode profit move).
+    # BB_REJ at 10bp SL pairs with 10bp TP for 1:1 R:R at 70% WR.
+    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.001'}
+    if engine:
+        _eng_key = f'SL_OVERRIDE_{engine.upper()}'
+        _eng_override = os.environ.get(_eng_key, _ENGINE_SL_DEFAULTS.get(engine.upper(), '')).strip()
+        if _eng_override:
+            try:
+                sl_pct_eng = float(_eng_override)
+                if sl_pct_eng > 0:
+                    sl_pct_eng = _apply_sl_cap(sl_pct_eng)
+                    entry_f = float(entry)
+                    trigger_px = entry_f * (1 - sl_pct_eng) if is_long else entry_f * (1 + sl_pct_eng)
+                    try:
+                        return float(round_price(coin, trigger_px)), float(sl_pct_eng)
+                    except Exception:
+                        return float(trigger_px), float(sl_pct_eng)
+            except (TypeError, ValueError):
+                pass  # fall through to per-coin
     sl_pct = STOP_LOSS_PCT  # global fallback
     try:
         if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
@@ -7128,9 +7153,12 @@ def _compute_tp_px(coin, is_long, entry, engine=None):
     """
     # 2026-04-29: per-engine TP override (godmode action 4).
     # BB_REJ default 0.001 (10bp) — WR-maximizing TP from /analyze
-    # tp_optimization. Other engines have no default (fall through to
-    # per-coin config). Env overrides default.
-    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.001'}
+    # tp_optimization, paired with 10bp SL for 1:1 R:R structural +EV.
+    # LIQ_CSCD default 0.005 (50bp) — liquidation cascades produce
+    # 30-100bp moves; tighter TP clips winners early.
+    # Other engines have no default (fall through to per-coin config).
+    # Env overrides default.
+    _ENGINE_TP_DEFAULTS = {'BB_REJ': '0.001', 'LIQ_CSCD': '0.005'}
     if engine:
         _eng_key = f'TP_OVERRIDE_{engine.upper()}'
         _eng_override = os.environ.get(_eng_key, _ENGINE_TP_DEFAULTS.get(engine.upper(), '')).strip()
@@ -7301,7 +7329,7 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None, engine=None):
             log(f"{coin} no mid price — skip atomic"); return out
 
         is_long = bool(is_buy)
-        sl_px, sl_pct = _compute_sl_px(coin, is_long, mark_px)
+        sl_px, sl_pct = _compute_sl_px(coin, is_long, mark_px, engine=engine)
         tp_px, tp_pct = _compute_tp_px(coin, is_long, mark_px, engine=engine)
         if sl_px is None or tp_px is None:
             # Can't form a complete bracket — fall back to legacy.
