@@ -6595,22 +6595,36 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
     """Scan last SCAN_BARS closed bars. Cooldown tracked by bar timestamp.
     Applies chase_gate for coins in CHASE_GATE_COINS.
 
-    Tuned params (read via postmortem, fall through to SP/BP defaults):
-      rsi.sell_threshold, rsi.buy_threshold, pivot.lookback
+    Tuned params (2026-04-29):
+      PIVOT_LB             lookback for pivot detection (default 10, was 15)
+      PIVOT_RSI_HI         RSI overbought threshold for SELL (default 70)
+      PIVOT_RSI_LO         RSI oversold threshold for BUY (default 30)
+      PIVOT_WICK_FILTER    if 1, require rejection wick > N×body (default 1)
+      PIVOT_WICK_RATIO     wick:body ratio required (default 1.2)
+    Postmortem overrides still respected per (coin) if set.
     """
     if len(candles)<60: return None, None
-    h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
+    o=[c[1] for c in candles]; h=[c[2] for c in candles]; l=[c[3] for c in candles]; cl=[c[4] for c in candles]
     N=len(cl); r14=rsi_calc(cl,14)
-    # Read tuned params with SP/BP as defaults (per-coin tuner overrides if set)
+    # Env-tunable defaults (2026-04-29 — exposed for live tuning).
+    # Lower default LB: 15 → 10. Lifetime WR was 75% at LB=15; lowering LB
+    # captures more candidate pivots, with the wick filter below acting as
+    # the quality gate (rejection candle vs continuation candle).
+    LB_def = int(os.environ.get('PIVOT_LB', '10'))
+    RH_def = float(os.environ.get('PIVOT_RSI_HI', '70'))
+    RL_def = float(os.environ.get('PIVOT_RSI_LO', '30'))
+    WICK_FILTER = os.environ.get('PIVOT_WICK_FILTER', '1') == '1'
+    WICK_RATIO  = float(os.environ.get('PIVOT_WICK_RATIO', '1.2'))
+    # Read tuned params with env defaults (per-coin postmortem overrides if set)
     if _POSTMORTEM_OK and _postmortem is not None and coin:
         try:
-            LB = int(_postmortem.get_param(coin, 'pivot', 'lookback', default=SP['pivot_lb']))
-            RH_ = float(_postmortem.get_param(coin, 'rsi', 'sell_threshold', default=SP['rsi_hi']))
-            RL_ = float(_postmortem.get_param(coin, 'rsi', 'buy_threshold', default=BP['rsi_lo']))
+            LB = int(_postmortem.get_param(coin, 'pivot', 'lookback', default=LB_def))
+            RH_ = float(_postmortem.get_param(coin, 'rsi', 'sell_threshold', default=RH_def))
+            RL_ = float(_postmortem.get_param(coin, 'rsi', 'buy_threshold', default=RL_def))
         except Exception:
-            LB = SP['pivot_lb']; RH_ = SP['rsi_hi']; RL_ = BP['rsi_lo']
+            LB = LB_def; RH_ = RH_def; RL_ = RL_def
     else:
-        LB = SP['pivot_lb']; RH_ = SP['rsi_hi']; RL_ = BP['rsi_lo']
+        LB = LB_def; RH_ = RH_def; RL_ = RL_def
     apply_gate = coin in CHASE_GATE_COINS
     for i in range(max(LB, N-SCAN_BARS), N):
         if r14[i] is None: continue
@@ -6621,6 +6635,23 @@ def signal(candles, last_sell_ts, last_buy_ts, coin=None):
         is_pivot_low  = l[i] == min(l[max(0,i-LB):i+1])
         sell_ok = is_pivot_high and r14[i] > RH_ and (bar_ts - last_sell_ts) > CD_MS
         buy_ok  = is_pivot_low  and r14[i] < RL_ and (bar_ts - last_buy_ts)  > CD_MS
+        # 2026-04-29: wick-rejection filter. A pivot high with a tiny
+        # wick = continuation; with a LARGE upper wick = rejection (slapped
+        # back from highs). True reversal pivots have rejection wicks.
+        # Same logic mirrored for pivot lows. Default ON.
+        if WICK_FILTER and (sell_ok or buy_ok):
+            body = abs(cl[i] - o[i])
+            if body <= 0:
+                # Doji bar — wick:body undefined; allow through (doji at pivot
+                # is itself a reversal signal).
+                pass
+            else:
+                upper_wick = h[i] - max(o[i], cl[i])
+                lower_wick = min(o[i], cl[i]) - l[i]
+                if sell_ok and upper_wick < WICK_RATIO * body:
+                    sell_ok = False
+                if buy_ok and lower_wick < WICK_RATIO * body:
+                    buy_ok = False
         if apply_gate:
             if sell_ok and not chase_gate_ok('SELL', cl[i], candles, i):
                 sell_ok = False
@@ -11403,6 +11434,14 @@ def config_dump_endpoint():
                 'maker_only_entry': os.environ.get('MAKER_ONLY_ENTRY', '1') == '1',
                 'force_notional_usd': float(os.environ.get('FORCE_NOTIONAL_USD', '44')),
                 'global_max_positions': GLOBAL_MAX_POSITIONS,
+            },
+            'pivot_engine': {
+                'lookback':           int(os.environ.get('PIVOT_LB', '10')),
+                'rsi_overbought':     float(os.environ.get('PIVOT_RSI_HI', '70')),
+                'rsi_oversold':       float(os.environ.get('PIVOT_RSI_LO', '30')),
+                'wick_filter_on':     os.environ.get('PIVOT_WICK_FILTER', '1') == '1',
+                'wick_ratio':         float(os.environ.get('PIVOT_WICK_RATIO', '1.2')),
+                'chase_gate_coins_n': len(CHASE_GATE_COINS),
             },
             'kills_and_filters': {
                 'bad_entry_kill': {
