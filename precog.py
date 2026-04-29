@@ -7149,14 +7149,24 @@ def _compute_sl_px(coin, is_long, entry, engine=None):
     """Compute SL trigger price for atomic entry. Pure — no I/O.
     Returns (sl_px_rounded, sl_pct_used) or (None, None).
 
-    2026-04-29: per-engine SL override symmetric to TP_OVERRIDE_<ENGINE>.
-    BB_REJ default 0.001 (10bp) — matches TP_OVERRIDE_BB_REJ=10bp to make
-    BB_REJ a 1:1 R:R play. With measured 70% WR, this is structurally
-    +EV after fees. Other engines fall through to per-coin SL config.
+    2026-04-29 (revised): per-engine SL override symmetric to TP_OVERRIDE.
+    BB_REJ + PIVOT default 0.003 (30bp). Earlier 10bp SL was sub-noise
+    on 15m timeframe (typical alt 15m candle has ±15-25bp wick range);
+    trades got stopped on intracandle noise before signal could develop.
+    30bp = ~1× typical 15m ATR — wide enough to ride out noise wicks
+    while still capping loss at the engine's edge horizon.
+
+    Math at 30bp TP / 30bp SL / 70% WR / maker entry / taker SL exit:
+      Win:  +30bp - 3bp (maker round-trip) = +27bp
+      Loss: -30bp - 6bp (maker entry + taker SL exit) = -36bp
+      EV: 0.7 × 27 - 0.3 × 36 = 18.9 - 10.8 = +8.1bp/trade
+
+    Other engines fall through to per-coin SL config.
     """
-    # 2026-04-29: per-engine SL override (godmode profit move).
-    # BB_REJ at 10bp SL pairs with 10bp TP for 1:1 R:R at 70% WR.
-    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.001', 'PIVOT': '0.001'}
+    # 2026-04-29 (revised): per-engine SL = ~1× 15m ATR floor.
+    # 10bp was below 15m noise floor (intracandle wicks ±15-25bp);
+    # 30bp gives signal room to develop. Override via env.
+    _ENGINE_SL_DEFAULTS = {'BB_REJ': '0.003', 'PIVOT': '0.003'}
     if engine:
         _eng_key = f'SL_OVERRIDE_{engine.upper()}'
         _eng_override = os.environ.get(_eng_key, _ENGINE_SL_DEFAULTS.get(engine.upper(), '')).strip()
@@ -11417,8 +11427,8 @@ def config_dump_endpoint():
                     'PIVOT':    '0.003',
                 },
                 'sl_overrides_default_in_code': {
-                    'BB_REJ': '0.001',
-                    'PIVOT':  '0.001',
+                    'BB_REJ': '0.003',
+                    'PIVOT':  '0.003',
                 },
                 'tp_env_set': {
                     'BB_REJ':   'TP_OVERRIDE_BB_REJ' in os.environ,
