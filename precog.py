@@ -11445,8 +11445,8 @@ def config_dump_endpoint():
                     'PIVOT':    '0.003',
                 },
                 'sl_overrides_default_in_code': {
-                    'BB_REJ': '0.003',
-                    'PIVOT':  '0.003',
+                    'BB_REJ': '0.015',  # LOCKED — see DO_NOT_TOUCH.md
+                    'PIVOT':  '0.015',  # LOCKED — see DO_NOT_TOUCH.md
                 },
                 'tp_env_set': {
                     'BB_REJ':   'TP_OVERRIDE_BB_REJ' in os.environ,
