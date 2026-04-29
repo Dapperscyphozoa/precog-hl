@@ -11301,6 +11301,74 @@ def hour_veto_status():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/bad_entry_kill_status', methods=['GET'])
+def bad_entry_kill_status():
+    """BAD_ENTRY_KILL — 60-90s no-MFE position cutter (inline in PROFIT_LOCK loop).
+
+    Reads config from env (live-readable) + introspects state['positions']
+    for current candidates and recently-killed flag.
+    """
+    try:
+        cfg = {
+            'enabled':                 os.environ.get('BAD_ENTRY_KILL', '1') == '1',
+            'min_mfe_pct':             float(os.environ.get('BAD_ENTRY_MIN_MFE', '0.0005')) * 100,
+            'age_sec':                 int(os.environ.get('BAD_ENTRY_AGE_SEC', '60')),
+            'max_age_sec':             int(os.environ.get('BAD_ENTRY_MAX_AGE_SEC', '90')),
+        }
+        st = load_state() or {}
+        positions = st.get('positions', {}) or {}
+        now_ts = time.time()
+        candidates = []
+        already_killed = []
+        too_young = 0
+        beyond_window = 0
+        has_mfe = 0
+        for coin, p in positions.items():
+            try:
+                opened = float(p.get('opened_at') or p.get('entry_ts') or 0)
+                if not opened:
+                    continue
+                age = now_ts - opened
+                mfe = float(p.get('mfe_pct') or 0)
+                killed_flag = bool(p.get('bad_entry_killed'))
+                rec = {
+                    'coin': coin,
+                    'engine': p.get('engine'),
+                    'side': p.get('side'),
+                    'age_s': int(age),
+                    'mfe_pct': round(mfe * 100, 4),
+                    'mae_pct': round(float(p.get('mae_pct') or 0) * 100, 4),
+                    'bad_entry_killed': killed_flag,
+                }
+                if killed_flag:
+                    already_killed.append(rec)
+                    continue
+                if age < cfg['age_sec']:
+                    too_young += 1
+                    continue
+                if age > cfg['max_age_sec']:
+                    beyond_window += 1
+                    continue
+                if mfe >= float(os.environ.get('BAD_ENTRY_MIN_MFE', '0.0005')):
+                    has_mfe += 1
+                    continue
+                # Live candidate (would be killed on next tick)
+                candidates.append(rec)
+            except Exception:
+                continue
+        return jsonify({
+            'config': cfg,
+            'positions_total': len(positions),
+            'live_kill_candidates_now': candidates,
+            'already_killed_this_session': already_killed[-25:],
+            'skipped_too_young': too_young,
+            'skipped_beyond_window': beyond_window,
+            'skipped_has_mfe': has_mfe,
+        })
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
 @app.route('/diagnose', methods=['GET'])
 def diagnose_endpoint():
     """One-shot full diagnostic: System A vs B P&L across windows, per-engine
