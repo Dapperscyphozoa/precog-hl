@@ -1322,26 +1322,15 @@ async function _probeWindow(endpoint, hrs) {
 }
 
 async function loadSystems() {
-    const windows = [12, 24, 72, 168];
-    let chosen = 12;
-    let saData = null, sbData = null;
-    for (const hrs of windows) {
-        const [a, b] = await Promise.all([
-            _probeWindow('/precog_status', hrs),
-            _probeWindow('/confluence', hrs),
-        ]);
-        saData = a; sbData = b;
-        const aN = (a && a.closed_count) || 0;
-        const bN = (b && b.closed_count) || 0;
-        // Stop when BOTH have closes, or last window
-        if ((aN > 0 && bN > 0) || hrs === windows[windows.length-1]) {
-            chosen = hrs;
-            break;
-        }
-    }
+    // Locked 12h window — surfaces post-fix behaviour, excludes pre-fix bug noise.
+    const HRS = 12;
+    const [saData, sbData] = await Promise.all([
+        _probeWindow('/precog_status', HRS),
+        _probeWindow('/confluence', HRS),
+    ]);
     await Promise.all([
-        renderSystemA(saData, chosen),
-        renderSystemB(sbData, chosen),
+        renderSystemA(saData, HRS),
+        renderSystemB(sbData, HRS),
     ]);
 }
 
