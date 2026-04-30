@@ -39,8 +39,18 @@ from collections import defaultdict
 # A 2+ system count is meaningless if both systems are in the same data
 # domain (e.g. SNIPER+DAY both price-action — correlated, not orthogonal).
 # CONF_MIN_DOMAINS forces fires to span 2+ distinct domains.
+#
+# 2026-04-30: 2 → 1 AGAIN. Live engine_stats showed 0 signals_yielded over
+# 108 evals: 45 below_min_sys (single-system signals existed but couldn't
+# find 2+ confluence partners), 9 low_domain_dropped, 52 no_candidate_24h.
+# Same signal-starvation pattern as 2026-04-25. Per-engine "alone" gates
+# (DAY-alone, SWING-alone, SNIPER-chop, BTC_WALL-alone) still cull the
+# worst single-system signals — only event-driven solo fires (NEWS,
+# FUNDING, OBI, OI, CVD, plus EVENT_ALONE_ALLOWED's LIQ/SPOOF/WALL_ABS)
+# pass through. CONF_MIN_DOMAINS=2 stays — same-domain combos remain
+# blocked because backtest showed 90.5% loss rate.
 import os as _os_minsys
-CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '2'))
+CONF_MIN_SYS        = int(_os_minsys.environ.get('CONF_MIN_SYS', '1'))
 CONF_MIN_DOMAINS    = int(_os_minsys.environ.get('CONF_MIN_DOMAINS', '2'))
 # 2026-04-27 (later): CONF_MIN_DOMAINS reverted 1 → 2 after backtest revealed
 # same-domain combos (esp. SNIPER+DAY price-action) lose 90.5% of the time
