@@ -12596,6 +12596,28 @@ if __name__ == '__main__':
 
                     _t.sleep(0.5)  # rate-limit between coins
 
+                # Also reconcile SB phantom positions: SB internal state vs HL real
+                # Phantoms = coins in SB._state['open_positions'] but not on HL
+                try:
+                    import confluence_worker as _cw_p
+                    sb_state = _cw_p._state.get('open_positions', {})
+                    hl_coins = set()
+                    for ap in us.get('assetPositions', []):
+                        p = ap.get('position', {})
+                        if float(p.get('szi', 0) or 0) != 0:
+                            hl_coins.add((p.get('coin') or '').upper())
+                    sb_coins = set(sb_state.keys())
+                    phantoms = sb_coins - hl_coins
+                    if phantoms:
+                        log(f"[naked_protect] reconcile: clearing {len(phantoms)} SB phantoms: {sorted(phantoms)}")
+                        for c in phantoms:
+                            try:
+                                _cw_p.clear_position(c)
+                            except Exception:
+                                pass
+                except Exception as _re:
+                    pass
+
             except Exception as e:
                 log(f"[naked_protect] sweep err: {str(e)[:160]}")
             _t.sleep(interval_s)
