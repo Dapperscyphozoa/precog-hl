@@ -59,6 +59,14 @@ ENABLED              = os.environ.get('BTCD_GATE_ENABLED', '1') == '1'
 REFRESH_INTERVAL_S   = int(os.environ.get('BTCD_REFRESH_S', '300'))
 HL_INFO_URL          = 'https://api.hyperliquid.xyz/info'
 
+# Engine allowlist: if non-empty, ONLY these engines get the BTCD filter.
+# Empty/unset = filter applies globally (legacy behavior). Comma-separated.
+# Use case: filter only currently-blocked engines (HL, CONFLUENCE_BTC_WALL+*)
+# without disturbing already-working engines (BB_REJ, PIVOT, DAY+NEWS) whose
+# verified +EV was developed without the filter.
+_ENGINE_FILTER_RAW = os.environ.get('BTCD_FILTER_ENGINES', '').strip()
+ENGINE_FILTER = {e.strip() for e in _ENGINE_FILTER_RAW.split(',') if e.strip()}
+
 
 def _env_minutes(key, default):
     try: return max(1, int(os.environ.get(key, str(default))))
@@ -217,7 +225,7 @@ def refresh():
     _refresh()
 
 
-def block_alt_side(coin, side):
+def block_alt_side(coin, side, engine=None):
     """Decide whether to block this alt trade based on BTCD trend.
 
     BTCD rising  → alts weak  → block LONG alts
@@ -226,11 +234,24 @@ def block_alt_side(coin, side):
     state=unknown → fail-soft, allow
 
     BTC excluded from gate (BTCD computed from BTC).
+
+    If ENGINE_FILTER is set and engine is provided, only filter
+    when engine ∈ ENGINE_FILTER. Otherwise (no engine arg or
+    empty filter) filter applies to all callers.
     """
     if not ENABLED:
         return False, 'disabled'
     if coin == 'BTC':
         return False, 'btc-not-gated'
+    # Engine-scoped filter (when ENGINE_FILTER is set):
+    #   - engine in filter   → apply BTCD filter (continue below)
+    #   - engine not in filter → skip filter (return allowed)
+    #   - engine is None     → caller didn't identify engine → skip filter
+    # This lets us scope BTCD filter to specific engines (e.g. verified losers)
+    # without disturbing engines whose +EV was developed sans filter.
+    if ENGINE_FILTER:
+        if engine is None or engine not in ENGINE_FILTER:
+            return False, 'engine-not-in-filter'
     refresh()
     with _LOCK:
         state = _CACHE.get('state', 'unknown')
@@ -259,6 +280,8 @@ def status():
         'eth_price': c.get('eth_price', 0),
         'btcd_proxy_now': round(c.get('btcd_proxy_now', 0), 6),
         'btcd_proxy_pre': round(c.get('btcd_proxy_pre', 0), 6),
+        'engine_filter': sorted(ENGINE_FILTER) if ENGINE_FILTER else [],
+        'engine_filter_active': bool(ENGINE_FILTER),
         'regime_configs': {
             reg: {'lookback_min': cfg['lookback_min'],
                   'threshold_pct': round(cfg['threshold'] * 100, 4)}

@@ -133,7 +133,7 @@ class TestSBBTCDFilter(unittest.TestCase):
         """Verify btc_dominance.block_alt_side(coin, side) signature exists.
         SB depends on this contract."""
         s = _src('btc_dominance.py')
-        self.assertIn('def block_alt_side(coin, side):', s)
+        self.assertIn('def block_alt_side(coin, side, engine=None):', s)
         # The contract: returns (blocked: bool, reason: str)
         self.assertIn('return False,', s)
         self.assertIn('return True,', s)
