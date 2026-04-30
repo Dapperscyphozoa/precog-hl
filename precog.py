@@ -11611,7 +11611,184 @@ def sb_unkill_all():
         return jsonify({'err': str(e)}), 500
 
 
-@app.route('/sb_killswitch_status', methods=['GET'])
+@app.route('/sb_per_coin', methods=['GET'])
+def sb_per_coin():
+    """Real-time per-coin SB tracker.
+
+    Combines:
+      - Live closed_trades from confluence_worker._state (in-memory, per-trade)
+      - trade_ledger system_aggregate (canonical $ PnL, restart-safe)
+      - open_positions (live MFE/MAE/age)
+      - killed_coins state
+      - last_fire_ts (per-coin cooldown clock)
+      - slippage samples
+      - by-engine breakdown per coin
+
+    Query params:
+      ?hours=N    — window for ledger aggregation (default 24)
+      ?sort=col   — pnl_usd | pnl_pct | n | last_fire (default pnl_usd)
+      ?limit=N    — limit rows (default 100)
+    """
+    try:
+        from flask import request as _req
+        hrs = float(_req.args.get('hours', '24'))
+        sort_key = _req.args.get('sort', 'pnl_usd')
+        limit = int(_req.args.get('limit', '100'))
+
+        import confluence_worker as _cw
+        # Snapshot live state
+        with _cw._state_lock:
+            closed = list(_cw._state.get('closed_trades', []))
+            open_pos = dict(_cw._state.get('open_positions', {}))
+            killed = dict(_cw._state.get('killed_coins', {}))
+            last_fire = dict(_cw._state.get('last_fire_ts', {}))
+            slip_samples = {c: list(arr) for c, arr in _cw._state.get('slippage_samples', {}).items()}
+            coin_stats = dict(_cw._state.get('coin_stats', {}))
+
+        # Try to get $ PnL from ledger
+        ledger_by_coin = {}
+        try:
+            import trade_ledger as _tl
+            agg = _tl.system_aggregate(system='b', hours=hrs)
+            ledger_by_coin = agg.get('by_coin', {}) or {}
+        except Exception:
+            pass
+
+        # Build per-coin from in-memory closed trades (always fresh)
+        cutoff = time.time() - hrs * 3600
+        per_coin = {}
+        for t in closed:
+            ct = t.get('closed_ts', 0)
+            if ct < cutoff:
+                continue
+            coin = (t.get('coin') or '').upper()
+            if not coin:
+                continue
+            d = per_coin.setdefault(coin, {
+                'n': 0, 'wins': 0, 'losses': 0, 'breakevens': 0,
+                'pnl_pct_sum': 0.0, 'pnl_usd_sum': 0.0,
+                'by_engine': {},
+                'by_side': {'BUY': 0, 'SELL': 0},
+                'last_close_ts': 0,
+                'avg_duration_min': 0.0,
+                'duration_sum_min': 0.0,
+                'exit_reasons': {},
+            })
+            d['n'] += 1
+            pp = t.get('pnl_pct', 0) or 0
+            d['pnl_pct_sum'] += pp
+            pu = t.get('pnl_usd', 0) or 0
+            d['pnl_usd_sum'] += pu
+            if pp > 0.001:
+                d['wins'] += 1
+            elif pp < -0.001:
+                d['losses'] += 1
+            else:
+                d['breakevens'] += 1
+            sys_list = t.get('systems') or []
+            if isinstance(sys_list, list):
+                eng_tag = '+'.join(sys_list) if sys_list else '?'
+                d['by_engine'][eng_tag] = d['by_engine'].get(eng_tag, 0) + 1
+            side = (t.get('side') or '').upper()
+            if side in d['by_side']:
+                d['by_side'][side] += 1
+            d['last_close_ts'] = max(d['last_close_ts'], ct)
+            dur = t.get('duration_min', 0) or 0
+            d['duration_sum_min'] += dur
+            er = t.get('exit_reason', '?')
+            d['exit_reasons'][er] = d['exit_reasons'].get(er, 0) + 1
+
+        # Finalize: avg duration, WR, prefer ledger $ PnL when available
+        now = time.time()
+        rows = []
+        for coin, d in per_coin.items():
+            d['avg_duration_min'] = round(d['duration_sum_min'] / max(d['n'], 1), 1)
+            d.pop('duration_sum_min', None)
+            decided = d['wins'] + d['losses']
+            d['wr_pct'] = round(d['wins'] * 100 / decided, 1) if decided else None
+            d['pnl_pct'] = round(d['pnl_pct_sum'], 3)
+            d.pop('pnl_pct_sum', None)
+            d['pnl_usd_inmem'] = round(d['pnl_usd_sum'], 4)
+            d.pop('pnl_usd_sum', None)
+            # Prefer ledger $ if present + non-zero
+            lc = ledger_by_coin.get(coin, {})
+            d['pnl_usd_ledger'] = round(lc.get('total_pnl_usd', 0) or 0, 4)
+            d['pnl_usd'] = d['pnl_usd_ledger'] if abs(d['pnl_usd_ledger']) > 0.0001 else d['pnl_usd_inmem']
+            d['last_close_age_min'] = round((now - d['last_close_ts']) / 60.0, 1) if d['last_close_ts'] else None
+            d.pop('last_close_ts', None)
+            # Append fire / kill / open / slippage state
+            lft = last_fire.get(coin, 0)
+            d['last_fire_age_min'] = round((now - lft) / 60.0, 1) if lft else None
+            d['killed'] = coin in killed
+            d['kill_reason'] = killed.get(coin, {}).get('reason') if coin in killed else None
+            d['in_position'] = coin in open_pos
+            slip = slip_samples.get(coin, [])
+            if slip:
+                d['slip_n'] = len(slip)
+                d['slip_avg_pct'] = round(sum(slip) / len(slip), 4)
+            rows.append((coin, d))
+
+        # Also surface lifetime coin_stats for context
+        for coin, d in rows:
+            cs = coin_stats.get(coin)
+            if cs:
+                d['lifetime'] = {
+                    'n': cs.get('n', 0),
+                    'w': cs.get('w', 0),
+                    'l': cs.get('l', 0),
+                    'pnl_pct': round(cs.get('pnl_pct', 0), 3),
+                }
+
+        # Sort
+        sort_map = {
+            'pnl_usd':   lambda kv: -(kv[1].get('pnl_usd') or 0),
+            'pnl_pct':   lambda kv: -(kv[1].get('pnl_pct') or 0),
+            'n':         lambda kv: -(kv[1].get('n') or 0),
+            'last_fire': lambda kv: (kv[1].get('last_fire_age_min') or 9e9),
+            'wr':        lambda kv: -(kv[1].get('wr_pct') or 0),
+        }
+        rows.sort(key=sort_map.get(sort_key, sort_map['pnl_usd']))
+        rows = rows[:limit]
+
+        # Roll-up totals
+        total_n = sum(d['n'] for _, d in rows)
+        total_wins = sum(d['wins'] for _, d in rows)
+        total_losses = sum(d['losses'] for _, d in rows)
+        total_pnl_usd = round(sum(d.get('pnl_usd', 0) or 0 for _, d in rows), 3)
+        total_pnl_pct = round(sum(d.get('pnl_pct', 0) or 0 for _, d in rows), 3)
+
+        return jsonify({
+            'system': 'B',
+            'window_hours': hrs,
+            'now_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now)),
+            'sort': sort_key,
+            'totals': {
+                'coins_traded': len(rows),
+                'closed_trades': total_n,
+                'wins': total_wins,
+                'losses': total_losses,
+                'wr_pct': round(total_wins * 100 / max(total_wins + total_losses, 1), 1) if (total_wins + total_losses) else None,
+                'pnl_usd': total_pnl_usd,
+                'pnl_pct': total_pnl_pct,
+                'open_positions': len(open_pos),
+                'killed_coins': len(killed),
+            },
+            'open_positions_detail': {
+                c: {
+                    'side': p.get('side'),
+                    'entry': p.get('entry'),
+                    'age_min': round((now - p.get('ts', now)) / 60.0, 1) if p.get('ts') else None,
+                    'systems': p.get('systems') or p.get('sig', {}).get('systems'),
+                } for c, p in open_pos.items()
+            },
+            'per_coin': dict(rows),
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-400:]}), 500
+
+
+
 def sb_killswitch_status():
     """Read-only — full SB killed_coins dict with timestamps + reasons.
     /confluence flattens to list; this returns the underlying dict."""

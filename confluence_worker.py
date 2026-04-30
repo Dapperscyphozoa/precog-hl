@@ -353,11 +353,17 @@ def _entry_gate_ok(coin, side):
     """Reuse precog's existing gate stack — V3 trend, ATR-min, ticker gate."""
     if side not in ALLOWED_SIDES:
         return False, 'side_filter'
-    try:
-        if hasattr(_precog, 'trend_gate') and not _precog.trend_gate(coin, side):
-            return False, 'V3'
-    except Exception:
-        pass
+    # 2026-04-30: SB no longer applies SA's V3 trend_gate by default.
+    # SA tunes V3 EMA9 4h for trend-continuation entries; SB confluence
+    # signals are independent of SA's trend regime. SA bleed-through caused
+    # SB profit collapse 04-27 → 04-29 (verified from data).
+    # Re-enable with SB_APPLY_SA_TREND_GATE=1 if needed.
+    if os.environ.get('SB_APPLY_SA_TREND_GATE', '0') == '1':
+        try:
+            if hasattr(_precog, 'trend_gate') and not _precog.trend_gate(coin, side):
+                return False, 'V3'
+        except Exception:
+            pass
     return True, 'ok'
 
 def _size_and_fire(coin, signal, equity):
@@ -417,18 +423,23 @@ def _size_and_fire(coin, signal, equity):
         except Exception:
             pass  # fail-soft: BTCD module error doesn't block trades
 
-    # 2026-04-27: 5m confirmation gate (shared with precog signals).
-    try:
-        if _precog is not None and hasattr(_precog, '_confirm_5m'):
-            if not _precog._confirm_5m(coin, signal.get('side')):
-                _log(f"{coin} {signal['side']} CONFLUENCE dropped: 5m momentum opposes")
-                try:
-                    _state.setdefault('rejects', {})
-                    _state['rejects']['fivem_opposes'] = _state['rejects'].get('fivem_opposes', 0) + 1
-                except Exception: pass
-                return None
-    except Exception:
-        pass
+    # 2026-04-30: SB no longer applies SA's 5m confirmation gate by default.
+    # SA tunes CONF_5M_GATE_PCT for SA's trend-continuation entries.
+    # On chop, this gate rejects most SB confluence signals (verified — SB
+    # profit collapsed 04-27 06:19 UTC when 5-levers PR shipped this gate to SB).
+    # Re-enable with SB_APPLY_SA_5M_GATE=1.
+    if os.environ.get('SB_APPLY_SA_5M_GATE', '0') == '1':
+        try:
+            if _precog is not None and hasattr(_precog, '_confirm_5m'):
+                if not _precog._confirm_5m(coin, signal.get('side')):
+                    _log(f"{coin} {signal['side']} CONFLUENCE dropped: 5m momentum opposes")
+                    try:
+                        _state.setdefault('rejects', {})
+                        _state['rejects']['fivem_opposes'] = _state['rejects'].get('fivem_opposes', 0) + 1
+                    except Exception: pass
+                    return None
+        except Exception:
+            pass
 
     # 2026-04-30: defensive sizing path. Previous version threw silent
     # exceptions for malformed signals (missing sl_pct, zero entry, etc.)
@@ -1310,12 +1321,17 @@ def _scan_once():
             if _in_position(coin, exchange_coins=_exchange_coins):
                 _bump('in_position'); continue
             # 2026-04-29: GLOBAL position cap (across both systems)
-            try:
-                if _precog and hasattr(_precog, '_global_pos_count_blocks') \
-                        and _precog._global_pos_count_blocks():
-                    _bump('global_max_positions'); continue
-            except Exception:
-                pass  # fail-soft
+            # 2026-04-30: SB now defaults to its own MAX_POSITIONS only.
+            # SA's _global_pos_count_blocks aggregates SA+SB; with SB at
+            # 25 and SA opening 5-10 trades, this could prevent SB fires
+            # even when SB has slots. Re-enable with SB_USE_GLOBAL_POS_CAP=1.
+            if os.environ.get('SB_USE_GLOBAL_POS_CAP', '0') == '1':
+                try:
+                    if _precog and hasattr(_precog, '_global_pos_count_blocks') \
+                            and _precog._global_pos_count_blocks():
+                        _bump('global_max_positions'); continue
+                except Exception:
+                    pass  # fail-soft
             # Fetch + evaluate (Fix 1: only fully-closed bars)
             bars = _fetch_15m_bars(coin, 800)
             if not bars:
