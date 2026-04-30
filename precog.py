@@ -11576,6 +11576,41 @@ def edge_audit_endpoint():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/sb_unkill_coin', methods=['POST', 'GET'])
+def sb_unkill_coin():
+    """Unkill a single coin from SB's killed_coins.
+    Query: ?coin=COIN&token=WEBHOOK_SECRET"""
+    from flask import request as _req
+    try:
+        token = _req.args.get('token') or _req.values.get('token','')
+        if token != os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026'):
+            return jsonify({'err': 'unauthorized'}), 401
+        coin = (_req.args.get('coin') or _req.values.get('coin','')).upper()
+        if not coin:
+            return jsonify({'err': 'missing coin param'}), 400
+        import confluence_worker as _cw
+        ok = _cw.unkill_coin(coin)
+        return jsonify({'coin': coin, 'unkilled': ok})
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/sb_unkill_all', methods=['POST'])
+def sb_unkill_all():
+    """Clear ALL coins from SB's killed_coins.
+    Query: ?token=WEBHOOK_SECRET"""
+    from flask import request as _req
+    try:
+        token = _req.args.get('token') or _req.values.get('token','')
+        if token != os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026'):
+            return jsonify({'err': 'unauthorized'}), 401
+        import confluence_worker as _cw
+        cleared = _cw.unkill_all()
+        return jsonify({'cleared': cleared, 'count': len(cleared)})
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/sb_killswitch_status', methods=['GET'])
 def sb_killswitch_status():
     """Read-only — full SB killed_coins dict with timestamps + reasons.

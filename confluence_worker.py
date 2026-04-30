@@ -72,7 +72,7 @@ LOG_FILE        = '/var/data/confluence.log'
 
 # ─── FIX 4: slippage reality gap ─────────────────────────────────────
 # Track expected vs actual fill; kill coin if avg slip > 0.15%
-SLIPPAGE_KILL_THRESHOLD_PCT = 0.15  # kill coin above this
+SLIPPAGE_KILL_THRESHOLD_PCT = float(__import__('os').environ.get('SLIPPAGE_KILL_THRESHOLD_PCT', '0.5'))  # 50bp avg slip = bad fill. Was 0.15 (too tight — caught normal alt slippage)
 SLIPPAGE_MIN_SAMPLES = 5             # need at least N fills before killing
 
 # ─── FIX 5: coin decay detection ─────────────────────────────────────
@@ -1124,6 +1124,31 @@ def _update_coin_stats(coin, pnl_decimal):
                     'ts': int(time.time()),
                 }
                 _log(f"*** {coin} KILLED (decay): WR={wr:.1%} pnl={s['pnl_pct']:+.2f}% over {s['n']} trades")
+
+
+
+def unkill_coin(coin):
+    """Manually clear a coin from killed_coins. Returns True if unkilled."""
+    coin = (coin or '').upper()
+    with _state_lock:
+        if coin in _state['killed_coins']:
+            del _state['killed_coins'][coin]
+            # Also reset slippage samples so next trades start fresh
+            _state['slippage_samples'].pop(coin, None)
+            return True
+    return False
+
+
+def unkill_all():
+    """Clear all coins from killed_coins. Returns list of cleared coins."""
+    with _state_lock:
+        cleared = list(_state['killed_coins'].keys())
+        _state['killed_coins'].clear()
+        # Clear slippage samples for cleared coins
+        for c in cleared:
+            _state['slippage_samples'].pop(c, None)
+    return cleared
+
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────
 def _scan_once():
