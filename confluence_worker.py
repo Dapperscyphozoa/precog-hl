@@ -430,7 +430,28 @@ def _size_and_fire(coin, signal, equity):
     except Exception:
         pass
 
-    sl_pct = signal['sl_pct']
+    # 2026-04-30: defensive sizing path. Previous version threw silent
+    # exceptions for malformed signals (missing sl_pct, zero entry, etc.)
+    # that propagated to the candidates loop's try/except and were logged
+    # without bumping any counter — making "why didn't this fire?"
+    # invisible. Now: every early-exit bumps a named reject counter.
+    try:
+        sl_pct = signal['sl_pct']
+    except (KeyError, TypeError):
+        with _state_lock:
+            _state['rejects']['sb_size_no_sl_pct'] = _state['rejects'].get('sb_size_no_sl_pct', 0) + 1
+        _log(f"{coin} SIZE_FAIL: signal missing sl_pct")
+        return None
+    if not sl_pct or sl_pct <= 0:
+        with _state_lock:
+            _state['rejects']['sb_size_bad_sl_pct'] = _state['rejects'].get('sb_size_bad_sl_pct', 0) + 1
+        _log(f"{coin} SIZE_FAIL: bad sl_pct={sl_pct}")
+        return None
+    if equity is None or equity <= 0:
+        with _state_lock:
+            _state['rejects']['sb_size_no_equity'] = _state['rejects'].get('sb_size_no_equity', 0) + 1
+        _log(f"{coin} SIZE_FAIL: bad equity={equity}")
+        return None
     risk_usd = equity * RISK_PCT
     notional_usd = risk_usd / sl_pct
     # ─── DEBUG MODE: force fixed notional if env set ───
@@ -441,7 +462,17 @@ def _size_and_fire(coin, signal, equity):
     except Exception:
         pass
     entry = signal['entry']
+    if not entry or entry <= 0:
+        with _state_lock:
+            _state['rejects']['sb_size_bad_entry'] = _state['rejects'].get('sb_size_bad_entry', 0) + 1
+        _log(f"{coin} SIZE_FAIL: bad entry={entry}")
+        return None
     size_coin = notional_usd / entry
+    if size_coin <= 0:
+        with _state_lock:
+            _state['rejects']['sb_size_zero'] = _state['rejects'].get('sb_size_zero', 0) + 1
+        _log(f"{coin} SIZE_FAIL: size_coin={size_coin} (notional={notional_usd}, entry={entry})")
+        return None
 
     # Slippage buffer on entry. Was hardcoded 0.08% — too tight for fast-moving
     # alts; observed empirically as 29/29 yielded signals failing IOC match
@@ -1337,7 +1368,10 @@ def _scan_once():
                 fires_this_scan += 1
             time.sleep(0.1)
         except Exception as e:
-            _log(f"{coin} fire err: {e}")
+            # 2026-04-30: bump counter so silent failures are visible
+            with _state_lock:
+                _state['rejects']['sb_fire_exception'] = _state['rejects'].get('sb_fire_exception', 0) + 1
+            _log(f"{coin} fire err: {type(e).__name__}: {e}")
 
     # 2026-04-26: SHADOW EVAL — same engine, no fires.
     # Run confluence_engine.eval_coin against next-tier candidates and
