@@ -707,26 +707,56 @@ body::after {
     <div id="macro-strip" style="font-size: 11px; letter-spacing: 0.05em; opacity: 0.85;">// macro: loading…</div>
 </div>
 
-<!-- PRECOG · SYSTEM A -->
-<div class="panel" style="margin-bottom: 16px;">
-    <div class="panel-head">
-        <div class="panel-title">Precog · System A</div>
-        <div class="panel-meta" id="precog-meta">—</div>
+<!-- SYSTEMS A + B — UNIFORM PANELS -->
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 32px;" id="systems-grid">
+
+    <!-- SYSTEM A · PRECOG -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System A · Precog</div>
+            <div class="panel-meta" id="sa-status">—</div>
+        </div>
+        <div class="sys-stats" id="sa-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sa-positions"></div>
+        <div class="sys-section-label">Engine Breakdown</div>
+        <div class="sys-engines" id="sa-engines"></div>
+        <div class="sys-footer" id="sa-footer"></div>
     </div>
-    <div id="precog-stats" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 16px;"></div>
-    <div id="precog-engines" style="font-size: 11px; opacity: 0.85; letter-spacing: 0.04em;"></div>
+
+    <!-- SYSTEM B · CONFLUENCE -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System B · Confluence</div>
+            <div class="panel-meta" id="sb-status">—</div>
+        </div>
+        <div class="sys-stats" id="sb-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sb-positions"></div>
+        <div class="sys-section-label">Engine Breakdown</div>
+        <div class="sys-engines" id="sb-engines"></div>
+        <div class="sys-footer" id="sb-footer"></div>
+    </div>
+
 </div>
 
-<!-- CONFLUENCE · SYSTEM B -->
-<div class="panel" style="margin-bottom: 32px;">
-    <div class="panel-head">
-        <div class="panel-title">Confluence · System B</div>
-        <div class="panel-meta" id="conf-meta">—</div>
-    </div>
-    <div id="confluence-stats" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-bottom: 16px;"></div>
-    <div id="confluence-positions" style="font-size: 11px; max-height: 360px; overflow-y: auto;"></div>
-    <div id="confluence-rejects" style="margin-top: 12px; font-size: 10px; opacity: 0.75; letter-spacing: 0.05em;"></div>
-</div>
+<style>
+.sys-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 14px; }
+.sys-section-label { font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--blood); opacity: 0.85; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(193, 39, 45, 0.3); }
+.sys-positions { font-size: 11px; max-height: 280px; overflow-y: auto; }
+.sys-engines { font-size: 11px; max-height: 240px; overflow-y: auto; }
+.sys-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10px; opacity: 0.7; letter-spacing: 0.05em; line-height: 1.6; }
+.sys-tbl-head { display: grid; gap: 6px; padding: 5px 0; font-weight: 600; color: var(--blood); border-bottom: 1px solid var(--blood); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
+.sys-tbl-row { display: grid; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,0,0,0.06); font-size: 11px; }
+.sys-tbl-pos { grid-template-columns: 70px 30px 70px 1fr 50px 50px 55px 55px 40px; }
+.sys-tbl-eng { grid-template-columns: 1fr 35px 60px 50px 70px; }
+.sys-empty { opacity: 0.4; font-style: italic; padding: 10px 0; font-size: 11px; }
+.badge-live { color: var(--acid); font-weight: 600; }
+.badge-dry { color: var(--oxide); font-weight: 600; }
+.badge-disabled { color: var(--blood); font-weight: 600; }
+.badge-paused { color: var(--blood); font-size: 9px; padding: 1px 5px; border: 1px solid var(--blood); margin-left: 6px; }
+@media (max-width: 980px) { #systems-grid { grid-template-columns: 1fr; } }
+</style>
 
 <!-- COIN WR HEATMAP -->
 <div class="panel" style="margin-bottom: 32px;">
@@ -1028,250 +1058,301 @@ async function loadEngines() {
 loadEngines();
 setInterval(loadEngines, 5000);
 
-async function loadConfluence() {
+// ─── UNIFIED SYSTEMS PANELS (SA + SB) ───────────────────────────────
+// Shared rendering pipeline so both systems show identical layout.
+// SA pulls /precog_status (engines+aggregates) + /dash (open positions).
+// SB pulls /confluence (everything in one shot).
+
+function fmtMoney(v) {
+    if (v == null || isNaN(v)) return '—';
+    const sign = v >= 0 ? '+' : '-';
+    return `${sign}$${Math.abs(v).toFixed(2)}`;
+}
+function fmtMoneyExact(v, dp) {
+    if (v == null || isNaN(v)) return '—';
+    const sign = v >= 0 ? '+' : '';
+    return `${sign}$${Number(v).toFixed(dp == null ? 3 : dp)}`;
+}
+function fmtPct(v, dp) {
+    if (v == null || isNaN(v)) return '—';
+    return `${Number(v).toFixed(dp == null ? 1 : dp)}%`;
+}
+function moneyColor(v) {
+    if (v == null || isNaN(v)) return '';
+    return v >= 0 ? 'color:var(--acid)' : 'color:#f88';
+}
+
+function renderStatsGrid(elId, stats) {
+    // stats: array of {val, lbl, color, suffix}
+    const html = stats.map(s => {
+        const c = s.color ? `style="${s.color}"` : '';
+        return `<div class="metric-cell"><div class="metric-val" ${c}>${s.val}</div><div class="metric-lbl">${s.lbl}</div></div>`;
+    }).join('');
+    document.getElementById(elId).innerHTML = html;
+}
+
+function renderPositions(elId, positions, opts) {
+    // positions: [{coin, side, entry, engine, tp_pct, sl_pct, sl_at_be, mfe_pct, mae_pct, ts, age_min}]
+    opts = opts || {};
+    const el = document.getElementById(elId);
+    if (!positions || positions.length === 0) {
+        el.innerHTML = '<div class="sys-empty">// no open positions</div>';
+        return;
+    }
+    const header = `<div class="sys-tbl-head sys-tbl-pos">
+        <div>COIN</div><div>S</div><div>ENTRY</div><div>ENGINE</div>
+        <div>TP</div><div>SL</div><div>MFE</div><div>MAE</div><div>AGE</div>
+    </div>`;
+    const rows = positions.map(p => {
+        const sideShort = p.side === 'BUY' || p.side === 'L' ? 'L' : 'S';
+        const sideClass = sideShort === 'L' ? 'side-L' : 'side-S';
+        const tp = p.tp_pct ? fmtPct(p.tp_pct * 100, 2) : '—';
+        const sl = p.sl_at_be ? 'BE' : (p.sl_pct ? fmtPct(p.sl_pct * 100, 2) : '—');
+        const mfe = (p.mfe_pct != null) ? fmtPct(p.mfe_pct * 100, 2) : (p.upnl_pct != null ? fmtPct(p.upnl_pct, 2) : '—');
+        const mae = (p.mae_pct != null) ? fmtPct(p.mae_pct * 100, 2) : '—';
+        const ageMin = p.ts ? Math.floor((Date.now()/1000 - p.ts) / 60) + 'm' : '—';
+        const eng = (p.engine || '').replace(/^CONFLUENCE_/, '') || '—';
+        const entry = p.entry != null ? Number(p.entry).toString() : '?';
+        return `<div class="sys-tbl-row sys-tbl-pos">
+            <div><strong>${p.coin}</strong></div>
+            <div><span class="pos-side ${sideClass}">${sideShort}</span></div>
+            <div>${entry}</div>
+            <div style="font-size:10px;opacity:0.85" title="${p.engine||''}">${eng}</div>
+            <div style="color:var(--acid)">${tp}</div>
+            <div style="color:#f88">${sl}</div>
+            <div style="color:var(--acid);font-size:10px">${mfe}</div>
+            <div style="color:#f88;font-size:10px">${mae}</div>
+            <div style="opacity:0.6;font-size:10px">${ageMin}</div>
+        </div>`;
+    }).join('');
+    el.innerHTML = header + rows;
+}
+
+function renderEngines(elId, engines, autoPause) {
+    // engines: [{name, n, w, l, b, wr_pct, pnl_usd, paused}]
+    const el = document.getElementById(elId);
+    if (!engines || engines.length === 0) {
+        el.innerHTML = '<div class="sys-empty">// no closes in window</div>';
+        return;
+    }
+    const header = `<div class="sys-tbl-head sys-tbl-eng">
+        <div>ENGINE</div><div>n</div><div>W/L/B</div><div>WR</div><div>$ PnL</div>
+    </div>`;
+    const rows = engines.map(e => {
+        const pnlColor = (e.pnl_usd >= 0) ? 'color:var(--acid)' : 'color:#f88';
+        const pausedFlag = e.paused ? '<span class="badge-paused">PAUSED</span>' : '';
+        const wrStr = (e.wr_pct != null) ? `${e.wr_pct}%` : '—';
+        const pnlStr = `${e.pnl_usd >= 0 ? '+' : ''}$${Number(e.pnl_usd||0).toFixed(3)}`;
+        const shortName = e.name.replace(/^CONFLUENCE_/, '');
+        return `<div class="sys-tbl-row sys-tbl-eng">
+            <div><strong>${shortName}</strong>${pausedFlag}</div>
+            <div>${e.n}</div>
+            <div>${e.w||0}/${e.l||0}/${e.b||0}</div>
+            <div>${wrStr}</div>
+            <div style="${pnlColor}">${pnlStr}</div>
+        </div>`;
+    }).join('');
+    el.innerHTML = header + rows;
+}
+
+function buildStatsFromAggregate(d, includeOps) {
+    const usdPnl = (d.total_pnl_usd != null) ? Number(d.total_pnl_usd) : null;
+    const wrWin = (d.wr_pct_window != null) ? `${d.wr_pct_window.toFixed(1)}%` : '—';
+    const wWin = d.wins_window || 0;
+    const lWin = d.losses_window || 0;
+    const bWin = d.breakevens_window || 0;
+    const closed = d.closed_count || 0;
+    const avgW = (d.avg_win_usd != null) ? `+$${Number(d.avg_win_usd).toFixed(3)}` : '—';
+    const avgL = (d.avg_loss_usd != null) ? `$${Number(d.avg_loss_usd).toFixed(3)}` : '—';
+    const aw = Math.abs(Number(d.avg_win_usd || 0));
+    const al = Math.abs(Number(d.avg_loss_usd || 0));
+    const rr = (al > 0) ? (aw / al).toFixed(2) : '—';
+    const rrColor = (al > 0 && aw / al >= 1) ? 'color:var(--acid)' : 'color:#f88';
+    const usdStr = (usdPnl != null) ? `${usdPnl >= 0 ? '+' : ''}$${usdPnl.toFixed(2)}` : '—';
+    const stats = [
+        { val: usdStr, lbl: '$ PnL', color: moneyColor(usdPnl) },
+        { val: wrWin, lbl: 'Win Rate' },
+        { val: `${wWin}/${lWin}/${bWin}`, lbl: 'W/L/B' },
+        { val: avgW, lbl: 'Avg Win', color: 'color:var(--acid)' },
+        { val: avgL, lbl: 'Avg Loss', color: 'color:#f88' },
+        { val: rr, lbl: 'R:R', color: rrColor },
+        { val: closed, lbl: 'Closes' },
+    ];
+    return stats;
+}
+
+async function loadSystemA() {
     try {
-        // Same fallback ladder as System A — keep panel populated through quiet windows.
-        const windowsToTry = [12, 24, 72, 168];
-        let d = null;
-        let usedWindow = 12;
-        for (const hrs of windowsToTry) {
-            const r = await fetch(`/confluence?hours=${hrs}`);
-            const candidate = await r.json();
-            if (!candidate || candidate.err) {
-                d = candidate;
-                break;
-            }
-            if ((candidate.closed_count || 0) > 0 || hrs === windowsToTry[windowsToTry.length-1]) {
-                d = candidate;
-                usedWindow = hrs;
-                break;
+        // Window ladder
+        const windows = [12, 24, 72, 168];
+        let d = null, used = 12;
+        for (const hrs of windows) {
+            const r = await fetch(`/precog_status?hours=${hrs}`);
+            const c = await r.json();
+            if (!c || c.err) { d = c; break; }
+            if ((c.closed_count||0) > 0 || hrs === windows[windows.length-1]) {
+                d = c; used = hrs; break;
             }
         }
         if (!d || d.err) {
-            document.getElementById('conf-meta').textContent = 'error: ' + (d?.err || 'unknown');
+            document.getElementById('sa-status').innerHTML = `<span class="badge-disabled">ERROR</span> ${d?.err||''}`;
             return;
         }
-        const meta = document.getElementById('conf-meta');
-        const flagDry = d.dry_run ? '<span style="color:#fb0">DRY-RUN</span>' : '<span style="color:var(--acid)">LIVE</span>';
-        const flagEn  = d.enabled ? '' : ' <span style="color:#f88">DISABLED</span>';
-        meta.innerHTML = `${flagDry}${flagEn} · scan ${d.scan_interval_s||0}s · risk ${(d.risk_pct||0)*100}%`;
 
-        // Top metrics row
-        const open = Object.keys(d.open_positions || {}).length;
-        const cap  = d.max_positions || 0;
-        const queue = (d.rejects_cumulative || {}).cap_queued || 0;
+        // Status meta
+        const enabled = d.enabled !== false;
+        const disabled = d.disabled_engines || '';
+        const liveBadge = enabled ? '<span class="badge-live">LIVE</span>' : '<span class="badge-disabled">OFF</span>';
+        const disText = disabled ? ` · disable=<span style="color:#f88">${disabled}</span>` : '';
+        document.getElementById('sa-status').innerHTML = `${liveBadge} · ${used}h window${disText}`;
+
+        // Pull SA's open positions from /dash (filter to non-CONFLUENCE engines)
+        let saPositions = [];
+        try {
+            const dr = await fetch('/dash');
+            const dj = await dr.json();
+            const all = dj.positions || [];
+            // SA = positions whose engine is not CONFLUENCE_* (or has no engine and not in cw_open)
+            saPositions = all.filter(p => !((p.engine||'').startsWith('CONFLUENCE_')))
+                             .map(p => ({
+                                 coin: p.coin,
+                                 side: p.side,
+                                 entry: p.entry,
+                                 engine: p.engine || 'PRECOG',
+                                 tp_pct: p.tp_pct,
+                                 sl_pct: p.sl_pct,
+                                 upnl_pct: p.upnl != null && p.entry && p.size ? (p.upnl / (p.entry * p.size)) * 100 : null,
+                                 ts: p.entry_ts || p.ts,
+                             }));
+        } catch (_) {}
+
+        // Stats grid
+        renderStatsGrid('sa-stats', [
+            ...buildStatsFromAggregate(d, false),
+            { val: saPositions.length, lbl: 'Open' },
+        ]);
+
+        // Positions
+        renderPositions('sa-positions', saPositions);
+
+        // Engines
+        const byEng = d.by_engine || {};
+        const ap = d.engine_auto_pause || {};
+        const engKeys = Object.keys(byEng).filter(k => k !== 'RECONCILED' && k !== '_untagged').sort();
+        const engines = engKeys.map(k => {
+            const v = byEng[k] || {};
+            return {
+                name: k, n: v.n || 0, w: v.w || 0, l: v.l || 0, b: v.b || 0,
+                wr_pct: v.wr_pct, pnl_usd: v.pnl_usd || 0,
+                paused: !!(ap[k] && ap[k].paused),
+            };
+        });
+        renderEngines('sa-engines', engines, ap);
+
+        // Footer — operational
+        const ftr = [];
+        ftr.push(`risk: ${(d.risk_pct||0)*100}%`);
+        if (d.losses_window != null) ftr.push(`losses_window: ${d.losses_window}`);
+        document.getElementById('sa-footer').innerHTML = `// ${ftr.join(' · ')}`;
+
+    } catch(e) {
+        console.error('SA load err', e);
+        document.getElementById('sa-status').innerHTML = '<span class="badge-disabled">FETCH FAILED</span>';
+    }
+}
+
+async function loadSystemB() {
+    try {
+        const windows = [12, 24, 72, 168];
+        let d = null, used = 12;
+        for (const hrs of windows) {
+            const r = await fetch(`/confluence?hours=${hrs}`);
+            const c = await r.json();
+            if (!c || c.err) { d = c; break; }
+            if ((c.closed_count||0) > 0 || hrs === windows[windows.length-1]) {
+                d = c; used = hrs; break;
+            }
+        }
+        if (!d || d.err) {
+            document.getElementById('sb-status').innerHTML = `<span class="badge-disabled">ERROR</span> ${d?.err||''}`;
+            return;
+        }
+
+        // Status meta
+        const dryBadge = d.dry_run ? '<span class="badge-dry">DRY-RUN</span>' : '<span class="badge-live">LIVE</span>';
+        const disBadge = d.enabled === false ? ' <span class="badge-disabled">OFF</span>' : '';
+        const open = Object.keys(d.open_positions||{}).length;
+        const cap = d.max_positions || 0;
+        document.getElementById('sb-status').innerHTML = `${dryBadge}${disBadge} · ${used}h window · open ${open}/${cap}`;
+
+        // Stats grid (same shape as SA)
+        renderStatsGrid('sb-stats', [
+            ...buildStatsFromAggregate(d, true),
+            { val: `${open}/${cap}`, lbl: 'Open' },
+        ]);
+
+        // Positions
+        const positions = d.open_positions || {};
+        const sbPositions = Object.keys(positions).sort().map(k => {
+            const p = positions[k] || {};
+            return {
+                coin: k,
+                side: p.side,
+                entry: p.entry,
+                engine: 'CONFLUENCE_' + (p.systems||[]).join('+'),
+                tp_pct: p.tp_pct,
+                sl_pct: p.sl_pct,
+                sl_at_be: p.sl_at_be,
+                mfe_pct: p.mfe_pct,
+                mae_pct: p.mae_pct,
+                ts: p.ts,
+            };
+        });
+        renderPositions('sb-positions', sbPositions);
+
+        // Engines
+        const byEng = d.by_engine || {};
+        const engKeys = Object.keys(byEng).sort();
+        const engines = engKeys.map(k => {
+            const v = byEng[k] || {};
+            return {
+                name: k, n: v.n || 0, w: v.w || 0, l: v.l || 0, b: v.b || 0,
+                wr_pct: v.wr_pct, pnl_usd: v.pnl_usd || 0,
+                paused: false,
+            };
+        });
+        renderEngines('sb-engines', engines, {});
+
+        // Footer — operational
         const fires = d.total_fires || 0;
-        const wins  = d.wins || 0;
-        const losses = d.losses || 0;
-        const totN = wins + losses;
-        const wr = totN > 0 ? (wins/totN*100).toFixed(1) : '—';
-        const pnlPct = (d.total_pnl_pct != null) ? Number(d.total_pnl_pct).toFixed(3) : '0.000';
         const pa = d.place_attempts || 0;
         const pf = d.place_filled || 0;
         const pn = d.place_no_fill || 0;
         const pe = d.place_error || 0;
-        // 12h $ aggregates from trade_ledger (canonical) — same shape as System A
-        const usdPnl = (d.total_pnl_usd != null) ? Number(d.total_pnl_usd) : null;
-        const usdColor = (usdPnl == null) ? '' : (usdPnl >= 0 ? 'color:var(--acid)' : 'color:#f88');
-        const usdStr = (usdPnl != null) ? `${usdPnl >= 0 ? '+' : ''}$${usdPnl.toFixed(2)}` : '—';
-        const wrWin = (d.wr_pct_window != null) ? `${d.wr_pct_window.toFixed(1)}%` : '—';
-        const wWin = d.wins_window || 0;
-        const lWin = d.losses_window || 0;
-        const avgW = (d.avg_win_usd != null) ? `+$${Number(d.avg_win_usd).toFixed(3)}` : '—';
-        const avgL = (d.avg_loss_usd != null) ? `$${Number(d.avg_loss_usd).toFixed(3)}` : '—';
-        // Compute 12h PnL as % of equity (meaningful, bounded). Equity is cached
-        // by loadDash() on a separate timer — falls back to '—' when not yet loaded.
-        // Replaces the cumulative-since-launch total_pnl_pct that grew unboundedly
-        // (was showing 99826%).
-        const eqRef = (window.__equity != null) ? Number(window.__equity) : null;
-        const pnlPct12h = (usdPnl != null && eqRef && eqRef > 0)
-            ? `${(usdPnl/eqRef*100).toFixed(3)}%`
-            : '—';
-        const winLabel = `${usedWindow}h`;
-        document.getElementById('confluence-stats').innerHTML = `
-            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL ${winLabel}</div></div>
-            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${pnlPct12h}</div><div class="metric-lbl">% PnL ${winLabel}</div></div>
-            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR ${winLabel}</div></div>
-            <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}</div><div class="metric-lbl">W/L ${winLabel}</div></div>
-            <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
-            <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
-            <div class="metric-cell"><div class="metric-val">${fires}</div><div class="metric-lbl">Fires (cum)</div></div>
-            <div class="metric-cell"><div class="metric-val">${open}/${cap}</div><div class="metric-lbl">Open / Cap</div></div>
-            <div class="metric-cell"><div class="metric-val">${d.last_scan_signals||0}/${d.last_scan_fires||0}</div><div class="metric-lbl">Last Sig/Fire</div></div>
-            <div class="metric-cell"><div class="metric-val">${pf}/${pa}</div><div class="metric-lbl">Filled/Attempts</div></div>
-            <div class="metric-cell"><div class="metric-val">${pn}/${pe}</div><div class="metric-lbl">NoFill/Err</div></div>
-            <div class="metric-cell"><div class="metric-val" style="color:var(--cyan)">${d.engine_stats?.signals_yielded||0}</div><div class="metric-lbl">Sigs/Scan</div></div>
-        `;
-
-        // Open positions table
-        const posDiv = document.getElementById('confluence-positions');
-        const positions = d.open_positions || {};
-        const posKeys = Object.keys(positions).sort();
-        if (posKeys.length === 0) {
-            posDiv.innerHTML = '<div style="opacity:0.5;font-style:italic;padding:8px 0">// no open confluence positions</div>';
-        } else {
-            const headerStyle = 'display:grid;grid-template-columns:80px 40px 80px 110px 55px 55px 60px 60px 80px;gap:6px;padding:6px 0;font-weight:bold;color:var(--blood);border-bottom:1px solid var(--blood);font-size:10px;letter-spacing:0.05em';
-            const rowStyle = 'display:grid;grid-template-columns:80px 40px 80px 110px 55px 55px 60px 60px 80px;gap:6px;padding:4px 0;border-bottom:1px solid rgba(255,0,0,0.08)';
-            const rows = posKeys.map(k => {
-                const p = positions[k] || {};
-                const sysStr = (p.systems || []).join('+');
-                const sideClass = p.side === 'BUY' ? 'side-L' : 'side-S';
-                const sideShort = p.side === 'BUY' ? 'L' : 'S';
-                const tp = p.tp_pct ? (p.tp_pct*100).toFixed(2)+'%' : '—';
-                const sl = (p.sl_at_be ? 'BE' : (p.sl_pct ? (p.sl_pct*100).toFixed(2)+'%' : '—'));
-                const tid = p.trade_id ? p.trade_id.slice(0,8) : '<span style="color:#f88">no_id</span>';
-                const ageMin = p.ts ? Math.floor((Date.now()/1000 - p.ts)/60) : 0;
-                // MFE/MAE — instant visibility into "is this trade going right"
-                const mfeRaw = p.mfe_pct;
-                const maeRaw = p.mae_pct;
-                const mfe = (mfeRaw != null) ? (mfeRaw*100).toFixed(2)+'%' : '—';
-                const mae = (maeRaw != null) ? (maeRaw*100).toFixed(2)+'%' : '—';
-                // Diagnostic flag: position is mfe=0 + mae<-0.3% = bad-entry pattern
-                const badEntry = (mfeRaw === 0 && maeRaw != null && maeRaw < -0.003);
-                const coinHtml = badEntry
-                    ? `<strong style="color:#f88">${k}</strong> <span style="opacity:0.4;font-size:9px">${ageMin}m</span>`
-                    : `<strong>${k}</strong> <span style="opacity:0.4;font-size:9px">${ageMin}m</span>`;
-                return `<div style="${rowStyle}">
-                    <div>${coinHtml}</div>
-                    <div><span class="pos-side ${sideClass}">${sideShort}</span></div>
-                    <div>${p.entry||'?'}</div>
-                    <div style="font-size:10px;opacity:0.85">${sysStr}</div>
-                    <div style="color:var(--acid)">${tp}</div>
-                    <div style="color:#f88">${sl}</div>
-                    <div style="color:var(--acid);font-size:10px">${mfe}</div>
-                    <div style="color:#f88;font-size:10px">${mae}</div>
-                    <div style="font-family:monospace;font-size:10px;opacity:0.7">${tid}</div>
-                </div>`;
-            }).join('');
-            posDiv.innerHTML = `<div style="${headerStyle}">
-                <div>COIN</div><div>SIDE</div><div>ENTRY</div><div>SYSTEMS</div><div>TP</div><div>SL</div><div>MFE</div><div>MAE</div><div>TRADE_ID</div>
-            </div>${rows}`;
-        }
-
-        // Last-scan reject distribution (only show non-zero buckets)
+        const sigsScan = d.engine_stats?.signals_yielded || 0;
+        const lastSig = d.last_scan_signals || 0;
+        const lastFire = d.last_scan_fires || 0;
+        const killed = (d.killed_coins||[]).length;
         const rl = d.rejects_last_scan || {};
-        const nonzero = Object.entries(rl).filter(([k,v]) => v > 0);
-        const rejDiv = document.getElementById('confluence-rejects');
-        let rejHtml = '';
-        if (nonzero.length > 0) {
-            const total = nonzero.reduce((s,[,v]) => s+v, 0);
-            rejHtml = '// last scan rejects (' + total + ' total): ' +
-                nonzero.map(([k,v]) => `<span style="color:var(--blood)">${k}=${v}</span>`).join(' · ');
-        } else {
-            rejHtml = '// last scan: no rejects';
-        }
-        // Engine gate drops (lifetime — shows the new combine-required filters working)
-        const es = d.engine_stats || {};
-        const gateDrops = [];
-        if (es.swing_no_funding_dropped) gateDrops.push(`swing_no_funding=${es.swing_no_funding_dropped}`);
-        if (es.day_alone_dropped) gateDrops.push(`day_alone=${es.day_alone_dropped}`);
-        if (es.funding_alone_dropped) gateDrops.push(`funding_alone=${es.funding_alone_dropped}`);
-        if (gateDrops.length > 0) {
-            rejHtml += `<br>// gate drops (lifetime): <span style="color:var(--oxide)">${gateDrops.join(' · ')}</span>`;
-        }
-        // Shadow tier (next-tier candidates evaluated without firing)
-        const shadowSize = d.shadow_universe_size;
-        const shadowSigs = d.shadow_signals_last_scan;
-        if (shadowSize !== undefined) {
-            rejHtml += `<br>// shadow tier: <span style="color:var(--cyan)">${shadowSize||0} candidates · ${shadowSigs||0} signals last scan</span> → <a href="/shadow_tier" style="color:var(--cyan)" target="_blank">/shadow_tier</a>`;
-        }
-        rejDiv.innerHTML = rejHtml;
-    } catch(e) {
-        console.error('confluence load err', e);
-        document.getElementById('conf-meta').textContent = 'fetch failed';
-    }
-}
-loadConfluence();
-setInterval(loadConfluence, 10000);
+        const rejectsList = Object.entries(rl).filter(([,v])=>v>0).map(([k,v])=>`${k}=${v}`);
+        const rejStr = rejectsList.length ? rejectsList.join(' ') : 'none';
+        const ftrLines = [
+            `// fires(cum) ${fires} · filled ${pf}/${pa} · no_fill ${pn} · err ${pe} · sigs/scan ${sigsScan}`,
+            `// last scan: sig ${lastSig} → fire ${lastFire} · rejects: ${rejStr}`,
+        ];
+        if (killed > 0) ftrLines.push(`// <span style="color:#f88">${killed} coins killed</span>`);
+        document.getElementById('sb-footer').innerHTML = ftrLines.join('<br>');
 
-async function loadPrecogStatus() {
-    try {
-        // Try 12h first; if no closes, widen the window so the panel stays
-        // populated for low-frequency engines (PIVOT typically fires 1-3x/day).
-        // 12h → 24h → 72h → 168h. First non-empty window wins.
-        const windowsToTry = [12, 24, 72, 168];
-        let d = null;
-        let usedWindow = 12;
-        for (const hrs of windowsToTry) {
-            const r = await fetch(`/precog_status?hours=${hrs}`);
-            const candidate = await r.json();
-            if (!candidate || candidate.err) {
-                d = candidate;
-                break;
-            }
-            if ((candidate.closed_count || 0) > 0 || hrs === windowsToTry[windowsToTry.length-1]) {
-                d = candidate;
-                usedWindow = hrs;
-                break;
-            }
-        }
-        if (!d || d.err) {
-            document.getElementById('precog-meta').textContent = 'error: ' + (d?.err || 'unknown');
-            return;
-        }
-        const usdPnl = (d.total_pnl_usd != null) ? Number(d.total_pnl_usd) : null;
-        const usdColor = (usdPnl == null) ? '' : (usdPnl >= 0 ? 'color:var(--acid)' : 'color:#f88');
-        const usdStr = (usdPnl != null) ? `${usdPnl >= 0 ? '+' : ''}$${usdPnl.toFixed(2)}` : '—';
-        const wrWin = (d.wr_pct_window != null) ? `${d.wr_pct_window.toFixed(1)}%` : '—';
-        const wWin = d.wins_window || 0;
-        const lWin = d.losses_window || 0;
-        const bWin = d.breakevens_window || 0;
-        const closed = d.closed_count || 0;
-        const avgW = (d.avg_win_usd != null) ? `+$${Number(d.avg_win_usd).toFixed(3)}` : '—';
-        const avgL = (d.avg_loss_usd != null) ? `$${Number(d.avg_loss_usd).toFixed(3)}` : '—';
-        const aw = Math.abs(Number(d.avg_win_usd || 0));
-        const al = Math.abs(Number(d.avg_loss_usd || 0));
-        const rr = (al > 0) ? (aw / al).toFixed(2) : '—';
-        const rrColor = (al > 0 && aw / al >= 1) ? 'color:var(--acid)' : 'color:#f88';
-        const disabled = d.disabled_engines || 'none';
-        const meta = document.getElementById('precog-meta');
-        const winLabel = `${usedWindow}h`;
-        meta.innerHTML = `<span style="color:var(--acid)">LIVE</span> · ${closed} closes/${winLabel} · disable=<span style="color:#f88">${disabled}</span>`;
-        document.getElementById('precog-stats').innerHTML = `
-            <div class="metric-cell"><div class="metric-val" style="${usdColor}">${usdStr}</div><div class="metric-lbl">$ PnL ${winLabel}</div></div>
-            <div class="metric-cell"><div class="metric-val">${wrWin}</div><div class="metric-lbl">WR ${winLabel}</div></div>
-            <div class="metric-cell"><div class="metric-val">${wWin}/${lWin}/${bWin}</div><div class="metric-lbl">W/L/B</div></div>
-            <div class="metric-cell"><div class="metric-val" style="color:var(--acid)">${avgW}</div><div class="metric-lbl">Avg Win</div></div>
-            <div class="metric-cell"><div class="metric-val" style="color:#f88">${avgL}</div><div class="metric-lbl">Avg Loss</div></div>
-            <div class="metric-cell"><div class="metric-val" style="${rrColor}">${rr}</div><div class="metric-lbl">R:R</div></div>
-            <div class="metric-cell"><div class="metric-val">${closed}</div><div class="metric-lbl">Closes</div></div>
-        `;
-        // Per-engine breakdown with auto-pause flag
-        const byEng = d.by_engine || {};
-        const ap = d.engine_auto_pause || {};
-        const engKeys = Object.keys(byEng).filter(k => k !== 'RECONCILED' && k !== '_untagged').sort();
-        if (engKeys.length === 0) {
-            document.getElementById('precog-engines').innerHTML = '<div style="opacity:0.5;font-style:italic">// no closes in window</div>';
-        } else {
-            const rows = engKeys.map(k => {
-                const v = byEng[k];
-                const apEng = ap[k] || {};
-                const pausedFlag = apEng.paused ? ' <span style="color:#f88;font-weight:bold">[PAUSED]</span>' : '';
-                const pnlColor = (v.pnl_usd >= 0) ? 'color:var(--acid)' : 'color:#f88';
-                const pnlStr = `${v.pnl_usd >= 0 ? '+' : ''}$${Number(v.pnl_usd).toFixed(3)}`;
-                const wrStr = (v.wr_pct != null) ? `${v.wr_pct}%` : '—';
-                return `<div style="display:grid;grid-template-columns:140px 50px 60px 80px 80px 1fr;gap:8px;padding:3px 0;border-bottom:1px solid rgba(255,0,0,0.06)">
-                    <div><strong>${k}</strong>${pausedFlag}</div>
-                    <div>n=${v.n}</div>
-                    <div>${v.w}/${v.l}/${v.b}</div>
-                    <div>${wrStr}</div>
-                    <div style="${pnlColor}">${pnlStr}</div>
-                    <div></div>
-                </div>`;
-            }).join('');
-            const headerStyle = 'display:grid;grid-template-columns:140px 50px 60px 80px 80px 1fr;gap:8px;padding:5px 0;font-weight:bold;color:var(--blood);border-bottom:1px solid var(--blood);font-size:10px;letter-spacing:0.05em';
-            document.getElementById('precog-engines').innerHTML = `<div style="${headerStyle}">
-                <div>ENGINE</div><div>n</div><div>W/L/B</div><div>WR</div><div>$ PnL</div><div></div>
-            </div>${rows}`;
-        }
     } catch(e) {
-        console.error('precog load err', e);
-        document.getElementById('precog-meta').textContent = 'fetch failed';
+        console.error('SB load err', e);
+        document.getElementById('sb-status').innerHTML = '<span class="badge-disabled">FETCH FAILED</span>';
     }
 }
 
-loadPrecogStatus();
-setInterval(loadPrecogStatus, 10000);
+loadSystemA();
+loadSystemB();
+setInterval(loadSystemA, 10000);
+setInterval(loadSystemB, 10000);
 
 async function loadMacroStrip() {
     try {
