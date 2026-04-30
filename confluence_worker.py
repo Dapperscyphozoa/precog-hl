@@ -703,6 +703,9 @@ def _register_position(coin, signal, fill_result):
             'ts': int(time.time()),
             'n_sys': signal['n_sys'],
             'systems': signal['systems'],
+            # 2026-04-30: preserve inverted_engine_name through to position dict
+            # so close events report INV_ tagged engine to ledger.
+            'inverted_engine_name': signal.get('inverted_engine_name'),
             'tp_pct': signal['tp_pct'],
             'sl_pct': signal['sl_pct'],
             'max_hold_s': signal['max_hold_s'],

@@ -1107,6 +1107,11 @@ def eval_coin(coin, bars_15m, now_ts=None):
         # (we still emit the move detected — just trade the other way)
         _STATS.setdefault('inverted_fires', 0)
         _STATS['inverted_fires'] += 1
+        # 2026-04-30 debug: log every inversion to confirm path
+        try:
+            import sys
+            print(f"[INVERSION] coin={coin} orig_side={_orig_side} new_side={best_side} eng={_inverted_engine}", flush=True)
+        except Exception: pass
 
     return {
         'coin': coin,
