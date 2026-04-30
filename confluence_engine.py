@@ -834,8 +834,17 @@ def eval_coin(coin, bars_15m, now_ts=None):
     # Other regimes have insufficient data → empty set → default-deny.
     # Re-populate as live data accumulates per regime.
     #
-    # Tunable: REGIME_ALLOWLIST_DISABLED=1 bypasses gate entirely.
-    if _os.environ.get('REGIME_ALLOWLIST_DISABLED', '0') != '1':
+    # 2026-04-30: DEFAULT FLIPPED TO DISABLED. Live diagnosis showed this
+    # gate was strangling SB — 28 valid 2+ system signals blocked in 5min
+    # (bear-calm regime). The other SB defenses are sufficient:
+    #   - _sb_engine_disabled blocks the 3 verified-loser SB combos
+    #   - BTCD directional filter blocks alt-vs-BTC fights
+    #   - Wilson auto-disable kills drift over 50 trades
+    #   - Bucket filter handles per (coin,engine,regime) MFE-rate
+    #   - Cluster throttle limits burst damage
+    # The regime_allowlist was a coarser version of all these combined.
+    # Set REGIME_ALLOWLIST_DISABLED=0 on Render to re-enable.
+    if _os.environ.get('REGIME_ALLOWLIST_DISABLED', '1') != '1':
         # Chop allowlist — 6 combos validated by 24h live audit (n>=3, $PnL>=0)
         _CHOP_ALLOWED = {
             'CONFLUENCE_DAY+NEWS',

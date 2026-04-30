@@ -139,6 +139,19 @@ class TestSBBTCDFilter(unittest.TestCase):
         self.assertIn('return True,', s)
 
 
+class TestRegimeAllowlistDisabled(unittest.TestCase):
+    """Verify regime_allowlist defaults to disabled — was strangling SB
+    in bear-calm regime (28+ valid signals blocked in 5min)."""
+
+    def test_regime_allowlist_default_disabled(self):
+        s = _src('confluence_engine.py')
+        self.assertIn(
+            "_os.environ.get('REGIME_ALLOWLIST_DISABLED', '1') != '1'",
+            s,
+            'REGIME_ALLOWLIST_DISABLED should default to 1 (gate bypassed)'
+        )
+
+
 class TestSALockout(unittest.TestCase):
     """Verify this PR doesn't change SA. precog.py should be untouched
     relative to origin/main."""
