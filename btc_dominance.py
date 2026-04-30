@@ -278,3 +278,30 @@ def status():
             'unknown': 'no data yet',
         }.get(c.get('state', 'unknown'), 'unknown'),
     }
+
+
+def _refresh_daemon():
+    """Background daemon — refresh BTCD state every REFRESH_INTERVAL_S.
+    Ensures gate is ready before first signal arrives."""
+    import time as _time
+    while True:
+        try:
+            if ENABLED:
+                _refresh()
+        except Exception as e:
+            _log(f'daemon err: {type(e).__name__}: {e}')
+        _time.sleep(REFRESH_INTERVAL_S)
+
+
+def _start_daemon():
+    """Start refresh daemon if not already running. Idempotent."""
+    if _CACHE.get('_daemon_started'):
+        return
+    _CACHE['_daemon_started'] = True
+    t = threading.Thread(target=_refresh_daemon, daemon=True, name='btcd_refresh')
+    t.start()
+    _log('refresh daemon started')
+
+
+# Auto-start daemon on module import
+_start_daemon()
