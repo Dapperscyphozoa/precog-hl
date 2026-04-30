@@ -11831,6 +11831,7 @@ def sb_per_coin():
 
 
 
+@app.route('/sb_killswitch_status', methods=['GET'])
 def sb_killswitch_status():
     """Read-only — full SB killed_coins dict with timestamps + reasons.
     /confluence flattens to list; this returns the underlying dict."""
