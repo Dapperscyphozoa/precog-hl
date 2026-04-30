@@ -165,6 +165,41 @@ def _misaligned(state, side):
     return False
 
 
+
+def _stats(rs):
+    n = len(rs)
+    w = sum(1 for r in rs if r['pnl_usd'] > 0)
+    l = sum(1 for r in rs if r['pnl_usd'] < 0)
+    s = sum(r['pnl_usd'] for r in rs)
+    wr = (100.0 * w / (w + l)) if (w + l) else 0.0
+    wlo = 100.0 * _wilson_lcb(w, w + l) if (w + l) else 0.0
+    mean = s / n if n else 0.0
+    return {
+        'n': n, 'wins': w, 'losses': l,
+        'wr_pct': round(wr, 1),
+        'wilson_wr_lcb_pct': round(wlo, 1),
+        'sum_pnl_usd': round(s, 4),
+        'mean_pnl_usd': round(mean, 5),
+    }
+
+
+def _by_regime_breakdown(classified_rows):
+    """Per-regime stats split by alignment."""
+    from collections import defaultdict
+    by_reg = defaultdict(list)
+    for r in classified_rows:
+        by_reg[r.get('regime') or 'unknown'].append(r)
+    out = {}
+    for reg, rs in by_reg.items():
+        out[reg] = {
+            'baseline': _stats(rs),
+            'aligned_only': _stats([r for r in rs if r['aligned']]),
+            'misaligned_only': _stats([r for r in rs if r['misaligned']]),
+            'flat_only': _stats([r for r in rs if not r['aligned'] and not r['misaligned']]),
+        }
+    return out
+
+
 def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
           trade_log_path=None):
     """Walk ledger, classify each closed trade by BTCD state at entry.
@@ -255,21 +290,6 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
     for c in classified:
         by_eng[c['engine']].append(c)
 
-    def _stats(rs):
-        n = len(rs)
-        w = sum(1 for r in rs if r['pnl_usd'] > 0)
-        l = sum(1 for r in rs if r['pnl_usd'] < 0)
-        s = sum(r['pnl_usd'] for r in rs)
-        wr = (100.0 * w / (w + l)) if (w + l) else 0.0
-        wlo = 100.0 * _wilson_lcb(w, w + l) if (w + l) else 0.0
-        mean = s / n if n else 0.0
-        return {
-            'n': n, 'wins': w, 'losses': l,
-            'wr_pct': round(wr, 1),
-            'wilson_wr_lcb_pct': round(wlo, 1),
-            'sum_pnl_usd': round(s, 4),
-            'mean_pnl_usd': round(mean, 5),
-        }
 
     engine_results = []
     for eng, eng_rows in by_eng.items():
@@ -333,10 +353,13 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
         'overall': {
             'baseline': total,
             'aligned_only': aligned_total,
+            'misaligned_only': _stats([c for c in classified if c['misaligned']]),
+            'flat_only': _stats([c for c in classified if not c['aligned'] and not c['misaligned']]),
             'non_misaligned': non_mis_total,
             'delta_aligned_vs_baseline_usd': round(
                 aligned_total['sum_pnl_usd'] - total['sum_pnl_usd'], 4),
         },
+        'by_regime': _by_regime_breakdown(classified),
         'engines': engine_results,
     }
 
