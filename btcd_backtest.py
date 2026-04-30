@@ -81,11 +81,11 @@ def _parse_ts(s):
         return None
 
 
-def _fetch_bars_chunk(coin, start_ms, end_ms):
+def _fetch_bars_chunk(coin, start_ms, end_ms, interval='1h'):
     """Single HL API call. Returns list of (ts_sec, close)."""
     body = json.dumps({
         'type': 'candleSnapshot',
-        'req': {'coin': coin, 'interval': '1h',
+        'req': {'coin': coin, 'interval': interval,
                 'startTime': start_ms, 'endTime': end_ms}
     }).encode()
     req = urllib.request.Request(
