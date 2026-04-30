@@ -11689,16 +11689,18 @@ def tighten_sl():
                 'is_long': is_long,
             })
 
-        # Get current open SL orders to determine current SL distance
+        # Use frontend_open_orders (captures trigger orders correctly,
+        # unlike info.open_orders which misses some trigger types).
+        # Same source /protect_all uses for accurate SL/TP detection.
         try:
-            open_orders = info.open_orders(WALLET)
+            open_orders = _cached_frontend_orders()
         except Exception:
             open_orders = []
         sl_by_coin = {}
         for o in open_orders:
-            c = o.get('coin')
+            c = (o.get('coin') or '').upper()
             ot = o.get('orderType', '')
-            if 'Stop' in ot or 'Sl' in ot:
+            if 'Stop' in ot:
                 trig = float(o.get('triggerPx', 0) or 0)
                 if c and trig:
                     sl_by_coin[c] = trig
@@ -11739,9 +11741,9 @@ def tighten_sl():
 
             # Cancel existing SL orders for this coin
             for o in open_orders:
-                if o.get('coin') != coin: continue
+                if (o.get('coin') or '').upper() != coin: continue
                 ot = o.get('orderType', '')
-                if 'Stop' in ot or 'Sl' in ot:
+                if 'Stop' in ot:
                     oid = o.get('oid')
                     if oid:
                         try: exchange.cancel(coin, oid)
