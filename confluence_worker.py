@@ -91,7 +91,7 @@ DEDUPE_WINDOW_S = int(os.environ.get('CONFLUENCE_DEDUPE_WINDOW_S', str(1 * 3600)
 # 5-30min) and long enough to register a separate event.
 
 # ─── FIX B: entry drift control ──────────────────────────────────────
-MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '86400'))
+MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '172800'))
 # 2026-04-26: was hardcoded 15min, then 60min — both empirically inadequate.
 # `latest_signal_ts` is the bar START of the most recent qualifying bar in
 # the 24h CONF_WINDOW. EMA crosses with all 6 filters passing are rare, so
@@ -99,11 +99,13 @@ MAX_SIGNAL_AGE_S = int(os.environ.get('CONFLUENCE_MAX_SIGNAL_AGE_S', '86400'))
 # we got: 15min→32 stale 0 fires, 60min→29 stale 0 fires (regime shifted
 # but same blocker pattern).
 #
-# Default 86400s = 24h, matches CONF_WINDOW_S — effectively defers to the
-# engine's own window as the upper bound. The IOC slippage buffer (0.08%
-# in _size_and_fire) is the natural price-staleness filter: if the market
-# drifted past entry, the order won't fill. Bad fills aren't possible.
-# Maximum signal flow with bounded execution risk.
+# 2026-04-30: bumped 86400 (24h) → 172800 (48h). Live diagnosis showed
+# signals at the 24h boundary getting rejected (rejects.stale grew from
+# 0 to 71 in 18min after the regime_allowlist fix unblocked engine
+# yields). The engine's CONF_WINDOW_S=86400 means latest_signal_ts is at
+# most 24h old by construction, so 48h tolerance is permissive without
+# being foolish. The IOC slippage buffer in _size_and_fire (0.08%) is
+# the natural price-staleness filter — bad fills are still impossible.
 #
 # Tighten via CONFLUENCE_MAX_SIGNAL_AGE_S env if no-fill IOCs spike API
 # usage. e.g. =14400 (4h), =3600 (60min, prior default).
