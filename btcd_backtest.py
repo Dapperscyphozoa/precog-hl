@@ -100,25 +100,44 @@ def _fetch_bars_chunk(coin, start_ms, end_ms):
         return []
 
 
-def _ensure_bars(start_ts, end_ts):
-    """Populate _BAR_CACHE for the requested span. Paginates if needed."""
+def _ensure_bars(start_ts, end_ts, interval='1h'):
+    """Populate _BAR_CACHE for the requested span. Paginates for sub-hour
+    intervals. Cache key includes interval — switching interval invalidates."""
     span_lo, span_hi = _BAR_CACHE['span']
-    if span_lo <= start_ts and span_hi >= end_ts and _BAR_CACHE['btc']:
+    if (_BAR_CACHE.get('interval') == interval
+            and span_lo <= start_ts and span_hi >= end_ts
+            and _BAR_CACHE['btc']):
         return  # cache covers it
 
-    # HL API caps at ~5000 bars per request. 1h bars × 5000 = ~208 days.
-    # In practice we want days=14 → ~336 bars. Single call is fine.
-    pad = 6 * 3600  # 6h padding for lookback windows
-    s_ms = (start_ts - pad) * 1000
-    e_ms = (end_ts + pad) * 1000
+    pad = 6 * 3600
+    minutes_per_bar = {'1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30, '1h': 60}
+    mpb = minutes_per_bar.get(interval, 60)
+    bars_per_call = 4500
+    chunk_sec = bars_per_call * mpb * 60
 
-    btc_bars = _fetch_bars_chunk('BTC', s_ms, e_ms)
-    eth_bars = _fetch_bars_chunk('ETH', s_ms, e_ms)
-    btc_bars.sort()
-    eth_bars.sort()
+    def _paginate(coin):
+        cur_lo = start_ts - pad
+        cur_hi_target = end_ts + pad
+        bars = []
+        while cur_lo < cur_hi_target:
+            cur_hi = min(cur_lo + chunk_sec, cur_hi_target)
+            chunk = _fetch_bars_chunk(coin, cur_lo * 1000, cur_hi * 1000, interval=interval)
+            if not chunk:
+                break
+            bars.extend(chunk)
+            cur_lo = cur_hi
+        # Dedupe by ts
+        seen = {}
+        for ts, c in bars:
+            seen[ts] = c
+        return sorted(seen.items())
+
+    btc_bars = _paginate('BTC')
+    eth_bars = _paginate('ETH')
     _BAR_CACHE['btc'] = btc_bars
     _BAR_CACHE['eth'] = eth_bars
     _BAR_CACHE['span'] = (start_ts - pad, end_ts + pad)
+    _BAR_CACHE['interval'] = interval
 
 
 def _close_at(bars, ts):
@@ -127,12 +146,13 @@ def _close_at(bars, ts):
     return valid[-1][1] if valid else None
 
 
-def _classify_btcd(entry_ts, lookback_h, threshold):
-    """Returns ('rising'|'falling'|'flat'|'no_data', btcd_pct_change)."""
+def _classify_btcd(entry_ts, lookback_sec, threshold):
+    """Returns ('rising'|'falling'|'flat'|'no_data', btcd_pct_change).
+    lookback_sec allows sub-hour windows (300=5m, 900=15m, 3600=1h)."""
     btc_at = _close_at(_BAR_CACHE['btc'], entry_ts)
-    btc_pre = _close_at(_BAR_CACHE['btc'], entry_ts - lookback_h * 3600)
+    btc_pre = _close_at(_BAR_CACHE['btc'], entry_ts - lookback_sec)
     eth_at = _close_at(_BAR_CACHE['eth'], entry_ts)
-    eth_pre = _close_at(_BAR_CACHE['eth'], entry_ts - lookback_h * 3600)
+    eth_pre = _close_at(_BAR_CACHE['eth'], entry_ts - lookback_sec)
     if not all([btc_at, btc_pre, eth_at, eth_pre]):
         return 'no_data', 0.0
     btcd_at = btc_at / eth_at
@@ -201,7 +221,7 @@ def _by_regime_breakdown(classified_rows):
 
 
 def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
-          trade_log_path=None):
+          trade_log_path=None, interval='1h', lookback_min=None):
     """Walk ledger, classify each closed trade by BTCD state at entry.
 
     engines: None=all, or set/list of engine names to filter (e.g.
@@ -280,7 +300,9 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
     # Fetch BTC + ETH bars covering the rows' time span
     span_lo = min(r['ts'] for r in rows)
     span_hi = max(r['ts'] for r in rows)
-    _ensure_bars(span_lo, span_hi)
+    # Convert lookback_h or lookback_min to seconds
+    lookback_sec = lookback_min * 60 if lookback_min is not None else lookback_h * 3600
+    _ensure_bars(span_lo, span_hi, interval=interval)
 
     btc_n = len(_BAR_CACHE['btc'])
     eth_n = len(_BAR_CACHE['eth'])
@@ -289,7 +311,7 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
     classified = []
     no_data_count = 0
     for r in rows:
-        state, chg = _classify_btcd(r['ts'], lookback_h, threshold)
+        state, chg = _classify_btcd(r['ts'], lookback_sec, threshold)
         if state == 'no_data':
             no_data_count += 1
             continue
@@ -358,6 +380,9 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
         'err': None,
         'config': {
             'lookback_h': lookback_h,
+            'lookback_min': lookback_min,
+            'lookback_sec': lookback_sec,
+            'interval': interval,
             'threshold_pct': threshold * 100,
             'days': days,
             'engines_filter': sorted(engines) if engines else None,

@@ -11529,14 +11529,21 @@ def btcd_backtest_endpoint():
         except Exception:
             lookback_h = 4
         try:
+            lookback_min = flask_request.args.get('lookback_min')
+            lookback_min = int(lookback_min) if lookback_min else None
+        except Exception:
+            lookback_min = None
+        try:
             threshold = float(flask_request.args.get('threshold', '0.002'))
         except Exception:
             threshold = 0.002
+        interval = flask_request.args.get('interval', '1h').strip() or '1h'
         try:
             days = int(flask_request.args.get('days', '14'))
         except Exception:
             days = 14
         return jsonify(_bb.audit(engines=engines, lookback_h=lookback_h,
+                                 lookback_min=lookback_min, interval=interval,
                                  threshold=threshold, days=days))
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
