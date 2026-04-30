@@ -8468,10 +8468,12 @@ def is_coin_execution_halted(coin):
 # ═══════════════════════════════════════════════════════
 # PROCESS — one coin per tick
 # ═══════════════════════════════════════════════════════
-def place_native_sl(coin, is_long, entry, size):
+def place_native_sl(coin, is_long, entry, size, engine=None):
     """Place HL native stop-loss order — executes server-side, no tick delay.
-    Uses per-coin SL from percoin_configs (OOS-tuned), then postmortem tuner overrides,
-    else global fallback. Returns the sl_pct that was used (for pos-dict enrichment).
+    Resolution order:
+      1. Per-engine env override CONF_<ENGINE_NAME>_SL_PCT (e.g. CONF_PIVOT_SL_PCT)
+      2. Per-coin SL from percoin_configs (OOS-tuned)
+      3. Global fallback STOP_LOSS_PCT
 
     CRITICAL: we do NOT trust the caller's `size` param. A reduce_only SL sized
     larger than the actual HL position is rejected. Between place() returning and
@@ -8489,6 +8491,37 @@ def place_native_sl(coin, is_long, entry, size):
                 if cfg and 'SL' in cfg:
                     sl_pct = cfg['SL']  # OOS-validated per-coin SL
         except Exception: pass
+        # 2026-04-30: per-engine SL override. Backtest-validated for engines
+        # whose MFE/MAE distribution differs from the default. Env name pattern:
+        # CONF_<ENGINE_NAME_UPPER>_SL_PCT (e.g. CONF_PIVOT_SL_PCT=0.005).
+        # If engine not passed, try to look up from SB state then SA state.
+        if not engine:
+            try:
+                # SB state first (more recent entries usually here)
+                import confluence_worker as _cw
+                _sb_pos = (_cw._state or {}).get('open_positions', {}).get(coin)
+                if _sb_pos:
+                    _sys = _sb_pos.get('systems', [])
+                    if _sys:
+                        engine = 'CONFLUENCE_' + '+'.join(_sys)
+            except Exception: pass
+        if not engine:
+            try:
+                # SA state
+                _sa_pos = (state or {}).get('positions', {}).get(coin)
+                if _sa_pos:
+                    engine = _sa_pos.get('engine')
+            except Exception: pass
+        if engine:
+            try:
+                _eng_clean = str(engine).upper().replace('CONFLUENCE_', '').replace('+', '_').replace('-', '_')
+                _env_key = f'CONF_{_eng_clean}_SL_PCT'
+                _env_val = os.environ.get(_env_key, '').strip()
+                if _env_val:
+                    sl_pct = float(_env_val)
+                    log(f"{coin} SL per-engine override: {engine}→{_env_key}={sl_pct*100:.2f}%")
+            except Exception as _eo:
+                pass  # fall through to global / per-coin
         sl_pct = _apply_sl_cap(sl_pct)
         # TUNER OVERRIDE REMOVED 2026-04-22. See place_native_tp for rationale.
         # SL bounds in postmortem/bounds.py allow 0.3%-5% drift from closures,
@@ -8637,7 +8670,7 @@ def _shadow_record_rejection(coin, side, reason, meta=None):
         pass
 
 
-def place_native_tp(coin, is_long, entry, size):
+def place_native_tp(coin, is_long, entry, size, engine=None):
     """Place HL native take-profit order. Uses per-coin config if elite,
     fallback 5% TP otherwise. Contract enforcement: EVERY position gets a TP.
     Returns the tp_pct that was used, or None if placement failed."""
@@ -8653,6 +8686,34 @@ def place_native_tp(coin, is_long, entry, size):
             else:
                 return None
         tp_pct = cfg['TP']
+        # 2026-04-30: per-engine TP override. Backtest evidence shows mean-reversion
+        # engines (PIVOT, FUNDING_MR) need TP=0.8% to capture 60-66% WR; trend-following
+        # engines need TP>=1.5%. Env name pattern: CONF_<ENGINE>_TP_PCT.
+        if not engine:
+            try:
+                import confluence_worker as _cw
+                _sb_pos = (_cw._state or {}).get('open_positions', {}).get(coin)
+                if _sb_pos:
+                    _sys = _sb_pos.get('systems', [])
+                    if _sys:
+                        engine = 'CONFLUENCE_' + '+'.join(_sys)
+            except Exception: pass
+        if not engine:
+            try:
+                _sa_pos = (state or {}).get('positions', {}).get(coin)
+                if _sa_pos:
+                    engine = _sa_pos.get('engine')
+            except Exception: pass
+        if engine:
+            try:
+                _eng_clean = str(engine).upper().replace('CONFLUENCE_', '').replace('+', '_').replace('-', '_')
+                _env_key = f'CONF_{_eng_clean}_TP_PCT'
+                _env_val = os.environ.get(_env_key, '').strip()
+                if _env_val:
+                    tp_pct = float(_env_val)
+                    log(f"{coin} TP per-engine override: {engine}→{_env_key}={tp_pct*100:.2f}%")
+            except Exception as _eo:
+                pass
         # TUNER OVERRIDE REMOVED 2026-04-22. The postmortem tuner's bounds
         # (bounds.py line 103: tp.pct bounded 0.004-0.20) allow it to drift
         # TP all the way down to 0.4%. In practice it was writing ~2.6% TP
