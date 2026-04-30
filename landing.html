@@ -1181,38 +1181,24 @@ function buildStatsFromAggregate(d, includeOps) {
     return stats;
 }
 
-async function loadSystemA() {
+async function renderSystemA(d, used) {
     try {
-        // Window ladder
-        const windows = [12, 24, 72, 168];
-        let d = null, used = 12;
-        for (const hrs of windows) {
-            const r = await fetch(`/precog_status?hours=${hrs}`);
-            const c = await r.json();
-            if (!c || c.err) { d = c; break; }
-            if ((c.closed_count||0) > 0 || hrs === windows[windows.length-1]) {
-                d = c; used = hrs; break;
-            }
-        }
         if (!d || d.err) {
             document.getElementById('sa-status').innerHTML = `<span class="badge-disabled">ERROR</span> ${d?.err||''}`;
             return;
         }
 
-        // Status meta
         const enabled = d.enabled !== false;
         const disabled = d.disabled_engines || '';
         const liveBadge = enabled ? '<span class="badge-live">LIVE</span>' : '<span class="badge-disabled">OFF</span>';
         const disText = disabled ? ` · disable=<span style="color:#f88">${disabled}</span>` : '';
         document.getElementById('sa-status').innerHTML = `${liveBadge} · ${used}h window${disText}`;
 
-        // Pull SA's open positions from /dash (filter to non-CONFLUENCE engines)
         let saPositions = [];
         try {
             const dr = await fetch('/dash');
             const dj = await dr.json();
             const all = dj.positions || [];
-            // SA = positions whose engine is not CONFLUENCE_* (or has no engine and not in cw_open)
             saPositions = all.filter(p => !((p.engine||'').startsWith('CONFLUENCE_')))
                              .map(p => ({
                                  coin: p.coin,
@@ -1226,16 +1212,13 @@ async function loadSystemA() {
                              }));
         } catch (_) {}
 
-        // Stats grid
         renderStatsGrid('sa-stats', [
             ...buildStatsFromAggregate(d, false),
             { val: saPositions.length, lbl: 'Open' },
         ]);
 
-        // Positions
         renderPositions('sa-positions', saPositions);
 
-        // Engines
         const byEng = d.by_engine || {};
         const ap = d.engine_auto_pause || {};
         const engKeys = Object.keys(byEng).filter(k => k !== 'RECONCILED' && k !== '_untagged').sort();
@@ -1249,68 +1232,47 @@ async function loadSystemA() {
         });
         renderEngines('sa-engines', engines, ap);
 
-        // Footer — operational
         const ftr = [];
         ftr.push(`risk: ${(d.risk_pct||0)*100}%`);
         if (d.losses_window != null) ftr.push(`losses_window: ${d.losses_window}`);
         document.getElementById('sa-footer').innerHTML = `// ${ftr.join(' · ')}`;
 
     } catch(e) {
-        console.error('SA load err', e);
-        document.getElementById('sa-status').innerHTML = '<span class="badge-disabled">FETCH FAILED</span>';
+        console.error('SA render err', e);
+        document.getElementById('sa-status').innerHTML = '<span class="badge-disabled">RENDER FAILED</span>';
     }
 }
 
-async function loadSystemB() {
+async function renderSystemB(d, used) {
     try {
-        const windows = [12, 24, 72, 168];
-        let d = null, used = 12;
-        for (const hrs of windows) {
-            const r = await fetch(`/confluence?hours=${hrs}`);
-            const c = await r.json();
-            if (!c || c.err) { d = c; break; }
-            if ((c.closed_count||0) > 0 || hrs === windows[windows.length-1]) {
-                d = c; used = hrs; break;
-            }
-        }
         if (!d || d.err) {
             document.getElementById('sb-status').innerHTML = `<span class="badge-disabled">ERROR</span> ${d?.err||''}`;
             return;
         }
 
-        // Status meta
         const dryBadge = d.dry_run ? '<span class="badge-dry">DRY-RUN</span>' : '<span class="badge-live">LIVE</span>';
         const disBadge = d.enabled === false ? ' <span class="badge-disabled">OFF</span>' : '';
         const open = Object.keys(d.open_positions||{}).length;
         const cap = d.max_positions || 0;
         document.getElementById('sb-status').innerHTML = `${dryBadge}${disBadge} · ${used}h window · open ${open}/${cap}`;
 
-        // Stats grid (same shape as SA)
         renderStatsGrid('sb-stats', [
             ...buildStatsFromAggregate(d, true),
             { val: `${open}/${cap}`, lbl: 'Open' },
         ]);
 
-        // Positions
         const positions = d.open_positions || {};
         const sbPositions = Object.keys(positions).sort().map(k => {
             const p = positions[k] || {};
             return {
-                coin: k,
-                side: p.side,
-                entry: p.entry,
+                coin: k, side: p.side, entry: p.entry,
                 engine: 'CONFLUENCE_' + (p.systems||[]).join('+'),
-                tp_pct: p.tp_pct,
-                sl_pct: p.sl_pct,
-                sl_at_be: p.sl_at_be,
-                mfe_pct: p.mfe_pct,
-                mae_pct: p.mae_pct,
-                ts: p.ts,
+                tp_pct: p.tp_pct, sl_pct: p.sl_pct, sl_at_be: p.sl_at_be,
+                mfe_pct: p.mfe_pct, mae_pct: p.mae_pct, ts: p.ts,
             };
         });
         renderPositions('sb-positions', sbPositions);
 
-        // Engines
         const byEng = d.by_engine || {};
         const engKeys = Object.keys(byEng).sort();
         const engines = engKeys.map(k => {
@@ -1323,7 +1285,6 @@ async function loadSystemB() {
         });
         renderEngines('sb-engines', engines, {});
 
-        // Footer — operational
         const fires = d.total_fires || 0;
         const pa = d.place_attempts || 0;
         const pf = d.place_filled || 0;
@@ -1344,15 +1305,48 @@ async function loadSystemB() {
         document.getElementById('sb-footer').innerHTML = ftrLines.join('<br>');
 
     } catch(e) {
-        console.error('SB load err', e);
-        document.getElementById('sb-status').innerHTML = '<span class="badge-disabled">FETCH FAILED</span>';
+        console.error('SB render err', e);
+        document.getElementById('sb-status').innerHTML = '<span class="badge-disabled">RENDER FAILED</span>';
     }
 }
 
-loadSystemA();
-loadSystemB();
-setInterval(loadSystemA, 10000);
-setInterval(loadSystemB, 10000);
+// Coordinated loader: both panels use the SAME window so SA vs SB are
+// comparable apples-to-apples. Pick the smallest window that gives BOTH
+// systems at least one closed trade — fall back through 12h, 24h, 72h, 168h.
+async function _probeWindow(endpoint, hrs) {
+    try {
+        const r = await fetch(`${endpoint}?hours=${hrs}`);
+        const d = await r.json();
+        return d && !d.err ? d : null;
+    } catch (_) { return null; }
+}
+
+async function loadSystems() {
+    const windows = [12, 24, 72, 168];
+    let chosen = 12;
+    let saData = null, sbData = null;
+    for (const hrs of windows) {
+        const [a, b] = await Promise.all([
+            _probeWindow('/precog_status', hrs),
+            _probeWindow('/confluence', hrs),
+        ]);
+        saData = a; sbData = b;
+        const aN = (a && a.closed_count) || 0;
+        const bN = (b && b.closed_count) || 0;
+        // Stop when BOTH have closes, or last window
+        if ((aN > 0 && bN > 0) || hrs === windows[windows.length-1]) {
+            chosen = hrs;
+            break;
+        }
+    }
+    await Promise.all([
+        renderSystemA(saData, chosen),
+        renderSystemB(sbData, chosen),
+    ]);
+}
+
+loadSystems();
+setInterval(loadSystems, 10000);
 
 async function loadMacroStrip() {
     try {
