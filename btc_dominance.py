@@ -128,16 +128,19 @@ def _get_regime():
 
 
 def _fetch_close_now_and_pre(coin, lookback_min):
-    """Fetch latest 1m close + close lookback_min ago.
+    """Fetch latest close + close lookback_min ago.
 
-    Pads fetch by 10 minutes to ensure both bars are available.
+    Uses 1h candles for low rate-limit footprint (1m candles get HL 429s).
+    Rounds lookback up to whole hours: 60min→1h ago, 360min→6h ago, etc.
+    Min lookback = 1h (60min). Sub-hour lookback uses 1h granularity.
     """
+    lookback_h = max(1, (lookback_min + 30) // 60)  # round to nearest hour, min 1h
     now_ms = int(time.time() * 1000)
-    span_min = lookback_min + 10
-    start_ms = now_ms - span_min * 60 * 1000
+    span_h = lookback_h + 2  # +2h padding
+    start_ms = now_ms - span_h * 3600 * 1000
     body = json.dumps({
         'type': 'candleSnapshot',
-        'req': {'coin': coin, 'interval': '1m',
+        'req': {'coin': coin, 'interval': '1h',
                 'startTime': start_ms, 'endTime': now_ms}
     }).encode()
     _hl_throttle()
@@ -146,13 +149,13 @@ def _fetch_close_now_and_pre(coin, lookback_min):
         headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=10) as r:
         data = json.loads(r.read())
-    if not isinstance(data, list) or len(data) < lookback_min:
+    if not isinstance(data, list) or len(data) < lookback_h + 1:
         return None, None
     closes = [float(b.get('c', 0) or 0) for b in data if b.get('c')]
-    if len(closes) < lookback_min:
+    if len(closes) < lookback_h + 1:
         return None, None
-    # latest close, close lookback_min bars back from end
-    return closes[-1], closes[-lookback_min]
+    # latest close, close lookback_h bars back from end
+    return closes[-1], closes[-(lookback_h + 1)]
 
 
 def _refresh():
