@@ -11652,6 +11652,139 @@ def sb_clear_all_positions():
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/tighten_sl', methods=['POST', 'GET'])
+def tighten_sl():
+    """Tighten SL on ALL open positions to a hard cap.
+    For each position whose current SL is wider than max_loss_pct,
+    cancel and replace with a tighter SL. Caps additional drawdown.
+
+    Query params:
+      ?max_loss_pct=0.008   target SL distance from entry (default 0.008 = 0.8%)
+      ?token=               WEBHOOK_SECRET (required)
+      ?dryrun=1             report what would change, no action
+    """
+    from flask import request as _req
+    try:
+        token = _req.args.get('token') or _req.values.get('token','')
+        if token != os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026'):
+            return jsonify({'err': 'unauthorized'}), 401
+        max_loss_pct = float(_req.args.get('max_loss_pct', '0.008'))
+        dryrun = _req.args.get('dryrun') == '1'
+
+        # Pull all live platform positions
+        us = _cached_user_state()
+        positions = []
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            sz = float(p.get('szi', 0))
+            if sz == 0: continue
+            coin = p.get('coin')
+            entry = float(p.get('entryPx', 0))
+            if not entry: continue
+            is_long = sz > 0
+            positions.append({
+                'coin': coin,
+                'entry': entry,
+                'size': abs(sz),
+                'is_long': is_long,
+            })
+
+        # Get current open SL orders to determine current SL distance
+        try:
+            open_orders = info.open_orders(WALLET)
+        except Exception:
+            open_orders = []
+        sl_by_coin = {}
+        for o in open_orders:
+            c = o.get('coin')
+            ot = o.get('orderType', '')
+            if 'Stop' in ot or 'Sl' in ot:
+                trig = float(o.get('triggerPx', 0) or 0)
+                if c and trig:
+                    sl_by_coin[c] = trig
+
+        actions = []
+        for p in positions:
+            coin = p['coin']
+            entry = p['entry']
+            is_long = p['is_long']
+            cur_sl = sl_by_coin.get(coin)
+
+            if cur_sl:
+                # Current SL distance from entry as fraction
+                cur_dist = abs(cur_sl - entry) / entry
+            else:
+                cur_dist = None  # No SL — definitely needs one
+
+            target_sl_px = entry * (1 - max_loss_pct) if is_long else entry * (1 + max_loss_pct)
+
+            # Skip if current SL is already tighter
+            if cur_dist is not None and cur_dist <= max_loss_pct + 0.0001:
+                actions.append({
+                    'coin': coin, 'action': 'skip',
+                    'reason': f'cur_sl_dist={cur_dist:.4f} <= target={max_loss_pct:.4f}',
+                    'cur_sl': cur_sl, 'entry': entry,
+                })
+                continue
+
+            if dryrun:
+                actions.append({
+                    'coin': coin, 'action': 'would_tighten',
+                    'cur_sl': cur_sl, 'cur_dist_pct': round(cur_dist*100, 3) if cur_dist else None,
+                    'new_sl_px': round(target_sl_px, 8),
+                    'new_dist_pct': round(max_loss_pct*100, 3),
+                    'entry': entry, 'is_long': is_long,
+                })
+                continue
+
+            # Cancel existing SL orders for this coin
+            for o in open_orders:
+                if o.get('coin') != coin: continue
+                ot = o.get('orderType', '')
+                if 'Stop' in ot or 'Sl' in ot:
+                    oid = o.get('oid')
+                    if oid:
+                        try: exchange.cancel(coin, oid)
+                        except Exception: pass
+
+            # Place new tighter SL
+            try:
+                trigger_px = float(round_price(coin, target_sl_px))
+                limit_px = float(round_price(coin, trigger_px * (0.98 if not is_long else 1.02)))
+                sl_size = float(round_size(coin, p['size']))
+                sl_side = not is_long
+                r = exchange.order(coin, sl_side, sl_size, limit_px,
+                                   {'trigger': {'triggerPx': trigger_px, 'isMarket': True, 'tpsl': 'sl'}},
+                                   reduce_only=True)
+                status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+                if 'error' in status:
+                    actions.append({'coin': coin, 'action': 'failed',
+                                    'error': status['error'][:120]})
+                else:
+                    actions.append({
+                        'coin': coin, 'action': 'tightened',
+                        'old_sl': cur_sl, 'new_sl': trigger_px,
+                        'old_dist_pct': round(cur_dist*100, 3) if cur_dist else None,
+                        'new_dist_pct': round(max_loss_pct*100, 3),
+                    })
+            except Exception as e:
+                actions.append({'coin': coin, 'action': 'error', 'error': str(e)[:120]})
+
+        summary = {
+            'dryrun': dryrun,
+            'max_loss_pct': max_loss_pct,
+            'positions_scanned': len(positions),
+            'tightened': sum(1 for a in actions if a['action'] == 'tightened'),
+            'skipped': sum(1 for a in actions if a['action'] == 'skip'),
+            'would_tighten': sum(1 for a in actions if a['action'] == 'would_tighten'),
+            'failed': sum(1 for a in actions if a['action'] in ('failed','error')),
+            'actions': actions,
+        }
+        return jsonify(summary)
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 
 @app.route('/sb_per_coin', methods=['GET'])
 def sb_per_coin():
