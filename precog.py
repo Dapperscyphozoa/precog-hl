@@ -12496,6 +12496,115 @@ if __name__ == '__main__':
     t = threading.Thread(target=main, daemon=True)
     t.start()
 
+    # 2026-04-30: periodic naked-position protection sweep.
+    # Belt-and-braces guard for entries where SL placement raced the
+    # entry fill — protect_all() finds positions without exchange-level
+    # SL/TP and attaches them. Idempotent (skips already_protected).
+    # Runs every NAKED_PROTECT_INTERVAL_S seconds (default 60s).
+    def _naked_protect_sweep():
+        """Background daemon: every N sec, scan all open positions and
+        attach missing SL/TP. Uses per-coin config or env defaults."""
+        import time as _t
+        interval_s = int(os.environ.get('NAKED_PROTECT_INTERVAL_S', '60'))
+        sl_pct_env = os.environ.get('NAKED_PROTECT_SL_PCT', '')
+        tp_pct_env = os.environ.get('NAKED_PROTECT_TP_PCT', '')
+        # Wait 90s after boot so initial position state is loaded
+        _t.sleep(90)
+        log(f"[naked_protect] daemon started (interval={interval_s}s, sl={sl_pct_env or 'per-coin'}, tp={tp_pct_env or 'per-coin'})")
+        while True:
+            try:
+                us = _cached_user_state()
+                fo = _cached_frontend_orders()
+                if not us or not isinstance(us.get('assetPositions'), list):
+                    _t.sleep(interval_s); continue
+
+                # Build coverage map
+                from collections import defaultdict as _dd
+                cov = _dd(lambda: {'sl': False, 'tp': False})
+                for o in fo:
+                    c = (o.get('coin') or '').upper()
+                    ot = o.get('orderType', '')
+                    if 'Stop' in ot: cov[c]['sl'] = True
+                    elif 'Take' in ot: cov[c]['tp'] = True
+
+                naked = []
+                for ap in us.get('assetPositions', []):
+                    p = ap.get('position', {})
+                    sz = float(p.get('szi', 0) or 0)
+                    if sz == 0: continue
+                    coin = (p.get('coin') or '').upper()
+                    entry = float(p.get('entryPx', 0) or 0)
+                    if not entry: continue
+                    c = cov[coin]
+                    if not (c['sl'] and c['tp']):
+                        naked.append({
+                            'coin': coin, 'entry': entry,
+                            'size': abs(sz), 'is_long': sz > 0,
+                            'has_sl': c['sl'], 'has_tp': c['tp'],
+                        })
+
+                if not naked:
+                    _t.sleep(interval_s); continue
+
+                log(f"[naked_protect] {len(naked)} unprotected positions found")
+                for np in naked:
+                    coin = np['coin']
+                    entry = np['entry']
+                    size = np['size']
+                    is_long = np['is_long']
+
+                    # Resolve SL/TP pct
+                    sl_pct = float(sl_pct_env) if sl_pct_env else 0.008
+                    tp_pct = float(tp_pct_env) if tp_pct_env else 0.015
+                    try:
+                        if percoin_configs.ELITE_MODE and percoin_configs.is_elite(coin):
+                            cfg = percoin_configs.get_config(coin)
+                            if not sl_pct_env:
+                                sl_pct = cfg.get('SL', sl_pct)
+                            if not tp_pct_env:
+                                tp_pct = cfg.get('TP', tp_pct)
+                    except Exception:
+                        pass
+
+                    # Attach missing SL
+                    if not np['has_sl']:
+                        try:
+                            trig = entry * (1 - sl_pct) if is_long else entry * (1 + sl_pct)
+                            trig = float(round_price(coin, trig))
+                            limit = float(round_price(coin, trig * (0.98 if not is_long else 1.02)))
+                            sz_r = float(round_size(coin, size))
+                            r = exchange.order(coin, not is_long, sz_r, limit,
+                                               {'trigger': {'triggerPx': trig, 'isMarket': True, 'tpsl': 'sl'}},
+                                               reduce_only=True)
+                            log(f"[naked_protect] {coin} SL attached @ {trig} ({sl_pct*100:.2f}%)")
+                        except Exception as e:
+                            log(f"[naked_protect] {coin} SL err: {str(e)[:120]}")
+
+                    # Attach missing TP
+                    if not np['has_tp']:
+                        try:
+                            trig = entry * (1 + tp_pct) if is_long else entry * (1 - tp_pct)
+                            trig = float(round_price(coin, trig))
+                            limit = float(round_price(coin, trig * (1.02 if not is_long else 0.98)))
+                            sz_r = float(round_size(coin, size))
+                            r = exchange.order(coin, not is_long, sz_r, limit,
+                                               {'trigger': {'triggerPx': trig, 'isMarket': True, 'tpsl': 'tp'}},
+                                               reduce_only=True)
+                            log(f"[naked_protect] {coin} TP attached @ {trig} ({tp_pct*100:.2f}%)")
+                        except Exception as e:
+                            log(f"[naked_protect] {coin} TP err: {str(e)[:120]}")
+
+                    _t.sleep(0.5)  # rate-limit between coins
+
+            except Exception as e:
+                log(f"[naked_protect] sweep err: {str(e)[:160]}")
+            _t.sleep(interval_s)
+
+    if os.environ.get('NAKED_PROTECT_ENABLED', '1') == '1':
+        threading.Thread(target=_naked_protect_sweep, daemon=True, name='naked_protect').start()
+    else:
+        log("[naked_protect] disabled (NAKED_PROTECT_ENABLED=0)")
+
     # 2026-04-25: atomic_reconciler daemon — wakes every 1s to check for
     # PROVISIONAL ledger rows (atomic entries pending size confirmation).
     # When actual fill differs from intent_size by >0.5%, cancels old SL/TP
