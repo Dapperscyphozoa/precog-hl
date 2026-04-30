@@ -219,13 +219,33 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
         engines = set(engines) if not isinstance(engines, set) else engines
 
     cutoff = time.time() - days * 86400
+    # Two-pass: collect regime+side from ENTRY/ENTRY_UPDATE rows by trade_id,
+    # then attach on CLOSE. Regime is set on ENTRY rows, not CLOSE.
+    entry_meta = {}
     rows = []
     with open(path) as f:
         reader = csv.DictReader(f)
         for r in reader:
-            if r.get('event_type') != 'CLOSE':
+            ev = r.get('event_type', '')
+            tid = (r.get('trade_id') or '').strip()
+            if not tid:
                 continue
-            eng = (r.get('engine') or '').strip()
+            if ev in ('ENTRY', 'ENTRY_UPDATE'):
+                m = entry_meta.setdefault(tid, {})
+                reg = (r.get('regime') or '').strip()
+                if reg:
+                    m['regime'] = reg
+                sd = (r.get('side') or '').strip().upper()
+                if sd:
+                    m['side'] = sd
+                en = (r.get('engine') or '').strip()
+                if en:
+                    m['engine'] = en
+                continue
+            if ev != 'CLOSE':
+                continue
+            meta = entry_meta.get(tid, {})
+            eng = (r.get('engine') or '').strip() or meta.get('engine', '')
             if not eng or eng in NOISE_ENGINES:
                 continue
             if engines is not None and eng not in engines:
@@ -245,9 +265,12 @@ def audit(engines=None, lookback_h=4, threshold=0.002, days=14,
                 'ts': ts,
                 'engine': eng,
                 'coin': (r.get('coin') or '').strip(),
-                'side': (r.get('side') or '').strip().upper(),
+                'side': (r.get('side') or meta.get('side', '')).strip().upper(),
                 'pnl_usd': pnl_usd,
                 'pnl_pct': pnl_pct,
+                'regime': meta.get('regime')
+                          or (r.get('regime') or '').strip()
+                          or 'unknown',
             })
 
     if not rows:
