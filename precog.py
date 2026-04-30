@@ -9252,7 +9252,6 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                     log(f"{coin} {sig} {signal_engine} ORTHO_SHADOW: confirms={_confirms}<{_need} (NOT BLOCKED)")
         except Exception:
             pass  # fail-open on confirmation system error
-        signal_engine = None
 
     # 2026-04-27: 5m confirmation gate. Drop signal if recent 5m momentum
     # strongly opposes the trade direction.
