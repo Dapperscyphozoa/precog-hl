@@ -92,6 +92,8 @@ jobs:
             fetch confluence_trades    '/confluence/trades?hours=12' ; echo ","
             fetch confluence_status    '/confluence?hours=12' ; echo ","
             fetch postmortem_status    '/postmortem/status' ; echo ","
+            fetch postmortem_vetos     '/postmortem/vetos' ; echo ","
+            fetch postmortem_params    '/postmortem/params' ; echo ","
             fetch regime_status        '/regime'
             echo "}"
           } > "$OUT"
