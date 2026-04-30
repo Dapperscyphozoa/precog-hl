@@ -11576,6 +11576,35 @@ def edge_audit_endpoint():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/sb_killswitch_status', methods=['GET'])
+def sb_killswitch_status():
+    """Read-only — full SB killed_coins dict with timestamps + reasons.
+    /confluence flattens to list; this returns the underlying dict."""
+    try:
+        import confluence_worker as _cw
+        with _cw._state_lock:
+            killed = dict(_cw._state.get('killed_coins', {}))
+            coin_stats = dict(_cw._state.get('coin_stats', {}))
+            slip_samples = {c: list(arr) for c, arr in _cw._state.get('slippage_samples', {}).items()}
+        return jsonify({
+            'thresholds': {
+                'decay_min_trades': _cw.DECAY_MIN_TRADES,
+                'decay_wr_threshold': _cw.DECAY_WR_THRESHOLD,
+                'decay_pnl_threshold': _cw.DECAY_PNL_THRESHOLD,
+                'slippage_kill_threshold_pct': _cw.SLIPPAGE_KILL_THRESHOLD_PCT,
+                'slippage_min_samples': _cw.SLIPPAGE_MIN_SAMPLES,
+            },
+            'killed_coins': killed,
+            'coin_stats_top10': dict(sorted(coin_stats.items(),
+                                             key=lambda x: -(x[1].get('n', 0)))[:10]),
+            'slippage_samples_summary': {c: {'n': len(arr), 'avg_pct': round(sum(arr)/max(len(arr),1), 4)}
+                                          for c, arr in slip_samples.items()},
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-400:]}), 500
+
+
 @app.route('/coin_killswitch_status', methods=['GET'])
 def coin_killswitch_status():
     """Read-only — dump coin_killswitch state including disabled_at timestamps.
