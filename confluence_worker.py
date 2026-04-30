@@ -479,12 +479,18 @@ def _size_and_fire(coin, signal, equity):
     # (with all gates passed, fires still 0). 30bps default gives much higher
     # fill rate. Operator can tune via env CONFLUENCE_IOC_SLIP_BUFFER.
     is_buy = signal['side'] == 'BUY'
-    _slip_buf = float(os.environ.get('CONFLUENCE_IOC_SLIP_BUFFER', '0.0015'))
+    _slip_buf = float(os.environ.get('CONFLUENCE_IOC_SLIP_BUFFER', '0.003'))
     # 2026-04-27: 0.003 → 0.0015. Tightens IOC price tolerance from 30bp to
     # 15bp. Trades that fill come in at better avg prices (less slippage tax);
     # trades that would have filled at >15bp from mid become no_fills (safer
     # — that's adversely-moving market, we don't want to chase it). Net:
     # higher avg fill quality, slightly lower fill rate. Tunable via env.
+    # 2026-04-30: reverted to 0.003 (30bp). Fill rate matters more than
+    # slippage quality right now — total_fires has been flat for 26h.
+    # 30bp tolerance was the original design that produced live fires.
+    # IOC sliding from 15bp to 30bp adds ~15bp worst-case slippage per
+    # trade; with 30bp TP that's still 15bp net upside. Acceptable
+    # tradeoff while we restore signal flow.
     px = entry * (1 + _slip_buf) if is_buy else entry * (1 - _slip_buf)
 
     # Compute TP/SL prices
