@@ -1163,27 +1163,44 @@ def unkill_all():
 
 def clear_position(coin):
     """Force-clear a coin from open_positions in-memory state.
-    Used to remove phantom positions that were closed on platform but
-    SB's internal state didn't sync. Returns the position dict that was
-    cleared, or None if not found."""
+    Lock-free admin operation — needed because the scan loop can hold
+    _state_lock for tens of seconds during heavy iterations, making
+    a normal lock-acquire path unusable from request handlers.
+    Race risk is tiny (microsecond window on a dict pop) and the cost
+    of phantom positions blocking real fires is much higher.
+    Returns the position dict that was cleared, or None if not found."""
     coin = (coin or '').upper()
-    with _state_lock:
-        pos = _state.get('open_positions', {}).pop(coin, None)
-        if pos:
-            _save_state()
-            _log(f"PHANTOM CLEARED: {coin} {pos.get('side')} entry={pos.get('entry')} "
-                 f"trade_id={pos.get('trade_id')} (manual force-clear)")
-        return pos
+    pos = _state.get('open_positions', {}).pop(coin, None)
+    if pos:
+        # Try to persist non-blocking; OK if save races with next scan
+        try:
+            if _state_lock.acquire(blocking=False):
+                try:
+                    _save_state()
+                finally:
+                    _state_lock.release()
+        except Exception:
+            pass
+        _log(f"PHANTOM CLEARED: {coin} {pos.get('side')} entry={pos.get('entry')} "
+             f"trade_id={pos.get('trade_id')} (manual force-clear, lock-free)")
+    return pos
 
 
 def clear_all_positions():
-    """Force-clear all open_positions. Returns list of (coin, position) cleared."""
-    with _state_lock:
-        cleared = list(_state.get('open_positions', {}).items())
-        _state['open_positions'] = {}
-        _save_state()
-        for coin, pos in cleared:
-            _log(f"PHANTOM CLEARED: {coin} {pos.get('side')} (clear_all)")
+    """Force-clear all open_positions. Lock-free; same rationale as clear_position.
+    Returns list of (coin, position) cleared."""
+    cleared = list(_state.get('open_positions', {}).items())
+    _state['open_positions'] = {}
+    try:
+        if _state_lock.acquire(blocking=False):
+            try:
+                _save_state()
+            finally:
+                _state_lock.release()
+    except Exception:
+        pass
+    for coin, pos in cleared:
+        _log(f"PHANTOM CLEARED: {coin} {pos.get('side')} (clear_all)")
     return cleared
 
 
