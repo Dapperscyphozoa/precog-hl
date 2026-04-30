@@ -11576,6 +11576,26 @@ def edge_audit_endpoint():
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
 
+@app.route('/coin_killswitch_status', methods=['GET'])
+def coin_killswitch_status():
+    """Read-only — dump coin_killswitch state including disabled_at timestamps.
+    Used to diagnose when each coin was killed and why."""
+    try:
+        import coin_killswitch as _ck
+        return jsonify({
+            'config': {
+                'rolling_window_sec': _ck.ROLLING_WINDOW_SEC,
+                'consec_loss_trigger': _ck.CONSEC_LOSS_TRIGGER,
+                'wr_drop_pp_trigger': _ck.WR_DROP_PP_TRIGGER,
+                'min_trades_for_wr_check': _ck.MIN_TRADES_FOR_WR_CHECK,
+            },
+            'coins': _ck.status(),
+        })
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({'err': str(e), 'trace': _tb.format_exc()[-400:]}), 500
+
+
 @app.route('/bad_entry_kill_status', methods=['GET'])
 def bad_entry_kill_status():
     """BAD_ENTRY_KILL — 60-90s no-MFE position cutter (inline in PROFIT_LOCK loop).

@@ -406,7 +406,7 @@ def _size_and_fire(coin, signal, equity):
     if os.environ.get('SB_BTCD_FILTER', '1') == '1':
         try:
             import btc_dominance as _btcd_sb
-            _bd_blocked, _bd_reason = _btcd_sb.block_alt_side(coin, signal['side'])
+            _bd_blocked, _bd_reason = _btcd_sb.block_alt_side(coin, signal['side'], engine=_engine_tag_check)
             if _bd_blocked:
                 _log(f"{coin} {signal['side']} CONFLUENCE dropped: btcd ({_bd_reason})")
                 try:
