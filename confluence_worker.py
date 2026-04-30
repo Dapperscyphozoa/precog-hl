@@ -178,6 +178,13 @@ _SB_VERIFIED_LOSER_BASELINE = {
     'CONFLUENCE_BTC_WALL+NEWS',
     'CONFLUENCE_BTC_WALL+SNIPER',
     'CONFLUENCE_BTC_WALL+DAY',
+    # 2026-04-30: deep-audit additions. Hypotheses A+B+C confirmed all
+    # BTC_WALL combos are LATE entries (MFE/MAE ratio < 0.85), with
+    # 60-80% of samples classifying as ABSORPTION or FAKE_BREAK.
+    # Inversion replay shows +0.4-0.6% EV on opposite side at multiple
+    # SL/TP configs. Net: signals are directionally backward.
+    'CONFLUENCE_BTC_WALL+DAY+SNIPER',  # n=26, ratio 0.63 — strongest LATE
+    'CONFLUENCE_NEWS+SNIPER',           # n=19, ratio 1.00 — inversion +EV
 }
 
 
