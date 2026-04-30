@@ -90,6 +90,7 @@ jobs:
             fetch btcd_status          '/btcd_status'          ; echo ","
             fetch precog_status        '/precog_status'        ; echo ","
             fetch confluence_trades    '/confluence/trades?hours=12' ; echo ","
+            fetch confluence_status    '/confluence?hours=12' ; echo ","
             fetch regime_status        '/regime'
             echo "}"
           } > "$OUT"
