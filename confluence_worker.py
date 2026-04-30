@@ -391,7 +391,7 @@ def _size_and_fire(coin, signal, equity):
     # SB blocks ONLY: verified-loser SB engines + CONF_DISABLE_ENGINES env.
     # SB ignores: VERIFIED_ENGINES_ONLY, VERIFIED_ENGINES_ALLOWLIST.
     try:
-        _engine_tag_check = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
+        _engine_tag_check = signal.get('inverted_engine_name') or ('CONFLUENCE_' + '+'.join(signal.get('systems') or ['?']))
         if _sb_engine_disabled(_engine_tag_check, coin=coin):
             _log(f"{coin} {signal['side']} {_engine_tag_check} dropped: sb_engine_disabled")
             try:
@@ -561,7 +561,10 @@ def _size_and_fire(coin, signal, equity):
         try:
             _edge = (_gates.compute_expected_edge(signal['tp_pct'], signal['sl_pct'])
                      if _GATES_OK else None)
-            _engine_tag = 'CONFLUENCE_' + '+'.join(signal.get('systems') or ['?'])
+            # 2026-04-30: respect inversion. If eval_coin flipped side per
+            # CONF_<ENGINE>_INVERT=1 env, tag the trade as INV_<orig_engine>
+            # so we track separately in by_engine and can disable independently.
+            _engine_tag = signal.get('inverted_engine_name') or ('CONFLUENCE_' + '+'.join(signal.get('systems') or ['?']))
             _ledger.append_entry(
                 coin=coin, side=signal['side'], entry_price=entry,
                 engine=_engine_tag, source='confluence_signal',

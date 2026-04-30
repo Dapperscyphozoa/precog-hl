@@ -1082,18 +1082,45 @@ def eval_coin(coin, bars_15m, now_ts=None):
         _STATS.setdefault('news_contributed', 0)
         _STATS['news_contributed'] += 1
     last_close = float(ctx_15['bars'][-1]['c'])
+
+    # 2026-04-30 — DEEP AUDIT INVERSION LAYER.
+    # Hypotheses A+B+C confirmed BTC_WALL family signals are LATE entries:
+    # MFE/MAE ratio < 0.85 → price already moved through wall by signal-time.
+    # 33 of 60 BTC_WALL samples = ABSORPTION; 19 of 60 = FAKE_BREAK.
+    # Per-trade replay shows opposite side hits +0.4-0.6% EV at multiple
+    # SL/TP configs.
+    #
+    # Implementation: build engine-name from the systems set and check env
+    # CONF_<ENGINE>_INVERT=1. If set, flip side BEFORE returning. The signal
+    # name is also tagged INVERSE_<orig> so we can track separately in the
+    # ledger and disable independently from the original.
+    _engine_name_proposed = 'CONFLUENCE_' + '+'.join(sorted(by_side[best_side]))
+    _eng_clean = _engine_name_proposed.upper().replace('CONFLUENCE_', '').replace('+', '_').replace('-', '_')
+    _invert_key = f'CONF_{_eng_clean}_INVERT'
+    _inverted_engine = None
+    if _os.environ.get(_invert_key, '').strip() == '1':
+        # Flip side
+        _orig_side = best_side
+        best_side = 'SELL' if best_side == 'BUY' else 'BUY'
+        _inverted_engine = f'INV_{_engine_name_proposed}'
+        # also flip the latest_ts pointer so we report the right side ts
+        # (we still emit the move detected — just trade the other way)
+        _STATS.setdefault('inverted_fires', 0)
+        _STATS['inverted_fires'] += 1
+
     return {
         'coin': coin,
         'side': best_side,
         'n_sys': best_n,
-        'systems': sorted(list(by_side[best_side])),
+        'systems': sorted(list(by_side[best_side if _inverted_engine is None else ('BUY' if best_side=='SELL' else 'SELL')])),
         'entry': last_close,
         'tp_pct': TP_PCT,
         'sl_pct': SL_PCT,
         'max_hold_s': MAX_HOLD_S,
         'risk_pct': RISK_PCT,
         'ts': now_ts,
-        'latest_signal_ts': latest_ts_by_side[best_side],
+        'latest_signal_ts': latest_ts_by_side[best_side if _inverted_engine is None else ('BUY' if best_side=='SELL' else 'SELL')],
+        'inverted_engine_name': _inverted_engine,  # set if inversion applied; None otherwise
     }
 
 def should_enter(coin, last_fire_ts_by_coin, now_ts=None):
