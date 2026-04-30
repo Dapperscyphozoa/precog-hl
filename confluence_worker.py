@@ -1161,6 +1161,32 @@ def unkill_all():
     return cleared
 
 
+def clear_position(coin):
+    """Force-clear a coin from open_positions in-memory state.
+    Used to remove phantom positions that were closed on platform but
+    SB's internal state didn't sync. Returns the position dict that was
+    cleared, or None if not found."""
+    coin = (coin or '').upper()
+    with _state_lock:
+        pos = _state.get('open_positions', {}).pop(coin, None)
+        if pos:
+            _save_state()
+            _log(f"PHANTOM CLEARED: {coin} {pos.get('side')} entry={pos.get('entry')} "
+                 f"trade_id={pos.get('trade_id')} (manual force-clear)")
+        return pos
+
+
+def clear_all_positions():
+    """Force-clear all open_positions. Returns list of (coin, position) cleared."""
+    with _state_lock:
+        cleared = list(_state.get('open_positions', {}).items())
+        _state['open_positions'] = {}
+        _save_state()
+        for coin, pos in cleared:
+            _log(f"PHANTOM CLEARED: {coin} {pos.get('side')} (clear_all)")
+    return cleared
+
+
 # ─── MAIN LOOP ────────────────────────────────────────────────────────
 def _scan_once():
     if not _precog:

@@ -11611,6 +11611,48 @@ def sb_unkill_all():
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/sb_clear_position', methods=['POST', 'GET'])
+def sb_clear_position():
+    """Force-clear a phantom position from SB's open_positions in-memory state.
+    Used when a position is closed on platform/in-ledger but SB still thinks
+    it's open. Query: ?coin=COIN&token=WEBHOOK_SECRET"""
+    from flask import request as _req
+    try:
+        token = _req.args.get('token') or _req.values.get('token','')
+        if token != os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026'):
+            return jsonify({'err': 'unauthorized'}), 401
+        coin = (_req.args.get('coin') or _req.values.get('coin','')).upper()
+        if not coin:
+            return jsonify({'err': 'missing coin param'}), 400
+        import confluence_worker as _cw
+        pos = _cw.clear_position(coin)
+        if pos is None:
+            return jsonify({'coin': coin, 'cleared': False, 'reason': 'not in open_positions'})
+        return jsonify({'coin': coin, 'cleared': True, 'position': pos})
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/sb_clear_all_positions', methods=['POST'])
+def sb_clear_all_positions():
+    """Force-clear ALL phantom positions from SB. Use when SB is desynced
+    from platform after deploy/restart. Query: ?token=WEBHOOK_SECRET"""
+    from flask import request as _req
+    try:
+        token = _req.args.get('token') or _req.values.get('token','')
+        if token != os.environ.get('WEBHOOK_SECRET', 'precog_dynapro_2026'):
+            return jsonify({'err': 'unauthorized'}), 401
+        import confluence_worker as _cw
+        cleared = _cw.clear_all_positions()
+        return jsonify({
+            'count': len(cleared),
+            'coins': [c for c, _ in cleared],
+        })
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
+
 @app.route('/sb_per_coin', methods=['GET'])
 def sb_per_coin():
     """Real-time per-coin SB tracker.
