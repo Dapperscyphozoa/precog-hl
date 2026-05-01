@@ -127,8 +127,12 @@ def _fast_signal(symbol, ts, ltf_bar, ltf_idx,
     # 2. HTF zone gating (optional)
     htf_zone = None
     if require_htf_zone:
-        # Filter to zones unmitigated AS OF htf_idx
-        visible = [z for z in htf_zones if z.idx <= htf_idx
+        # Filter to zones whose CONFIRMATION (anchor bar + impulse_lookforward)
+        # was visible at htf_idx. Default impulse_lookforward = 3.
+        # Default 3 → zone confirmed at z.idx + 3.
+        impulse_lookforward = 3
+        visible = [z for z in htf_zones
+                   if z.idx + impulse_lookforward <= htf_idx
                    and (z.mitigated_at is None or z.mitigated_at > htf_idx)
                    and (z.broken_at is None or z.broken_at > htf_idx)]
         eligible = [z for z in visible if z.side == needed_zone_side
