@@ -89,18 +89,25 @@ def generate_signal(symbol: str,
                     pivot_lookback_ltf: int = 3,
                     impulse_atr_mult_htf: float = 1.5,
                     sweep_min_wick_ratio: float = 1.0,
+                    sweep_lookback_bars: int = 10,
+                    mss_window_bars: int = 10,
                     ) -> Optional[Signal]:
     """Generate a single signal at as_of_idx_ltf (no lookahead).
 
-    Steps:
-      1. Find HTF zones unmitigated as of the timestamp.
-      2. Determine MTF trend.
-      3. On the LTF bar at as_of_idx_ltf, check for sweep.
-      4. If sweep, check for MSS in the opposite direction (at this bar
-         or the very next).
-      5. If MSS, find an open FVG between sweep extreme and MSS close.
-      6. If all align AND price is at/near a fresh HTF zone in the
-         right direction, emit Signal.
+    SMC sequence — events typically happen on DIFFERENT bars:
+      1. Price reaches HTF zone
+      2. Sweep happens (one bar)
+      3. MSS confirms 1-5 bars after sweep
+      4. FVG retest comes later
+      5. Entry on retest
+
+    This evaluates "as of bar i, has the full setup completed?":
+      - HTF zone exists and price is at it (this bar)
+      - A sweep occurred within last `sweep_lookback_bars` bars
+      - An MSS in the right direction occurred within `mss_window_bars`
+        bars AFTER the sweep
+      - An open FVG of correct direction exists between sweep and now
+      - Current bar is touching/retesting that FVG
     """
     if as_of_idx_ltf < 30:
         return None
@@ -122,43 +129,66 @@ def generate_signal(symbol: str,
     if not htf_zones:
         return None
 
-    # 3. LTF sweep at this bar
-    sweep = sweep_at(ltf_df, as_of_idx_ltf,
-                     pivot_lookback=pivot_lookback_ltf,
-                     min_wick_ratio=sweep_min_wick_ratio)
-    if sweep is None:
+    # 2. Look back for a sweep in last N bars
+    lookback_start = max(0, as_of_idx_ltf - sweep_lookback_bars)
+    sweep_window = ltf_df.iloc[:as_of_idx_ltf + 1]
+    all_sweeps = detect_sweeps(sweep_window,
+                               pivot_lookback=pivot_lookback_ltf,
+                               min_wick_ratio=sweep_min_wick_ratio)
+    recent_sweeps = [s for s in all_sweeps if s.idx >= lookback_start]
+    if not recent_sweeps:
         return None
 
-    # Sweep determines candidate direction
+    # Use most recent sweep — drives the candidate direction
+    sweep = recent_sweeps[-1]
     candidate_dir = 'long' if sweep.side == 'buy_side' else 'short'
     needed_zone_side = 'bullish' if candidate_dir == 'long' else 'bearish'
 
-    # 4. Find HTF zone of correct side that price is near
+    # 3. HTF zone of correct side AND price near it
     eligible = [z for z in htf_zones if z.side == needed_zone_side
                 and _within_zone(ltf_bar['Close'], z, proximity_pct)]
     if not eligible:
         return None
-    htf_zone = max(eligible, key=lambda z: z.idx)  # most recent
+    htf_zone = max(eligible, key=lambda z: z.idx)
 
-    # 2. MTF structure should be neutral or aligned with the candidate.
-    # We allow countertrend setups since SMC is reversal-oriented at zones.
+    # MTF structure (informational, not gating)
     mtf_state = structure_at(mtf_df, mtf_idx, lookback=pivot_lookback_mtf)
     mtf_trend = mtf_state.trend
 
-    # 5. MSS at this bar OR the next ltf bar
-    mss = mss_at(ltf_df, as_of_idx_ltf, pivot_lookback=pivot_lookback_ltf)
-    if mss is None or mss.direction != ('up' if candidate_dir == 'long' else 'down'):
+    # 4. MSS in correct direction within `mss_window_bars` AFTER the sweep
+    needed_mss_dir = 'up' if candidate_dir == 'long' else 'down'
+    mss = None
+    mss_search_end = min(as_of_idx_ltf + 1, sweep.idx + mss_window_bars + 1)
+    for j in range(sweep.idx + 1, mss_search_end):
+        candidate_mss = mss_at(ltf_df, j, pivot_lookback=pivot_lookback_ltf)
+        if candidate_mss is not None and candidate_mss.direction == needed_mss_dir:
+            mss = candidate_mss
+            break
+    if mss is None:
         return None
 
-    # 6. Optional FVG entry filter
+    # 5. Open FVG of correct direction between sweep and now
     fvg_used: Optional[FVG] = None
     if use_fvg_entry:
-        fvgs = open_fvgs_at(ltf_df, as_of_idx_ltf,
-                            side=('bullish' if candidate_dir == 'long' else 'bearish'))
-        # Pick the FVG nearest to entry price that hasn't been filled
-        if not fvgs:
+        all_fvgs = open_fvgs_at(
+            ltf_df, as_of_idx_ltf,
+            side=('bullish' if candidate_dir == 'long' else 'bearish'),
+        )
+        # Filter to FVGs created at or after the sweep
+        post_sweep_fvgs = [f for f in all_fvgs if f.idx >= sweep.idx]
+        if not post_sweep_fvgs:
             return None
-        fvg_used = min(fvgs, key=lambda f: abs(f.midpoint - ltf_bar['Close']))
+        # 6. Current bar should be touching/retesting the FVG
+        retesting = []
+        for f in post_sweep_fvgs:
+            if f.side == 'bullish' and ltf_bar['Low'] <= f.high and ltf_bar['Low'] >= f.low * 0.999:
+                retesting.append(f)
+            elif f.side == 'bearish' and ltf_bar['High'] >= f.low and ltf_bar['High'] <= f.high * 1.001:
+                retesting.append(f)
+        if not retesting:
+            return None
+        # Pick most recent FVG
+        fvg_used = max(retesting, key=lambda f: f.idx)
 
     # SL beyond sweep wick + small buffer (10% of sweep distance)
     if candidate_dir == 'long':
