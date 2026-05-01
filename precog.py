@@ -5445,6 +5445,22 @@ def webhook():
             log(f"WEBHOOK REJECTED (bad secret): from={src_ip} supplied_len={len(_supplied)}")
             return jsonify({'status': 'unauthorized'}), 401
 
+    # ─── OTHERS_D direction filter alerts ─────────────────────────
+    # TradingView CRYPTOCAP:OTHERS.D 15m chart sends body like:
+    #   "OTHERS_D rising" / "OTHERS_D falling" / "OTHERS_D flat"
+    # State updates only — no trade fired from these alerts.
+    _od_text = raw_body.strip().lower()
+    if _od_text.startswith('others_d '):
+        try:
+            import others_d_state as _od
+            _od_dir = _od_text.replace('others_d ', '').strip().split()[0]
+            ok = _od.update(_od_dir, source='webhook')
+            log(f"OTHERS_D state update: {_od_dir} accepted={ok}")
+            return jsonify({'status': 'others_d_state_updated', 'direction': _od_dir, 'accepted': ok}), 200
+        except Exception as _od_e:
+            log(f"OTHERS_D update error: {_od_e}")
+            return jsonify({'status': 'others_d_error', 'error': str(_od_e)}), 200
+
     # Parse flexibly — TV sends various formats
     data = None
     try:
@@ -6015,6 +6031,20 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
             reasons.append(f'btcd_{_btcd_reason}')
             _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', f'btcd_{_btcd_reason}')
     except Exception as _btcd_e:
+        pass  # fail-soft
+    # 2026-05-01: OTHERS.D direction gate (CRYPTOCAP:OTHERS.D, fed via TradingView
+    # webhook on 15m chart with EMA Cloud + 1H % change combined trigger).
+    # Backtest on 26 days: LONG@rising 86.4% WR, SHORT@falling 60% WR.
+    # Filter only fires on high-conviction states; ~70% of bars are 'flat' (no veto).
+    # Tunable via OTHERS_D_GATE_ENABLED (default 1) and OTHERS_D_STALE_HOURS (default 4).
+    # Fail-soft: returns no-block on stale/unknown data.
+    try:
+        import others_d_state as _od
+        _od_blocked, _od_reason = _od.block_alt_side(coin, side)
+        if _od_blocked:
+            reasons.append(_od_reason)
+            _shadow_record_rejection(coin, 'BUY' if side.upper() in ('B','BUY','L') else 'SELL', _od_reason)
+    except Exception as _od_e:
         pass  # fail-soft
     passed = len(reasons) == 0
     if return_reasons:
@@ -11773,6 +11803,16 @@ def btcd_status():
     try:
         import btc_dominance as _btcd
         return jsonify(_btcd.status())
+    except Exception as _e:
+        return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
+
+
+@app.route('/others_d_status', methods=['GET'])
+def others_d_status():
+    """OTHERS.D direction filter — alt-conviction gate from TradingView webhook."""
+    try:
+        import others_d_state as _od
+        return jsonify(_od.status())
     except Exception as _e:
         return jsonify({'err': f'{type(_e).__name__}: {_e}'}), 500
 
