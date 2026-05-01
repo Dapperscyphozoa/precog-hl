@@ -36,6 +36,12 @@ AUTHORIZED_REASONS = {
     # INIT FAILURE (special case): if entry opens but TP/SL both fail,
     # immediate emergency close is authorized to prevent a naked position
     'init_tp_sl_failure',
+
+    # 2026-05-01 — regime flip review with 2+ confirms (cascade/BTCD/MR/wall).
+    # Position direction contradicts new regime AND is in red AND
+    # 2 of 4 support signals align with the new regime direction.
+    # This is a controlled exit, not a flip — no opposite-side entry fires.
+    'regime_flip_red_confirmed',
 }
 
 # ADVISORY REASONS — must NOT call close, only queue

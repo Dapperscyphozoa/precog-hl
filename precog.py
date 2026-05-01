@@ -7983,6 +7983,198 @@ def run_btc_macro_position_mgmt(state, live_positions):
                 log(f"{coin} BTC-macro force-close err: {_e_fc}")
 
 
+# ─── 2026-05-01: REGIME FLIP POSITION REVIEW ─────────────────────────
+# Fires once per regime flip event. Reviews every open position against
+# the new regime + BTCD fast_state direction.
+#
+# Decision matrix (per position):
+#   - Position direction ALIGNED with new regime → leave alone
+#   - Position direction CONTRADICTS new regime:
+#     - PROFIT (any %) → close 50%
+#     - RED + < 2 confirms → close 50%
+#     - RED + ≥ 2 confirms → close 100% (full controlled exit)
+#
+# 4 confirms (same as _allow_reversal):
+#   1. Liquidation cascade aligned with new direction
+#   2. BTCD fast_state aligned with new direction
+#   3. MR signal recently fired in new direction (heuristic)
+#   4. BTC wall rejected supporting new direction
+#
+# Idempotent via pos_state['regime_flip_reviewed_at_ts'] = flip_ts.
+# A position can be reviewed once per flip event. Subsequent ticks
+# during the same regime do NOT re-review.
+#
+# Tunables (all env-driven):
+#   REGIME_FLIP_REVIEW_ENABLED (default 1)
+#   REVERSAL_CONFIRMS_REQUIRED (default 2)
+#   REGIME_FLIP_PARTIAL_FRACTION (default 0.5)
+#
+# Fail-soft: any error inside the function is caught and logged; system
+# continues normally.
+_REGIME_FLIP_LAST_TS_SEEN = None
+
+
+def _pnl_relative_to_tp(live_pos, pos_state):
+    """Return ('profit_low' | 'profit_high' | 'red', fav_frac).
+    
+    profit_low: pnl > 0 but fav_frac < 50% of tp_pct
+    profit_high: fav_frac >= 50% of tp_pct
+    red: pnl <= 0
+    """
+    pnl = (live_pos.get('pnl') if hasattr(live_pos, 'get') else 0) or 0.0
+    if hasattr(live_pos, 'get'):
+        upnl = live_pos.get('upnl')
+        if pnl == 0 and upnl is not None:
+            pnl = upnl
+    if pnl <= 0:
+        return 'red', 0.0
+    entry = pos_state.get('entry') or 0
+    tp_pct = pos_state.get('tp_pct') or 0
+    size = abs(live_pos.get('size', 0)) if hasattr(live_pos, 'get') else 0
+    if entry and tp_pct and size > 0:
+        notional = size * entry
+        if notional > 0:
+            fav_frac = pnl / notional
+            if fav_frac >= tp_pct * 0.5:
+                return 'profit_high', fav_frac
+            return 'profit_low', fav_frac
+    return 'profit_low', 0.0
+
+
+def run_regime_flip_position_review(state, live_positions):
+    """Per-tick. Reviews open positions when a regime flip is detected.
+    
+    Single-fire per flip event via regime_detector.get_regime_with_change().
+    Fail-soft on all module dependencies.
+    """
+    global _REGIME_FLIP_LAST_TS_SEEN
+    if os.environ.get('REGIME_FLIP_REVIEW_ENABLED', '1') != '1':
+        return
+    try:
+        import regime_detector as _rd
+    except Exception:
+        return
+    try:
+        cur_regime, just_flipped, prev_regime = _rd.get_regime_with_change()
+    except Exception as e:
+        log(f"[regime_flip_review] regime_detector err: {e}")
+        return
+    if not just_flipped:
+        return
+
+    # New flip event detected. Compute timestamp marker (idempotency key).
+    flip_ts = int(time.time())
+    if _REGIME_FLIP_LAST_TS_SEEN == flip_ts:
+        return  # rare race protection
+    _REGIME_FLIP_LAST_TS_SEEN = flip_ts
+
+    new_bias = _rd.regime_directional_bias(cur_regime)
+    prev_bias = _rd.regime_directional_bias(prev_regime)
+    log(f"[regime_flip_review] flip {prev_regime}→{cur_regime} "
+        f"prev_bias={prev_bias} new_bias={new_bias} flip_ts={flip_ts}")
+
+    if new_bias is None:
+        # New regime is chop or unknown — no directional review possible
+        log(f"[regime_flip_review] no directional bias for new regime "
+            f"({cur_regime}) — skipping position review")
+        return
+
+    # Optionally confirm with BTCD fast_state — if BTCD strongly disagrees
+    # with new regime, skip the review entirely (mixed signals).
+    try:
+        import btc_dominance as _btcd
+        lookback = int(os.environ.get('REGIME_FLIP_BTCD_FAST_LOOKBACK_MIN', '15'))
+        threshold = float(os.environ.get('REGIME_FLIP_BTCD_FAST_THRESHOLD_PCT', '0.001'))
+        fs = _btcd.fast_state(lookback_min=lookback, threshold_pct=threshold)
+        fs_state = (fs or {}).get('state', 'unknown')
+        # Conflict check: BTCD rising = alts weak (favors SELL alts)
+        # If new_bias=BUY (bull regime) but BTCD rising = mixed signal
+        if fs_state == 'rising' and new_bias == 'BUY':
+            log(f"[regime_flip_review] BTCD rising conflicts with bull bias — review skipped")
+            return
+        if fs_state == 'falling' and new_bias == 'SELL':
+            log(f"[regime_flip_review] BTCD falling conflicts with bear bias — review skipped")
+            return
+        log(f"[regime_flip_review] BTCD fast_state={fs_state} change_pct={(fs or {}).get('change_pct', 0)*100:.3f}%")
+    except Exception as _be:
+        log(f"[regime_flip_review] btc_dominance err: {_be} — proceeding without BTCD check")
+
+    fraction = float(os.environ.get('REGIME_FLIP_PARTIAL_FRACTION', '0.5'))
+    required_confirms = int(os.environ.get('REVERSAL_CONFIRMS_REQUIRED', '2'))
+
+    # Walk every open position
+    actions_taken = {'aligned': 0, 'partial_50': 0, 'full_100': 0, 'skipped': 0, 'errors': 0}
+    for coin, live in list(live_positions.items()):
+        try:
+            if not live or live.get('size', 0) == 0:
+                continue
+            pos_state = state.get('positions', {}).get(coin, {})
+            # Idempotency check
+            already_ts = pos_state.get('regime_flip_reviewed_at_ts')
+            if already_ts == flip_ts:
+                continue
+            # Determine position direction
+            pos_side = 'BUY' if live.get('size', 0) > 0 else 'SELL'
+            # Aligned positions: leave alone
+            if pos_side == new_bias:
+                pos_state['regime_flip_reviewed_at_ts'] = flip_ts
+                actions_taken['aligned'] += 1
+                log(f"[regime_flip_review] {coin} {pos_side} ALIGNED with {new_bias} — leave alone")
+                continue
+            # Contradicts. Compute pnl bucket.
+            pnl_bucket, fav_frac = _pnl_relative_to_tp(live, pos_state)
+            # Determine action
+            if pnl_bucket in ('profit_low', 'profit_high'):
+                action = 'partial_50'
+                action_reason = f'regime_flip_{pnl_bucket}'
+            else:  # red
+                # Check 4 confirms in NEW regime direction
+                confirms_count, breakdown = _compute_reversal_confirms(coin, new_bias)
+                if confirms_count >= required_confirms:
+                    action = 'full_100'
+                    action_reason = f'regime_flip_red_confirmed (confirms={confirms_count}/{required_confirms} {breakdown})'
+                else:
+                    action = 'partial_50'
+                    action_reason = f'regime_flip_red_unconfirmed (confirms={confirms_count}/{required_confirms} {breakdown})'
+            # Execute
+            log(f"[regime_flip_review] {coin} {pos_side} CONTRADICTS {new_bias} "
+                f"pnl_bucket={pnl_bucket} action={action} reason={action_reason}")
+            if action == 'partial_50':
+                result = partial_close(coin, fraction, reason=action_reason)
+                if result is not None:
+                    actions_taken['partial_50'] += 1
+                    pos_state['regime_flip_reviewed_at_ts'] = flip_ts
+                    pos_state['regime_flip_action'] = 'partial_50'
+                else:
+                    actions_taken['errors'] += 1
+                    log(f"[regime_flip_review] {coin} partial_close returned None")
+            elif action == 'full_100':
+                # Full close via contract layer
+                if _EC_OK and _contract is not None:
+                    pnl_pct = _contract.contract_close(close, coin, 'regime_flip_red_confirmed',
+                                                       position_tf=pos_state.get('tf', '15m'),
+                                                       incoming_tf='15m')
+                    if pnl_pct is not None:
+                        actions_taken['full_100'] += 1
+                        pos_state['regime_flip_reviewed_at_ts'] = flip_ts
+                        pos_state['regime_flip_action'] = 'full_100'
+                        try:
+                            record_close(pos_state, coin, pnl_pct, state)
+                        except Exception:
+                            pass
+                    else:
+                        actions_taken['errors'] += 1
+                        log(f"[regime_flip_review] {coin} contract_close returned None")
+                else:
+                    log(f"[regime_flip_review] {coin} contract unavailable — skipping full close")
+                    actions_taken['skipped'] += 1
+        except Exception as _pe:
+            actions_taken['errors'] += 1
+            log(f"[regime_flip_review] {coin} review err: {_pe}")
+
+    log(f"[regime_flip_review] complete: {actions_taken}")
+
+
 def close(coin, state_ref=None, reason=None):
     """Close position. Behavior depends on RECONCILER_AUTHORITATIVE env.
 
@@ -8819,6 +9011,107 @@ def place_native_tp(coin, is_long, entry, size, engine=None):
     except Exception as e:
         log(f"{coin} native TP err: {e}")
         return None
+
+
+# ─── 2026-05-01: SHARED REVERSAL CONFIRM CHECK ────────────────────
+# Used by both _allow_reversal (per-coin opposing buy/sell signal) and
+# run_regime_flip_position_review (regime-flip-driven review).
+#
+# Returns (count, breakdown_dict). Caller compares to required threshold
+# (default 2) from REVERSAL_CONFIRMS_REQUIRED env.
+#
+# The 4 confirms:
+#   1. Liquidation cascade aligned: liq cascade fade_direction == desired_side
+#   2. BTCD fast_state non-flat AND aligned with desired_side
+#   3. MR signal: recent MR-family signal on coin (FUNDING_MR, BB_REJ engines)
+#   4. BTC wall rejected supporting desired direction
+#
+# All checks are FAIL-SOFT — module errors return False (don't count as confirm).
+def _compute_reversal_confirms(coin, desired_side):
+    """Return (count: int, breakdown: dict) of how many of 4 reversal confirms align.
+    
+    desired_side: 'BUY' or 'SELL' — direction the reversal would take.
+    """
+    breakdown = {
+        'liq_cascade': False,
+        'btcd_aligned': False,
+        'mr_signal': False,
+        'wall_reject': False,
+    }
+    side = (desired_side or '').upper()
+    if side not in ('BUY', 'SELL'):
+        return 0, breakdown
+
+    # CONFIRM 1: liquidation cascade
+    try:
+        import liquidation_ws as _liq
+        casc = _liq.get_cascade(coin, max_age_sec=300)
+        if casc and casc.get('fade_direction', '').upper() == side:
+            breakdown['liq_cascade'] = True
+    except Exception:
+        pass
+
+    # CONFIRM 2: BTCD fast_state aligned
+    # Rising BTCD → alts weak vs BTC → SELL alt aligned
+    # Falling BTCD → alts strong vs BTC → BUY alt aligned
+    # Flat → no confirm
+    try:
+        import btc_dominance as _btcd
+        lookback = int(os.environ.get('REGIME_FLIP_BTCD_FAST_LOOKBACK_MIN', '15'))
+        threshold = float(os.environ.get('REGIME_FLIP_BTCD_FAST_THRESHOLD_PCT', '0.001'))
+        fs = _btcd.fast_state(lookback_min=lookback, threshold_pct=threshold)
+        fs_state = (fs or {}).get('state', 'unknown')
+        if fs_state == 'rising' and side == 'SELL':
+            breakdown['btcd_aligned'] = True
+        elif fs_state == 'falling' and side == 'BUY':
+            breakdown['btcd_aligned'] = True
+    except Exception:
+        pass
+
+    # CONFIRM 3: recent MR-family signal on coin
+    # Check last fire timestamps for FUNDING_MR / BB_REJ engines on this coin.
+    # If a fresh MR signal in desired direction fired in last 10min = confirm.
+    try:
+        import confluence_worker as _cw
+        # Heuristic: query if any of the MR engines saw a recent signal for this coin
+        # by checking _cw._state['last_fire_ts'][coin] AND filtering by engine in by_engine.
+        # Simpler proxy: the OPPOSING signal that triggered this check IS the MR signal
+        # if its engine is in the MR family. But we don't have the trigger signal here.
+        # Alternative: check if FUNDING_MR or BB_REJ has fired on this coin in last 10min
+        # by inspecting the 5m candle structure directly — out of scope for this helper.
+        # 
+        # Pragmatic approach: skip this confirm in helper; let caller pass a hint
+        # via context if they have one. For now, default False (conservative).
+        # FUTURE: wire to a per-coin engine cooldown registry.
+        pass
+    except Exception:
+        pass
+
+    # CONFIRM 4: BTC wall rejected supporting desired direction
+    # SELL desired → need wall_rejected('up') (BTC failed at resistance, going down)
+    # BUY desired → need wall_rejected('down') (BTC bounced off support, going up)
+    try:
+        import btc_macro as _bm
+        if side == 'SELL':
+            if _bm.wall_rejected('up', lookback_sec=600):
+                breakdown['wall_reject'] = True
+        elif side == 'BUY':
+            if _bm.wall_rejected('down', lookback_sec=600):
+                breakdown['wall_reject'] = True
+    except Exception:
+        pass
+
+    count = sum(1 for v in breakdown.values() if v)
+    return count, breakdown
+
+
+def _reversal_confirms_required():
+    """Read REVERSAL_CONFIRMS_REQUIRED env each call (live-tunable)."""
+    try:
+        return int(os.environ.get('REVERSAL_CONFIRMS_REQUIRED', '2'))
+    except Exception:
+        return 2
+
 
 def process(coin, state, equity, live_positions, risk_mult=1.0):
     global _LAST_OPEN_TS
@@ -10014,37 +10307,59 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # 1-2% wins (MANTA +$1.04, PAXG +$1.83, REZ +$0.74); trades that get
     # flipped return $0.05-$0.28.
     #
-    # Guard logic: reversal is ALLOWED only if at least one of:
-    #   (a) Position is at a loss — reversal confirms we were wrong
-    #   (b) Position has reached ≥50% of TP target — peak-taking is valid
-    #   (c) Position is older than MIN_HOLD_SEC (15 min) — signal churn
-    #       protection; give setups time to play out before flipping
-    # Otherwise: ignore the opposite signal. Let SL/TP or max-hold handle it.
-    MIN_HOLD_BEFORE_REVERSE_SEC = 900  # 15 min
-    MIN_FAV_FRAC_FOR_REVERSE = 0.50    # need 50% of TP to bail
-    def _allow_reversal(live_pos, pos_state):
-        """Return (allow: bool, reason: str)."""
+    # 2026-05-01 OVERHAUL — pnl-based reversal is BACKWARDS (allowing flip
+    # when in loss = chasing). Replaced with confirm-based gate: reversal
+    # is permitted only if 2+ of 4 support signals align with the desired
+    # opposing direction:
+    #   1. Liquidation cascade fade_direction matches desired_side
+    #   2. BTCD fast_state aligns (rising→SELL, falling→BUY)
+    #   3. MR signal recently fired in desired direction (placeholder — wired
+    #      via opposing_systems hint when caller can supply it)
+    #   4. BTC wall rejected supporting desired direction
+    #
+    # Threshold via REVERSAL_CONFIRMS_REQUIRED env (default 2).
+    # Behavior on insufficient confirms: ride-through (no action).
+    MIN_HOLD_BEFORE_REVERSE_SEC = 900  # 15 min — kept for compat with other code
+    MIN_FAV_FRAC_FOR_REVERSE = 0.50    # kept for compat
+    def _allow_reversal(live_pos, pos_state, desired_side=None, opposing_systems=None):
+        """Return (allow: bool, reason: str).
+        
+        desired_side: direction the opposing signal would take ('BUY' or 'SELL').
+                      If None, falls back to legacy pnl-based logic for backward
+                      compat with any uninstrumented caller.
+        opposing_systems: list of engine systems on the opposing signal — if
+                          contains MR-family ('FUNDING_MR' or 'BB_REJ'), counts
+                          as the MR confirm without needing per-coin lookup.
+        """
         if not live_pos or not pos_state: return True, "no_state"
-        pnl = live_pos.get('pnl') or live_pos.get('upnl') or 0.0
-        # (a) in loss
-        if pnl < 0: return True, f"loss(${pnl:.2f})"
-        # (b) fav >= 50% of TP target
-        entry = pos_state.get('entry', 0)
-        tp_pct = pos_state.get('tp_pct')
-        if entry and tp_pct:
-            cur_px = get_mid(live_pos.get('coin', '') if hasattr(live_pos,'get') else '')
-            # fallback: derive from pnl + notional
-            notional = abs(live_pos.get('size', 0)) * entry
-            if notional > 0:
-                fav_frac = pnl / notional  # fraction of notional gained
-                if fav_frac >= tp_pct * MIN_FAV_FRAC_FOR_REVERSE:
-                    return True, f"fav={fav_frac*100:.2f}%>=50%TP({tp_pct*100:.1f}%)"
-        # (c) REMOVED 2026-04-22. Age > 15min used to allow reversal by itself.
-        # But a 16-minute-old position with +$0.30 profit would still get flipped
-        # on a weak counter-signal, reproducing the exact leak the guard was
-        # supposed to fix. Reversal now strictly requires loss OR 50%+ of TP.
-        # Old native TP / SL handle the time-based exit via normal TP-LOCK.
-        return False, f"pnl=${pnl:.2f} profit floor not met"
+        # Backward-compat path: caller didn't pass desired_side
+        if not desired_side:
+            pnl = live_pos.get('pnl') or live_pos.get('upnl') or 0.0
+            if pnl < 0: return True, f"loss_legacy(${pnl:.2f})"
+            entry = pos_state.get('entry', 0)
+            tp_pct = pos_state.get('tp_pct')
+            if entry and tp_pct:
+                notional = abs(live_pos.get('size', 0)) * entry
+                if notional > 0:
+                    fav_frac = pnl / notional
+                    if fav_frac >= tp_pct * MIN_FAV_FRAC_FOR_REVERSE:
+                        return True, f"fav={fav_frac*100:.2f}%>=50%TP_legacy"
+            return False, f"legacy_no_signal pnl=${pnl:.2f}"
+        # Confirm-based path
+        coin_for_check = live_pos.get('coin', '') if hasattr(live_pos, 'get') else ''
+        confirms_count, breakdown = _compute_reversal_confirms(coin_for_check, desired_side)
+        # MR confirm via opposing_systems hint
+        if opposing_systems:
+            mr_engines = ('FUNDING_MR', 'BB_REJ', 'MR')
+            if any(eng in mr_engines for eng in opposing_systems):
+                if not breakdown.get('mr_signal'):
+                    breakdown['mr_signal'] = True
+                    confirms_count += 1
+        required = _reversal_confirms_required()
+        if confirms_count >= required:
+            return True, f"confirms={confirms_count}/{required} {breakdown}"
+        return False, f"confirms={confirms_count}/{required} insufficient {breakdown}"
+
 
     # ─── SURVIVAL GUARDS: entry-time gates (2026-04-25) ───
     # Run only when there's a valid sig AND no existing position to manage.
@@ -10106,10 +10421,14 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         state['cooldowns'][coin+'_sell'] = bar_ts
         if live and live['size']>0:
             prev_pos = dict(state.get('positions', {}).get(coin, {}))
-            # Guard: don't flip a winning long on a weak SELL signal
-            allow, reason = _allow_reversal({**live, 'coin':coin}, prev_pos)
+            # 2026-05-01: confirm-based gate (replaces pnl-based logic).
+            # Pass desired_side + opposing engine so confirms can be evaluated.
+            _opposing_systems = [signal_engine] if signal_engine else None
+            allow, reason = _allow_reversal({**live, 'coin':coin}, prev_pos,
+                                             desired_side='SELL',
+                                             opposing_systems=_opposing_systems)
             if not allow:
-                log(f"{coin} SELL reversal SKIPPED: long position held ({reason})")
+                log(f"{coin} SELL reversal SKIPPED: {reason}")
                 return
             # CONTRACT: signal reversal is ADVISORY. Queue the desire; do NOT
             # close the existing position. TP/SL on exchange will resolve it.
@@ -10242,10 +10561,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         state['cooldowns'][coin+'_buy'] = bar_ts
         if live and live['size']<0:
             prev_pos = dict(state.get('positions', {}).get(coin, {}))
-            # Guard: don't flip a winning short on a weak BUY signal
-            allow, reason = _allow_reversal({**live, 'coin':coin}, prev_pos)
+            # 2026-05-01: confirm-based gate (replaces pnl-based logic).
+            _opposing_systems = [signal_engine] if signal_engine else None
+            allow, reason = _allow_reversal({**live, 'coin':coin}, prev_pos,
+                                             desired_side='BUY',
+                                             opposing_systems=_opposing_systems)
             if not allow:
-                log(f"{coin} BUY reversal SKIPPED: short position held ({reason})")
+                log(f"{coin} BUY reversal SKIPPED: {reason}")
                 return
             # CONTRACT: queue reversal; do NOT close existing position
             if _EC_OK and _contract is not None:
@@ -10852,6 +11174,16 @@ def main():
                 run_btc_macro_position_mgmt(state, live_positions)
             except Exception as _bme:
                 log(f"btc_macro_posmgmt err: {_bme}")
+
+            # 2026-05-01: Regime flip position review.
+            # Single-fire per regime flip event. Reviews every open position
+            # against new regime + BTCD fast_state direction.
+            # Aligned: leave alone. Contradicts: 50% close (default) or 100%
+            # close (red + 2/4 confirms). Idempotent per flip event.
+            try:
+                run_regime_flip_position_review(state, live_positions)
+            except Exception as _rfre:
+                log(f"regime_flip_review err: {_rfre}")
 
             # DUST-SWEEP — DISABLED 2026-04-22.
             # POSTMORTEM AUDIT of 51 trades: 45 dust_sweep exits, ZERO TP hits, 1 SL hit.

@@ -329,5 +329,120 @@ def _start_daemon():
     _log('refresh daemon started')
 
 
+# ─── 2026-05-01: FAST-LOOKBACK MODE FOR TRANSITION DETECTION ──────
+# Independent of regime-tuned cache. Used by run_regime_flip_position_review()
+# in precog.py to confirm BTCD direction at moment of regime flip.
+# Cached separately (60s TTL) so regime-flip path doesn't pollute entry-gate cache.
+_FAST_CACHE = {
+    'ts': 0,
+    'state': 'unknown',  # rising | falling | flat | unknown
+    'change_pct': 0.0,
+    'lookback_min': None,
+    'threshold': None,
+    'btcd_now': None,
+    'btcd_pre': None,
+    'last_err': None,
+}
+_FAST_LOCK = threading.Lock()
+_FAST_CACHE_TTL_S = 60.0
+
+
+def fast_state(lookback_min=15, threshold_pct=0.001):
+    """Fast BTCD state for transition detection (separate from entry-gate cache).
+    
+    Returns dict: {state, change_pct, btcd_now, btcd_pre, lookback_min, threshold}
+    
+    state: 'rising' | 'falling' | 'flat' | 'unknown'
+    
+    Notes:
+    - Lookback must be >= 1h granularity due to HL candle endpoint constraints.
+      Sub-hour values get rounded up to 1h. 15min default = 1h actual.
+    - Threshold is relative change (0.001 = 0.1%).
+    - 60s cache TTL — repeated calls within window return cached.
+    - Fail-soft: on fetch error returns state='unknown', last_err populated.
+    """
+    if not ENABLED:
+        return {'state': 'disabled', 'change_pct': 0.0,
+                'btcd_now': None, 'btcd_pre': None,
+                'lookback_min': lookback_min, 'threshold': threshold_pct}
+    now = time.time()
+    with _FAST_LOCK:
+        cached = dict(_FAST_CACHE)
+    if (now - cached.get('ts', 0)) < _FAST_CACHE_TTL_S and cached.get('state') != 'unknown':
+        return {
+            'state': cached['state'],
+            'change_pct': cached['change_pct'],
+            'btcd_now': cached.get('btcd_now'),
+            'btcd_pre': cached.get('btcd_pre'),
+            'lookback_min': cached.get('lookback_min'),
+            'threshold': cached.get('threshold'),
+            'cached': True,
+        }
+    try:
+        btc_now, btc_pre = _fetch_close_now_and_pre('BTC', lookback_min)
+        eth_now, eth_pre = _fetch_close_now_and_pre('ETH', lookback_min)
+        if not all([btc_now, eth_now, btc_pre, eth_pre]):
+            with _FAST_LOCK:
+                _FAST_CACHE['last_err'] = 'incomplete fetch'
+                _FAST_CACHE['ts'] = now
+                _FAST_CACHE['state'] = 'unknown'
+            return {'state': 'unknown', 'change_pct': 0.0,
+                    'btcd_now': None, 'btcd_pre': None,
+                    'lookback_min': lookback_min, 'threshold': threshold_pct,
+                    'last_err': 'incomplete fetch'}
+        btcd_now = btc_now / eth_now
+        btcd_pre = btc_pre / eth_pre
+        change_pct = (btcd_now - btcd_pre) / btcd_pre
+        if change_pct > threshold_pct:
+            state = 'rising'
+        elif change_pct < -threshold_pct:
+            state = 'falling'
+        else:
+            state = 'flat'
+        with _FAST_LOCK:
+            _FAST_CACHE['ts'] = now
+            _FAST_CACHE['state'] = state
+            _FAST_CACHE['change_pct'] = change_pct
+            _FAST_CACHE['btcd_now'] = btcd_now
+            _FAST_CACHE['btcd_pre'] = btcd_pre
+            _FAST_CACHE['lookback_min'] = lookback_min
+            _FAST_CACHE['threshold'] = threshold_pct
+            _FAST_CACHE['last_err'] = None
+        return {
+            'state': state,
+            'change_pct': change_pct,
+            'btcd_now': btcd_now,
+            'btcd_pre': btcd_pre,
+            'lookback_min': lookback_min,
+            'threshold': threshold_pct,
+            'cached': False,
+        }
+    except Exception as e:
+        with _FAST_LOCK:
+            _FAST_CACHE['last_err'] = str(e)
+            _FAST_CACHE['ts'] = now
+            _FAST_CACHE['state'] = 'unknown'
+        return {'state': 'unknown', 'change_pct': 0.0,
+                'btcd_now': None, 'btcd_pre': None,
+                'lookback_min': lookback_min, 'threshold': threshold_pct,
+                'last_err': str(e)}
+
+
+def fast_state_status():
+    """For diagnostic endpoints."""
+    with _FAST_LOCK:
+        c = dict(_FAST_CACHE)
+    return {
+        'last_check_age_sec': int(time.time() - c.get('ts', 0)) if c.get('ts') else None,
+        'state': c.get('state', 'unknown'),
+        'change_pct': round(c.get('change_pct', 0) * 100, 4),
+        'lookback_min_used': c.get('lookback_min'),
+        'threshold_pct_used': round((c.get('threshold') or 0) * 100, 4),
+        'btcd_now': c.get('btcd_now'),
+        'btcd_pre': c.get('btcd_pre'),
+        'last_err': c.get('last_err'),
+    }
+
+
 # Auto-start daemon on module import
 _start_daemon()

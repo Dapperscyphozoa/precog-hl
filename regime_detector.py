@@ -119,3 +119,67 @@ def status():
         'ema_period': EMA_PERIOD,
         'hysteresis_bars_1h': HYSTERESIS,
     }
+
+
+# ─── 2026-05-01: REGIME FLIP DETECTION ────────────────────────────
+# Atomic flip detection. get_regime_with_change() returns (current, just_flipped, prev).
+# just_flipped is True ONLY on the call where _CACHE['regime'] differs from
+# _LAST_RETURNED_REGIME, then immediately latches false. Single-fire per flip event.
+# Used by run_regime_flip_position_review() in precog.py.
+_LAST_RETURNED_REGIME = None
+_LAST_FLIP_TS = None
+_LAST_FLIP_PREV = None
+
+
+def get_regime_with_change():
+    """Return (current_regime, just_flipped, prev_regime).
+    
+    just_flipped=True only on the single call where the regime cache transitioned
+    relative to the last value returned. Subsequent calls return False until the
+    next genuine flip. Single-fire per flip event.
+    
+    Atomic: updates _LAST_RETURNED_REGIME inside the same call that reports True,
+    so concurrent callers won't both see just_flipped=True for the same flip.
+    """
+    global _LAST_RETURNED_REGIME, _LAST_FLIP_TS, _LAST_FLIP_PREV
+    cur = get_regime()
+    if cur is None:
+        return (None, False, _LAST_RETURNED_REGIME)
+    if _LAST_RETURNED_REGIME is None:
+        _LAST_RETURNED_REGIME = cur
+        return (cur, False, None)
+    if cur != _LAST_RETURNED_REGIME:
+        prev = _LAST_RETURNED_REGIME
+        _LAST_FLIP_TS = time.time()
+        _LAST_FLIP_PREV = prev
+        _LAST_RETURNED_REGIME = cur
+        return (cur, True, prev)
+    return (cur, False, _LAST_RETURNED_REGIME)
+
+
+def last_flip_info():
+    """For diagnostic endpoints: when did the last flip happen, what was prev?"""
+    return {
+        'last_flip_ts': _LAST_FLIP_TS,
+        'last_flip_age_sec': (time.time() - _LAST_FLIP_TS) if _LAST_FLIP_TS else None,
+        'last_flip_prev_regime': _LAST_FLIP_PREV,
+        'last_returned_regime': _LAST_RETURNED_REGIME,
+    }
+
+
+def regime_directional_bias(regime):
+    """Map regime string to directional bias.
+    
+    bull-* → 'BUY' (alts trend up, longs favored)
+    bear-* → 'SELL' (alts trend down, shorts favored)
+    chop   → None (no directional bias)
+    
+    Used to compare position direction against new regime on flip.
+    """
+    if not regime:
+        return None
+    if regime.startswith('bull'):
+        return 'BUY'
+    if regime.startswith('bear'):
+        return 'SELL'
+    return None
