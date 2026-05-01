@@ -82,51 +82,48 @@ def _within_zone(price: float, zone: Zone, proximity_pct: float) -> bool:
 def generate_signal(symbol: str,
                     htf_df: pd.DataFrame, mtf_df: pd.DataFrame, ltf_df: pd.DataFrame,
                     as_of_idx_ltf: int,
-                    proximity_bp: float = 50.0,
+                    proximity_bp: float = 200.0,
                     rr_target: float = 3.0,
-                    use_fvg_entry: bool = True,
+                    use_fvg_entry: bool = False,
                     pivot_lookback_mtf: int = 5,
                     pivot_lookback_ltf: int = 3,
-                    impulse_atr_mult_htf: float = 1.5,
-                    sweep_min_wick_ratio: float = 1.0,
-                    sweep_lookback_bars: int = 10,
-                    mss_window_bars: int = 10,
+                    impulse_atr_mult_htf: float = 1.0,
+                    sweep_min_wick_ratio: float = 0.6,
+                    sweep_lookback_bars: int = 30,
+                    mss_window_bars: int = 20,
+                    require_htf_zone: bool = True,
+                    debug: Optional[dict] = None,
                     ) -> Optional[Signal]:
-    """Generate a single signal at as_of_idx_ltf (no lookahead).
+    """Permissive SMC confluence — fire on MSS confirmation after sweep.
 
-    SMC sequence — events typically happen on DIFFERENT bars:
-      1. Price reaches HTF zone
-      2. Sweep happens (one bar)
-      3. MSS confirms 1-5 bars after sweep
-      4. FVG retest comes later
-      5. Entry on retest
+    Defaults relaxed from Carroll-strict to actually produce signals on
+    real data:
+      proximity_bp 50 → 200      (2% band around HTF zone, vs 0.5%)
+      impulse_atr_mult_htf 1.5 → 1.0  (more zones qualify)
+      sweep_min_wick_ratio 1.0 → 0.6  (smaller wicks count as sweeps)
+      sweep_lookback_bars 10 → 30
+      mss_window_bars 10 → 20
+      use_fvg_entry False (default) — fire at MSS close, not FVG retest
+      require_htf_zone True — set False to skip HTF zone gating entirely
 
-    This evaluates "as of bar i, has the full setup completed?":
-      - HTF zone exists and price is at it (this bar)
-      - A sweep occurred within last `sweep_lookback_bars` bars
-      - An MSS in the right direction occurred within `mss_window_bars`
-        bars AFTER the sweep
-      - An open FVG of correct direction exists between sweep and now
-      - Current bar is touching/retesting that FVG
+    Pass debug={} dict; gets counter bumps for each rejection reason
+    so you can see why signals are being filtered.
     """
     if as_of_idx_ltf < 30:
+        if debug is not None: debug['too_early'] = debug.get('too_early', 0) + 1
         return None
     ltf_bar = ltf_df.iloc[as_of_idx_ltf]
     ts = ltf_df.index[as_of_idx_ltf]
     proximity_pct = proximity_bp / 10000.0
 
-    # Map timestamp to HTF and MTF index
     try:
         htf_idx = htf_df.index.get_indexer([ts], method='ffill')[0]
         mtf_idx = mtf_df.index.get_indexer([ts], method='ffill')[0]
     except Exception:
+        if debug is not None: debug['idx_map_err'] = debug.get('idx_map_err', 0) + 1
         return None
     if htf_idx < 30 or mtf_idx < 30:
-        return None
-
-    # 1. HTF zones unmitigated
-    htf_zones = fresh_zones_at(htf_df, htf_idx, impulse_atr_mult=impulse_atr_mult_htf)
-    if not htf_zones:
+        if debug is not None: debug['htf_mtf_too_early'] = debug.get('htf_mtf_too_early', 0) + 1
         return None
 
     # 2. Look back for a sweep in last N bars
@@ -137,25 +134,33 @@ def generate_signal(symbol: str,
                                min_wick_ratio=sweep_min_wick_ratio)
     recent_sweeps = [s for s in all_sweeps if s.idx >= lookback_start]
     if not recent_sweeps:
+        if debug is not None: debug['no_sweep'] = debug.get('no_sweep', 0) + 1
         return None
 
-    # Use most recent sweep — drives the candidate direction
     sweep = recent_sweeps[-1]
     candidate_dir = 'long' if sweep.side == 'buy_side' else 'short'
     needed_zone_side = 'bullish' if candidate_dir == 'long' else 'bearish'
 
-    # 3. HTF zone of correct side AND price near it
-    eligible = [z for z in htf_zones if z.side == needed_zone_side
-                and _within_zone(ltf_bar['Close'], z, proximity_pct)]
-    if not eligible:
-        return None
-    htf_zone = max(eligible, key=lambda z: z.idx)
+    # 3. (Optional) HTF zone gating
+    htf_zone: Optional[Zone] = None
+    if require_htf_zone:
+        htf_zones = fresh_zones_at(htf_df, htf_idx, impulse_atr_mult=impulse_atr_mult_htf)
+        if not htf_zones:
+            if debug is not None: debug['no_htf_zones'] = debug.get('no_htf_zones', 0) + 1
+            return None
+        eligible = [z for z in htf_zones if z.side == needed_zone_side
+                    and _within_zone(ltf_bar['Close'], z, proximity_pct)]
+        if not eligible:
+            if debug is not None: debug['no_eligible_zone'] = debug.get('no_eligible_zone', 0) + 1
+            return None
+        htf_zone = max(eligible, key=lambda z: z.idx)
 
     # MTF structure (informational, not gating)
     mtf_state = structure_at(mtf_df, mtf_idx, lookback=pivot_lookback_mtf)
     mtf_trend = mtf_state.trend
 
-    # 4. MSS in correct direction within `mss_window_bars` AFTER the sweep
+    # 4. MSS in correct direction within `mss_window_bars` AFTER sweep,
+    #    occurring AT or NEAR the current bar.
     needed_mss_dir = 'up' if candidate_dir == 'long' else 'down'
     mss = None
     mss_search_end = min(as_of_idx_ltf + 1, sweep.idx + mss_window_bars + 1)
@@ -165,20 +170,27 @@ def generate_signal(symbol: str,
             mss = candidate_mss
             break
     if mss is None:
+        if debug is not None: debug['no_mss'] = debug.get('no_mss', 0) + 1
         return None
 
-    # 5. Open FVG of correct direction between sweep and now
+    # Only fire on the BAR the MSS occurs (or 1 bar after) so we don't
+    # repeatedly fire across a multi-bar trending move.
+    if as_of_idx_ltf - mss.idx > 1:
+        if debug is not None: debug['mss_too_old'] = debug.get('mss_too_old', 0) + 1
+        return None
+
+    # 5. (Optional) FVG entry filter — wait for FVG retest instead of
+    #    firing at MSS close.
     fvg_used: Optional[FVG] = None
     if use_fvg_entry:
         all_fvgs = open_fvgs_at(
             ltf_df, as_of_idx_ltf,
             side=('bullish' if candidate_dir == 'long' else 'bearish'),
         )
-        # Filter to FVGs created at or after the sweep
         post_sweep_fvgs = [f for f in all_fvgs if f.idx >= sweep.idx]
         if not post_sweep_fvgs:
+            if debug is not None: debug['no_fvg'] = debug.get('no_fvg', 0) + 1
             return None
-        # 6. Current bar should be touching/retesting the FVG
         retesting = []
         for f in post_sweep_fvgs:
             if f.side == 'bullish' and ltf_bar['Low'] <= f.high and ltf_bar['Low'] >= f.low * 0.999:
@@ -186,17 +198,18 @@ def generate_signal(symbol: str,
             elif f.side == 'bearish' and ltf_bar['High'] >= f.low and ltf_bar['High'] <= f.high * 1.001:
                 retesting.append(f)
         if not retesting:
+            if debug is not None: debug['no_fvg_retest'] = debug.get('no_fvg_retest', 0) + 1
             return None
-        # Pick most recent FVG
         fvg_used = max(retesting, key=lambda f: f.idx)
 
-    # SL beyond sweep wick + small buffer (10% of sweep distance)
+    # SL beyond sweep wick + small buffer
     if candidate_dir == 'long':
         sweep_low = ltf_df.iloc[sweep.idx]['Low']
         sl = float(sweep_low) - abs(sweep.swept_level - sweep_low) * 0.10
         entry = float(fvg_used.midpoint) if fvg_used else float(ltf_bar['Close'])
         sl_distance = entry - sl
         if sl_distance <= 0:
+            if debug is not None: debug['bad_sl'] = debug.get('bad_sl', 0) + 1
             return None
         tp = entry + sl_distance * rr_target
     else:
@@ -205,9 +218,11 @@ def generate_signal(symbol: str,
         entry = float(fvg_used.midpoint) if fvg_used else float(ltf_bar['Close'])
         sl_distance = sl - entry
         if sl_distance <= 0:
+            if debug is not None: debug['bad_sl'] = debug.get('bad_sl', 0) + 1
             return None
         tp = entry - sl_distance * rr_target
 
+    if debug is not None: debug['signals'] = debug.get('signals', 0) + 1
     return Signal(
         ts=ts, symbol=symbol, direction=candidate_dir,
         entry=entry, sl=sl, tp=tp,

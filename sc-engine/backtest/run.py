@@ -61,12 +61,21 @@ def main():
     p.add_argument('--mtf', default='1h')
     p.add_argument('--ltf', default='15m')
     p.add_argument('--rr', type=float, default=3.0)
-    p.add_argument('--proximity', type=float, default=50.0,
+    p.add_argument('--proximity', type=float, default=200.0,
                    help='LTF proximity to HTF zone in basis points')
-    p.add_argument('--no-fvg', action='store_true', help='Skip FVG entry filter')
+    p.add_argument('--fvg', action='store_true',
+                   help='Require FVG retest (default: fire at MSS close)')
+    p.add_argument('--no-htf-zone', action='store_true',
+                   help='Skip HTF zone gating (signals on sweep+MSS only)')
+    p.add_argument('--sweep-lookback', type=int, default=30)
+    p.add_argument('--mss-window', type=int, default=20)
+    p.add_argument('--impulse-atr', type=float, default=1.0)
+    p.add_argument('--wick-ratio', type=float, default=0.6)
     p.add_argument('--max-bars-held', type=int, default=200)
     p.add_argument('--cooldown', type=int, default=5)
     p.add_argument('--no-cache', action='store_true')
+    p.add_argument('--debug', action='store_true',
+                   help='Print rejection-reason counters per market')
     p.add_argument('--out', default=None, help='write JSON results to file')
     args = p.parse_args()
 
@@ -90,6 +99,7 @@ def main():
         print(f'  data: htf={len(htf_df)} mtf={len(mtf_df)} ltf={len(ltf_df)} bars')
         print(f'  range: {ltf_df.index[0]} → {ltf_df.index[-1]}')
 
+        debug_counters = {} if args.debug else None
         result = run_backtest(
             symbol=symbol,
             htf_df=htf_df, mtf_df=mtf_df, ltf_df=ltf_df,
@@ -97,8 +107,18 @@ def main():
             cooldown_bars=args.cooldown,
             rr_target=args.rr,
             proximity_bp=args.proximity,
-            use_fvg_entry=not args.no_fvg,
+            use_fvg_entry=args.fvg,
+            require_htf_zone=not args.no_htf_zone,
+            sweep_lookback_bars=args.sweep_lookback,
+            mss_window_bars=args.mss_window,
+            impulse_atr_mult_htf=args.impulse_atr,
+            sweep_min_wick_ratio=args.wick_ratio,
+            debug=debug_counters,
         )
+        if debug_counters is not None:
+            print('  DEBUG (rejection counters):')
+            for k, v in sorted(debug_counters.items(), key=lambda kv: -kv[1]):
+                print(f'    {k}: {v}')
         m = result.metrics()
         print('  METRICS:')
         print(fmt_metric('n', m.get('n'), GO_NO_GO['n']))

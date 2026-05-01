@@ -95,6 +95,7 @@ def run_backtest(symbol: str,
                  spread_bp: float = 2.0,
                  max_bars_held: int = 200,
                  cooldown_bars: int = 5,
+                 debug: Optional[Dict] = None,
                  **signal_kwargs) -> BacktestResult:
     """Walk ltf_df forward, generate signals, simulate trades.
 
@@ -174,7 +175,7 @@ def run_backtest(symbol: str,
             continue
 
         # Generate new signal
-        sig = generate_signal(symbol, htf_df, mtf_df, ltf_df, i, **signal_kwargs)
+        sig = generate_signal(symbol, htf_df, mtf_df, ltf_df, i, debug=debug, **signal_kwargs)
         if sig is None:
             continue
 
