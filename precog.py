@@ -2961,6 +2961,53 @@ def backtest_endpoint():
         return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
 
 
+@app.route('/_debug_threads', methods=['GET'])
+def _debug_threads():
+    """Dump all thread stacks — find what's holding locks."""
+    import sys, threading, traceback
+    out = []
+    frames = sys._current_frames()
+    for th in threading.enumerate():
+        tid = th.ident
+        frame = frames.get(tid)
+        stack = traceback.format_stack(frame) if frame else ['<no frame>']
+        out.append({
+            'name': th.name,
+            'daemon': th.daemon,
+            'alive': th.is_alive(),
+            'stack': [s.strip() for s in stack[-15:]],  # last 15 frames
+        })
+    return jsonify({'thread_count': len(out), 'threads': out})
+
+
+@app.route('/_debug_state_lock', methods=['GET'])
+def _debug_state_lock():
+    """Try to acquire confluence_worker._state_lock with 1s timeout. 
+    Reports owner and last activity if locked."""
+    try:
+        import confluence_worker as cw
+        acquired = cw._state_lock.acquire(timeout=1.0)
+        if acquired:
+            try:
+                result = {
+                    'lock_state': 'free (acquired in <1s)',
+                    'state_keys': list(cw._state.keys()),
+                    'open_positions_count': len(cw._state.get('open_positions', {})),
+                    'killed_count': len(cw._state.get('killed_coins', {})),
+                    'fired_events_count': len(cw._state.get('fired_events', {})),
+                    'last_bar_ts_count': len(cw._state.get('last_bar_ts', {})),
+                    'closed_trades_count': len(cw._state.get('closed_trades', [])),
+                }
+            finally:
+                cw._state_lock.release()
+            return jsonify(result)
+        else:
+            return jsonify({'lock_state': 'BLOCKED — could not acquire in 1s',
+                            'msg': 'Some thread holds the lock. Check /_debug_threads'})
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/health', methods=['GET'])
 def health():
     eq = 0
