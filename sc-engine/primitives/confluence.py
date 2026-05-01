@@ -33,7 +33,7 @@ import pandas as pd
 
 from .structure import structure_at
 from .zones import fresh_zones_at, Zone
-from .sweep import sweep_at, Sweep
+from .sweep import sweep_at, detect_sweeps, Sweep
 from .mss import mss_at, MSS
 from .fvg import open_fvgs_at, FVG
 
