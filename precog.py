@@ -1142,6 +1142,41 @@ def _coin_engine_paused(coin, engine):
 _CONF_5M_GATE_ENABLED = os.environ.get('CONF_5M_GATE_ENABLED', '1') == '1'
 _CONF_5M_GATE_PCT = float(os.environ.get('CONF_5M_GATE_PCT', '0.003'))
 
+def _confirm_5m_strict(coin, side):
+    """STRICT momentum confirmation: requires recent 5m movement IN trade direction.
+    
+    Unlike _confirm_5m (only blocks AGAINST counter-momentum), this REQUIRES
+    the last 5m candle to be moving in the trade direction by at least
+    CONF_5M_STRICT_PCT (default 0.2%).
+    
+    Used to filter out signals that fire during consolidation/chop where
+    no decisive move is happening — the cause of "weak trades" pattern.
+    
+    BUY requires: latest 5m candle close > open AND (close-open)/open >= threshold
+    SELL requires: latest 5m candle close < open AND (open-close)/open >= threshold
+    """
+    if not _CONF_5M_GATE_ENABLED or not coin or side not in ('BUY', 'SELL'):
+        return True
+    try:
+        threshold = float(os.environ.get('CONF_5M_STRICT_PCT', '0.002'))
+        bars = okx_fetch.fetch_klines(coin, '5m', 3)
+        if not bars or len(bars) < 1:
+            return True  # no data, fail-soft
+        last_bar = bars[-1]
+        bar_open = float(last_bar.get('o', 0))
+        bar_close = float(last_bar.get('c', 0))
+        if bar_open <= 0:
+            return True
+        # Compute directional move
+        move = (bar_close - bar_open) / bar_open
+        if side == 'BUY':
+            return move >= threshold  # candle must be UP at least threshold
+        else:
+            return move <= -threshold  # candle must be DOWN at least threshold
+    except Exception:
+        return True  # fail-soft, allow
+
+
 def _confirm_5m(coin, side):
     """Returns True if 5m short-term momentum doesn't oppose the trade.
 

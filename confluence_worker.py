@@ -448,6 +448,24 @@ def _size_and_fire(coin, signal, equity):
         except Exception:
             pass
 
+    # 2026-05-02: STRICT 5m momentum gate — require WITH-trend movement to enter.
+    # Filters out consolidation-period entries that produce "weak trades"
+    # (92% of all trades had |PnL|<$0.10 in 26-day audit). The signal pattern
+    # ALONE is not enough — we need the 5m candle to also be moving in our
+    # direction. Tunable: CONF_5M_STRICT_PCT (default 0.2%).
+    if os.environ.get('SB_APPLY_5M_STRICT_GATE', '0') == '1':
+        try:
+            if _precog is not None and hasattr(_precog, '_confirm_5m_strict'):
+                if not _precog._confirm_5m_strict(coin, signal.get('side')):
+                    _log(f"{coin} {signal['side']} CONFLUENCE dropped: 5m strict momentum (consolidation)")
+                    try:
+                        _state.setdefault('rejects', {})
+                        _state['rejects']['fivem_strict'] = _state['rejects'].get('fivem_strict', 0) + 1
+                    except Exception: pass
+                    return None
+        except Exception:
+            pass
+
     # 2026-04-30: defensive sizing path. Previous version threw silent
     # exceptions for malformed signals (missing sl_pct, zero entry, etc.)
     # that propagated to the candidates loop's try/except and were logged
@@ -782,7 +800,7 @@ def _monitor_exits():
     HARD_TIMEOUT_S = 6 * 3600       # 6h non-negotiable
     NO_PROGRESS_AGE_S = 6 * 3600    # 6h then check progress (was 2h, killing winning trades early)
     NO_PROGRESS_THRESHOLD = 0.003   # |raw| < 0.3% = stuck
-    PROFIT_LOCK_PCT = 0.015          # raw ≥ 1.5% → close
+    PROFIT_LOCK_PCT = float(os.environ.get('CONF_PROFIT_LOCK_PCT', '0.025'))  # raw ≥ 2.5% → close (was 0.015 — winners cut too early)
     PROFIT_LOCK_BE_PCT = 0.008       # raw ≥ 0.8% → move SL to entry
 
     # 2026-04-27: partial-TP — bank 33% at +1% MFE, leave 67% to run
