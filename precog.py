@@ -6062,6 +6062,21 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
     """V3 trend + ATR-min filter. Returns True/False bool, OR (passed, reasons) if return_reasons=True.
     Reasons is a list of strings explaining why it failed (empty if passed)."""
     reasons = []
+    # SALVAGE WHITELIST — only trade verified-profitable (coin, side) combos when env set
+    _wl_raw = os.environ.get('WHITELIST_COIN_SIDE', '').strip()
+    if _wl_raw:
+        _allowed = set()
+        for _p in _wl_raw.split(','):
+            _p = _p.strip().upper()
+            if ':' in _p:
+                _c, _s = _p.split(':', 1)
+                _allowed.add((_c.strip(), _s.strip()))
+        _key = (str(coin).upper(), str(side).upper())
+        if _key not in _allowed:
+            reasons.append('whitelist')
+            if return_reasons:
+                return False, reasons
+            return False
     # CROWDING: directional imbalance.
     # 2026-04-27: bumped 10 → 20. With 33-position cap, threshold of 10 was
     # tripping on every SELL after first chop session. Real concern is "we're

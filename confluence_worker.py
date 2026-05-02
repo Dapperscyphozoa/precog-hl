@@ -356,10 +356,32 @@ def _in_position(coin, exchange_coins=None):
         return True
     return False
 
+def _whitelist_blocked(coin, side):
+    """Salvage whitelist: if WHITELIST_COIN_SIDE is set, only allow listed combos.
+    Format: 'BTC:BUY,ETH:SELL,SOL:BUY' (comma-separated COIN:SIDE pairs).
+    Returns (blocked: bool, reason: str). Empty/unset env = allow all (legacy)."""
+    raw = os.environ.get('WHITELIST_COIN_SIDE', '').strip()
+    if not raw:
+        return False, ''
+    allowed = set()
+    for pair in raw.split(','):
+        pair = pair.strip().upper()
+        if ':' not in pair: continue
+        c, s = pair.split(':', 1)
+        allowed.add((c.strip(), s.strip()))
+    key = (str(coin).upper(), str(side).upper())
+    if key not in allowed:
+        return True, 'whitelist'
+    return False, ''
+
+
 def _entry_gate_ok(coin, side):
     """Reuse precog's existing gate stack — V3 trend, ATR-min, ticker gate."""
     if side not in ALLOWED_SIDES:
         return False, 'side_filter'
+    blocked, reason = _whitelist_blocked(coin, side)
+    if blocked:
+        return False, reason
     # 2026-04-30: SB no longer applies SA's V3 trend_gate by default.
     # SA tunes V3 EMA9 4h for trend-continuation entries; SB confluence
     # signals are independent of SA's trend regime. SA bleed-through caused
