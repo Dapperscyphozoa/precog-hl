@@ -632,7 +632,20 @@ def _size_and_fire(coin, signal, equity):
         # place() returns the fill price on success, None on no-fill.
         with _state_lock:
             _state['place_attempts'] = _state.get('place_attempts', 0) + 1
-        fill_px = _precog.place(coin, is_buy, size_coin, cloid=_cloid)
+        fill_px = None
+        # ─── LADDER MODE 2026-05-02 ─────────────────────────────────
+        # If LADDER_MODE=1, route through market-maker ladder (post-only,
+        # multi-rung at OB/FVG/swing zones). Falls back to single-rung
+        # place() if ladder module missing or returns None.
+        if os.environ.get('LADDER_MODE', '0') == '1' and hasattr(_precog, 'place_ladder'):
+            fill_px = _precog.place_ladder(coin, is_buy, size_coin, cloid=_cloid)
+            if fill_px is None:
+                _log(f"{coin} LADDER returned None — single-shot place fallback disabled (LADDER_FALLBACK_TO_PLACE=0)")
+                # Optional: fall through to single-shot. Default OFF to keep ladder strict.
+                if os.environ.get('LADDER_FALLBACK_TO_PLACE', '0') == '1':
+                    fill_px = _precog.place(coin, is_buy, size_coin, cloid=_cloid)
+        else:
+            fill_px = _precog.place(coin, is_buy, size_coin, cloid=_cloid)
         if fill_px is None:
             with _state_lock:
                 _state['place_no_fill'] = _state.get('place_no_fill', 0) + 1

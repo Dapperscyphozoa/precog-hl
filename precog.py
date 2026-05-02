@@ -7793,6 +7793,115 @@ def _place_impl(coin, is_buy, size, cloid=None):
     except Exception as e:
         log(f"taker err {coin}: {e}"); return None
 
+def place_ladder(coin, is_buy, size, cloid=None, fill_window_s=None):
+    """Market-maker laddered entry. Places multiple post-only limit orders at
+    Order Block / FVG / swing zones and waits for fills.
+    
+    Returns avg fill price on partial-or-full fill, None if nothing filled.
+    
+    Set LADDER_MODE=1 in env to enable. Falls back to place() if module missing
+    or if computation fails.
+    """
+    try:
+        import market_maker as _mm
+    except Exception as e:
+        log(f"LADDER {coin}: market_maker import failed ({e}), falling back to place()")
+        return place(coin, is_buy, size, cloid=cloid)
+    
+    px = get_mid(coin)
+    if not px or px <= 0:
+        log(f"LADDER {coin}: no mid price, skipping")
+        return None
+    
+    notional_usd = size * px
+    MIN_NOTIONAL_USD = 10.0
+    if notional_usd < MIN_NOTIONAL_USD:
+        log(f"LADDER {coin}: notional ${notional_usd:.2f} below $10 min, skipping")
+        return None
+    
+    # Convert cloid string to Cloid object if provided (matches place() behavior)
+    _cloid_obj = None
+    if cloid:
+        try:
+            from hyperliquid.utils.types import Cloid
+            _cloid_obj = Cloid.from_str(cloid) if isinstance(cloid, str) else cloid
+        except Exception:
+            _cloid_obj = None
+    
+    # Place ladder — note: each rung gets its own oid; cloid is for tracking only
+    result = _mm.place_laddered_entry(
+        exchange=exchange, info=info, wallet=WALLET,
+        coin=coin, is_buy=is_buy, total_size=size, current_px=px,
+        round_price_fn=round_price, log_fn=log, cloid_obj=_cloid_obj,
+    )
+    
+    if not result['placed']:
+        log(f"LADDER {coin}: no rungs placed")
+        return None
+    
+    # Wait window — poll for fills
+    window = fill_window_s or _mm.LADDER_FILL_WINDOW_S
+    poll_interval = _mm.LADDER_WALK_INTERVAL_S
+    elapsed = 0
+    last_filled = 0
+    
+    while elapsed < window:
+        time.sleep(min(poll_interval, window - elapsed))
+        elapsed += poll_interval
+        
+        status = _mm.get_ladder_fill_status(info, WALLET, coin, result['placed'])
+        filled = status['filled_size']
+        
+        if filled >= status['total_placed'] * 0.99:
+            # Effectively fully filled
+            log(f"LADDER {coin}: FULL FILL after {elapsed}s, size={filled}")
+            break
+        
+        if filled > last_filled:
+            log(f"LADDER {coin}: partial fill {filled}/{status['total_placed']} ({status['fill_pct']*100:.0f}%) after {elapsed}s")
+            last_filled = filled
+    
+    # Window expired — cancel any unfilled rungs
+    _mm.cancel_unfilled_ladder(exchange, info, WALLET, coin, result['placed'], log)
+    
+    # Final fill check
+    final_status = _mm.get_ladder_fill_status(info, WALLET, coin, result['placed'])
+    final_filled = final_status['filled_size']
+    
+    if final_filled <= 0:
+        log(f"LADDER {coin}: NO FILL after {window}s window")
+        return None
+    
+    # Compute avg fill price from HL fills for this coin in window
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        end_ms = int(time.time() * 1000)
+        start_ms = end_ms - (window + 60) * 1000
+        payload = {'type': 'userFillsByTime', 'user': WALLET,
+                   'startTime': start_ms, 'endTime': end_ms}
+        import urllib.request as _ur, json as _j
+        req = _ur.Request('https://api.hyperliquid.xyz/info',
+                          data=_j.dumps(payload).encode(),
+                          headers={'Content-Type':'application/json'})
+        fills = _j.loads(_ur.urlopen(req, timeout=5).read())
+        match_dir = 'open long' if is_buy else 'open short'
+        coin_opens = [f for f in fills 
+                      if f.get('coin') == coin 
+                      and match_dir in (f.get('dir','').lower())]
+        if coin_opens:
+            total_qty = sum(float(f.get('sz',0) or 0) for f in coin_opens)
+            total_notional = sum(float(f.get('px',0) or 0) * float(f.get('sz',0) or 0) for f in coin_opens)
+            if total_qty > 0:
+                avg_px = total_notional / total_qty
+                log(f"LADDER {coin}: filled {len(coin_opens)} rungs, avg_px={avg_px:.6g}, total_size={total_qty}")
+                return avg_px
+    except Exception as e:
+        log(f"LADDER {coin}: fill price calc err {e}")
+    
+    # Fallback: return mid price
+    return get_mid(coin) or px
+
+
 def cancel_trigger_orders(coin):
     """Cancel any native SL/TP trigger orders for a coin — prevents orphaned stops."""
     try:
