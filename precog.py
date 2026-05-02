@@ -8523,13 +8523,74 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
         except Exception:
             pnl = 0
 
+    # ─── HL CLOSEDPNL OVERRIDE 2026-05-02 ─────────────────────────
+    # Authoritative: when close is exchange-driven, sum HL closedPnl
+    # across ALL Close fills for this trade window, then subtract ALL
+    # Open + Close fees. Bypasses single-fill price-delta (which misses
+    # multi-fill closes — INJ 09:31 closed in 4.3+8.7 chunks but ledger
+    # only saw one). Tunable via USE_HL_CLOSEDPNL=0 to disable.
+    _hl_pnl_used = False
+    if (os.environ.get('USE_HL_CLOSEDPNL', '1') == '1'
+            and close_reason in ('exchange_fill', 'tp', 'sl', 'timeout', 'no_progress',
+                                  'manual', 'protection', 'signal_reversal',
+                                  'legacy_close_shim', 'reconcile_missing')):
+        try:
+            from datetime import datetime as _dt2, timezone as _tz2
+            _ts_str2 = trade.get('timestamp', '')
+            if _ts_str2:
+                _t02 = _dt2.fromisoformat(_ts_str2)
+                if _t02.tzinfo is None:
+                    _t02 = _t02.replace(tzinfo=_tz2.utc)
+                _start_ms2 = int((_t02.timestamp() - 60) * 1000)
+                _end_ms2 = int((_dt2.now(_tz2.utc).timestamp() + 60) * 1000)
+                _payload2 = {'type': 'userFillsByTime', 'user': WALLET,
+                             'startTime': _start_ms2, 'endTime': _end_ms2}
+                import urllib.request as _ur2, json as _j2
+                _req2 = _ur2.Request('https://api.hyperliquid.xyz/info',
+                                     data=_j2.dumps(_payload2).encode(),
+                                     headers={'Content-Type': 'application/json'})
+                _hf2 = _j2.loads(_ur2.urlopen(_req2, timeout=5).read())
+                if _hf2:
+                    _hl_close_pnl = 0.0
+                    _hl_total_fees = 0.0
+                    _hl_close_count = 0
+                    _hl_open_count = 0
+                    _entry_ts_ms = int(_t02.timestamp() * 1000)
+                    for _f2 in _hf2:
+                        if _f2.get('coin') != coin: continue
+                        _f2_dir = (_f2.get('dir') or '').lower()
+                        _f2_ts = int(_f2.get('time', 0))
+                        # Open fills: must be within ±5min of entry timestamp
+                        if 'open' in _f2_dir and abs(_f2_ts - _entry_ts_ms) < 5*60*1000:
+                            _hl_total_fees += float(_f2.get('fee', 0) or 0)
+                            _hl_open_count += 1
+                        # Close fills: anything after entry, signed by direction match
+                        elif 'close' in _f2_dir and _f2_ts > _entry_ts_ms:
+                            # Verify direction matches (Long open → Long close, etc.)
+                            _expect_close = 'close long' if side in ('BUY','B','L') else 'close short'
+                            if _expect_close in _f2_dir:
+                                _hl_close_pnl += float(_f2.get('closedPnl', 0) or 0)
+                                _hl_total_fees += float(_f2.get('fee', 0) or 0)
+                                _hl_close_count += 1
+                    if _hl_open_count > 0 and _hl_close_count > 0:
+                        pnl = round(_hl_close_pnl - _hl_total_fees, 4)
+                        _hl_pnl_used = True
+                        log(f'[hl_pnl] {coin} trade_id={trade_id[:8]} '
+                            f'opens={_hl_open_count} closes={_hl_close_count} '
+                            f'gross=${_hl_close_pnl:.4f} fees=${_hl_total_fees:.4f} '
+                            f'net=${pnl}')
+        except Exception as _hpe:
+            log(f'[hl_pnl] err {coin}: {_hpe}')
+
     # ─── FEE DEDUCTION 2026-05-02 ─────────────────────────────────
+    # Skip if HL closedPnl already used (it includes fee subtraction).
     # Subtract HL fees (open + close) from PnL. Without this the ledger
     # overstates real PnL by ~$3-4/day in fees. Best-effort lookup from
     # HL userFillsByTime around the trade window. Only applied when
     # close_reason indicates an actual fill (exchange_fill / reconcile_*).
     # Tunable: SUBTRACT_FEES_FROM_PNL=0 disables (default 1).
     if (pnl is not None
+            and not _hl_pnl_used
             and os.environ.get('SUBTRACT_FEES_FROM_PNL', '1') == '1'
             and close_reason in ('exchange_fill', 'tp', 'sl', 'timeout', 'no_progress',
                                   'manual', 'protection', 'signal_reversal',
