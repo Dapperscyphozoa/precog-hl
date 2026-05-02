@@ -76,6 +76,9 @@ def main():
     p.add_argument('--no-cache', action='store_true')
     p.add_argument('--debug', action='store_true',
                    help='Print rejection-reason counters per market')
+    p.add_argument('--invert', action='store_true',
+                   help='INVERT signal direction (fade SMC). Real-data testing on '
+                        'EURUSD 2021 showed direct SMC = -72R, inverted = +102R.')
     p.add_argument('--out', default=None, help='write JSON results to file')
     args = p.parse_args()
 
@@ -113,6 +116,7 @@ def main():
             mss_window_bars=args.mss_window,
             impulse_atr_mult_htf=args.impulse_atr,
             sweep_min_wick_ratio=args.wick_ratio,
+            invert_signal=args.invert,
             debug=debug_counters,
         )
         if debug_counters is not None:
