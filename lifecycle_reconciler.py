@@ -497,6 +497,15 @@ def _detect_orphans(snap, ledger_stats):
     if not ledger:
         return
     action = _os_orph.environ.get('ORPHAN_ACTION', 'close').lower()
+    # ─── MANUAL TRADES PROTECTION 2026-05-02 ───────────────────────
+    # Coins listed in MANUAL_COINS env are NEVER touched by reconciler.
+    # No emergency close, no adopt, no missing-close detection, no SL/TP
+    # enforcement. These are positions opened by the operator outside
+    # the bot. Comma-separated, case-insensitive: "BTC,ETH,SOL".
+    _manual_raw = _os_orph.environ.get('MANUAL_COINS', '').strip().upper()
+    _manual_coins = set()
+    if _manual_raw:
+        _manual_coins = set(c.strip() for c in _manual_raw.split(',') if c.strip())
     exch_coins = set(snap.get('positions', {}).keys())
     try:
         ledger_open_coins = set(
@@ -506,6 +515,10 @@ def _detect_orphans(snap, ledger_stats):
         ledger_open_coins = set()
 
     for coin in exch_coins - ledger_open_coins:
+        # MANUAL COIN guard: never touch operator-managed positions
+        if coin.upper() in _manual_coins:
+            _log(f"ORPHAN SKIP: {coin} is in MANUAL_COINS — not touching")
+            continue
         # Skip coins we just closed — exchange snapshot lag would re-adopt otherwise
         if _coin_recently_closed(coin):
             _log(f"ORPHAN SKIP: {coin} was closed in last {_RECENT_CLOSED_COIN_TTL_SEC}s — snapshot lag")
@@ -574,6 +587,11 @@ def _detect_missing_closes(snap, authoritative):
     except Exception:
         return
     exch_coins = set(snap.get('positions', {}).keys())
+    # ─── MANUAL TRADES PROTECTION 2026-05-02 ───────────────────────
+    _manual_raw_mc = os.environ.get('MANUAL_COINS', '').strip().upper()
+    _manual_coins_mc = set()
+    if _manual_raw_mc:
+        _manual_coins_mc = set(c.strip() for c in _manual_raw_mc.split(',') if c.strip())
     now_dt = datetime.now(timezone.utc)
     for trade in ledger_opens:
         coin = trade.get('coin', '')
@@ -581,6 +599,9 @@ def _detect_missing_closes(snap, authoritative):
         if not coin or not tid:
             continue
         if coin in exch_coins:
+            continue
+        # MANUAL COIN guard: skip operator-managed coins entirely
+        if coin.upper() in _manual_coins_mc:
             continue
         # Min-age guard — newly-entered trades may not yet be in exchange snapshot
         try:

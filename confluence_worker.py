@@ -359,7 +359,14 @@ def _in_position(coin, exchange_coins=None):
 def _whitelist_blocked(coin, side):
     """Salvage whitelist: if WHITELIST_COIN_SIDE is set, only allow listed combos.
     Format: 'BTC:BUY,ETH:SELL,SOL:BUY' (comma-separated COIN:SIDE pairs).
-    Returns (blocked: bool, reason: str). Empty/unset env = allow all (legacy)."""
+    Also enforces MANUAL_COINS — never fires on coins the operator manages.
+    Returns (blocked: bool, reason: str). Empty/unset whitelist = allow all (legacy)."""
+    # MANUAL_COINS: operator-managed, bot must never fire here
+    manual_raw = os.environ.get('MANUAL_COINS', '').strip().upper()
+    if manual_raw:
+        manual_set = set(c.strip() for c in manual_raw.split(',') if c.strip())
+        if str(coin).upper() in manual_set:
+            return True, 'manual_coin'
     raw = os.environ.get('WHITELIST_COIN_SIDE', '').strip()
     if not raw:
         return False, ''

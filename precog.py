@@ -6062,6 +6062,15 @@ def apply_ticker_gate(coin, side, price, candles, return_reasons=False):
     """V3 trend + ATR-min filter. Returns True/False bool, OR (passed, reasons) if return_reasons=True.
     Reasons is a list of strings explaining why it failed (empty if passed)."""
     reasons = []
+    # MANUAL COINS — operator owns these, bot must never fire on them
+    _manual_raw_sa = os.environ.get('MANUAL_COINS', '').strip().upper()
+    if _manual_raw_sa:
+        _manual_set = set(c.strip() for c in _manual_raw_sa.split(',') if c.strip())
+        if str(coin).upper() in _manual_set:
+            reasons.append('manual_coin')
+            if return_reasons:
+                return False, reasons
+            return False
     # SALVAGE WHITELIST — only trade verified-profitable (coin, side) combos when env set
     _wl_raw = os.environ.get('WHITELIST_COIN_SIDE', '').strip()
     if _wl_raw:
