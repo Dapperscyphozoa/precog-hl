@@ -4813,6 +4813,23 @@ def get_alerts():
 LOG_BUFFER = []
 
 
+@app.route('/trades_export', methods=['GET'])
+def trades_export():
+    """Export full trades.csv. Optional ?engine_filter=CONFLUENCE to filter."""
+    try:
+        eng_filter = flask_request.args.get('engine_filter', '')
+        with open(TRADE_LOG, 'r') as f:
+            content = f.read()
+        if eng_filter:
+            lines = content.split('\n')
+            header = lines[0]
+            filtered = [header] + [l for l in lines[1:] if eng_filter in l]
+            content = '\n'.join(filtered)
+        return Response(content, mimetype='text/csv')
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/trades', methods=['GET'])
 def get_trades():
     """Return trade log CSV as JSON for analysis. Tolerates None/empty pnl values."""
