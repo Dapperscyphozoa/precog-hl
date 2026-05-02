@@ -8523,6 +8523,56 @@ def close_trade(trade_id, close_reason, exit_price=None, exchange_fill_id=None,
         except Exception:
             pnl = 0
 
+    # ─── FEE DEDUCTION 2026-05-02 ─────────────────────────────────
+    # Subtract HL fees (open + close) from PnL. Without this the ledger
+    # overstates real PnL by ~$3-4/day in fees. Best-effort lookup from
+    # HL userFillsByTime around the trade window. Only applied when
+    # close_reason indicates an actual fill (exchange_fill / reconcile_*).
+    # Tunable: SUBTRACT_FEES_FROM_PNL=0 disables (default 1).
+    if (pnl is not None
+            and os.environ.get('SUBTRACT_FEES_FROM_PNL', '1') == '1'
+            and close_reason in ('exchange_fill', 'tp', 'sl', 'timeout', 'no_progress',
+                                  'manual', 'protection', 'signal_reversal',
+                                  'legacy_close_shim', 'reconcile_missing')):
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            _ts_str = trade.get('timestamp', '')
+            if _ts_str:
+                _t0 = _dt.fromisoformat(_ts_str)
+                if _t0.tzinfo is None:
+                    _t0 = _t0.replace(tzinfo=_tz.utc)
+                # Window: entry_ts - 60s to now + 60s
+                _start_ms = int((_t0.timestamp() - 60) * 1000)
+                _end_ms = int((_dt.now(_tz.utc).timestamp() + 60) * 1000)
+                _payload = {'type': 'userFillsByTime', 'user': WALLET,
+                            'startTime': _start_ms, 'endTime': _end_ms}
+                _hf = info.post('/info', _payload) if hasattr(info, 'post') else None
+                if _hf is None:
+                    # Direct fallback
+                    import urllib.request as _ur, json as _j
+                    _req = _ur.Request('https://api.hyperliquid.xyz/info',
+                                       data=_j.dumps(_payload).encode(),
+                                       headers={'Content-Type': 'application/json'})
+                    _hf = _j.loads(_ur.urlopen(_req, timeout=5).read())
+                _trade_fees = 0.0
+                if _hf:
+                    # Match fills by exchange_fill_id (close) and time-proximate open
+                    for _f in _hf:
+                        if _f.get('coin') != coin: continue
+                        _f_oid = str(_f.get('oid', ''))
+                        _f_dir = (_f.get('dir') or '').lower()
+                        _f_ts = int(_f.get('time', 0))
+                        # Include the close fill (matches exchange_fill_id) + opens within ±5min of entry
+                        if exchange_fill_id and _f_oid == str(exchange_fill_id):
+                            _trade_fees += float(_f.get('fee', 0) or 0)
+                        elif 'open' in _f_dir and abs(_f_ts - int(_t0.timestamp() * 1000)) < 5*60*1000:
+                            _trade_fees += float(_f.get('fee', 0) or 0)
+                if _trade_fees > 0:
+                    pnl = round(pnl - _trade_fees, 4)
+                    log(f'[fees] {coin} trade_id={trade_id[:8]} fees=${_trade_fees:.4f} pnl_after_fees=${pnl}')
+        except Exception as _fe:
+            log(f'[fees] err {coin}: {_fe}')
+
     # Funding accrual: signed cost on notional from entry_ts to now.
     # Best-effort — doesn't block close on failure.
     _funding_pct = _funding_for_close(trade)

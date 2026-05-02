@@ -599,6 +599,57 @@ def _detect_missing_closes(snap, authoritative):
             pass  # fall through if timestamp parse fails
         # Ledger says open, exchange says closed → missing close event
         fill = _find_recent_fill(coin, snap.get('fills', []))
+        # ─── REAL FILL PRICE FIX 2026-05-02 ─────────────────────────
+        # Before recording close, look up the matching OPEN fill on HL
+        # and update the ENTRY ledger row with the actual fill price
+        # (not the signal price). Without this, PnL is computed against
+        # a stale signal entry and produces phantom profits/losses.
+        # See ZEN May 1: signal=$5.794, real fill=$6.24, ledger pnl
+        # off by $3.35.
+        try:
+            _all_fills = snap.get('fills', []) or []
+            _open_dir_match = 'open'
+            _matching_opens = []
+            for _f in _all_fills:
+                if _f.get('coin') != coin: continue
+                _d = (_f.get('dir') or '').lower()
+                if _open_dir_match not in _d: continue
+                _matching_opens.append(_f)
+            # Use the open fill closest in time to the trade's entry timestamp.
+            _open_fill = None
+            if _matching_opens and trade.get('timestamp'):
+                try:
+                    _t0 = datetime.fromisoformat(trade['timestamp'])
+                    if _t0.tzinfo is None:
+                        _t0 = _t0.replace(tzinfo=timezone.utc)
+                    _t0_ms = int(_t0.timestamp() * 1000)
+                    # Closest open fill within ±5 minutes of entry ts
+                    _candidates = [(abs(int(_f.get('time', 0)) - _t0_ms), _f)
+                                   for _f in _matching_opens
+                                   if abs(int(_f.get('time', 0)) - _t0_ms) < 5*60*1000]
+                    if _candidates:
+                        _candidates.sort(key=lambda x: x[0])
+                        _open_fill = _candidates[0][1]
+                except Exception:
+                    pass
+            if _open_fill:
+                _real_open_px = float(_open_fill.get('px') or 0)
+                _ledger_entry_px = float(trade.get('entry_price') or 0)
+                if (_real_open_px > 0 and _ledger_entry_px > 0
+                        and abs(_real_open_px - _ledger_entry_px) / _ledger_entry_px > 0.001):
+                    # Only correct if difference > 0.1% (avoid noise updates).
+                    try:
+                        ledger.update_entry_fields(
+                            trade_id=tid,
+                            entry_price=_real_open_px,
+                            realized_slippage_pct=(_real_open_px - _ledger_entry_px) / _ledger_entry_px,
+                        )
+                        _log(f"ENTRY_PX_CORRECTED {coin} signal={_ledger_entry_px:.6f} "
+                             f"real={_real_open_px:.6f} drift={(_real_open_px-_ledger_entry_px)/_ledger_entry_px*100:+.2f}%")
+                    except Exception as _ec:
+                        _log(f"ENTRY_PX_CORRECT err {coin}: {_ec}")
+        except Exception as _eo:
+            _log(f"open-fill lookup err {coin}: {_eo}")
         if not authoritative:
             with _LOCK:
                 _METRICS['observe_would_close_count'] += 1

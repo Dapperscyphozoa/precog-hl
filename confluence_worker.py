@@ -724,6 +724,17 @@ def _record_slippage(coin, slip_pct):
 
 def _register_position(coin, signal, fill_result):
     """Track cluster position locally for monitoring + exit management."""
+    # ─── REAL FILL PRICE FIX 2026-05-02 ──────────────────────────
+    # Use ACTUAL HL fill price (not signal price) for entry tracking.
+    # The signal price is what the system saw when generating; the actual
+    # fill is what we paid. Using signal price for raw_move/PnL caused
+    # phantom profits when fast moves filled above signal (May 1 ZEN bug).
+    # Fall back to signal['entry'] only if fill_result lacks actual_px.
+    _real_entry = signal['entry']
+    if isinstance(fill_result, dict):
+        _ap = fill_result.get('actual_px')
+        if _ap and float(_ap) > 0:
+            _real_entry = float(_ap)
     # ─── ALIGNMENT 2026-04-25 STEP 2: hard check at entry ───────
     # Even if a stray signal slips through earlier filters, refuse to
     # register if coin is not in current System A whitelist.
@@ -739,7 +750,8 @@ def _register_position(coin, signal, fill_result):
     with _state_lock:
         _state['open_positions'][coin] = {
             'side': signal['side'],
-            'entry': signal['entry'],
+            'entry': _real_entry,           # REAL HL fill px (was signal price)
+            'signal_entry': signal['entry'],  # preserve signal price for slippage diag
             'ts': int(time.time()),
             'n_sys': signal['n_sys'],
             'systems': signal['systems'],
@@ -757,7 +769,7 @@ def _register_position(coin, signal, fill_result):
             'universe_aligned_ts': 1777076400,  # 2026-04-25 alignment anchor
             # ─── LIFECYCLE STATE MACHINE ───
             'state': 'OPEN',                 # OPEN → IN_PROFIT → LOCKED → CLOSED → TIMEOUT
-            'max_favourable_px': signal['entry'],  # tracks high-water for trailing logic
+            'max_favourable_px': _real_entry,  # tracks high-water for trailing logic
             'sl_at_be': False,               # set True when BE shift fires
         }
         _state['total_fires'] += 1
