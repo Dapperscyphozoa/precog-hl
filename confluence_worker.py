@@ -780,7 +780,7 @@ def _monitor_exits():
     Replaces old passive 72h max_hold model.
     """
     HARD_TIMEOUT_S = 6 * 3600       # 6h non-negotiable
-    NO_PROGRESS_AGE_S = 2 * 3600    # 2h then check progress
+    NO_PROGRESS_AGE_S = 6 * 3600    # 6h then check progress (was 2h, killing winning trades early)
     NO_PROGRESS_THRESHOLD = 0.003   # |raw| < 0.3% = stuck
     PROFIT_LOCK_PCT = 0.015          # raw ≥ 1.5% → close
     PROFIT_LOCK_BE_PCT = 0.008       # raw ≥ 0.8% → move SL to entry
