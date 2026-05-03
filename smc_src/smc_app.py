@@ -162,42 +162,195 @@ def health():
 # We stub them to return 200 with empty/SMC-equivalent data so the page
 # renders without console-error storms.
 
+def _smc_session_name():
+    """Map current UTC hour to session label."""
+    h = __import__('datetime').datetime.utcnow().hour
+    if 0 <= h < 5:    return 'asian-skip'
+    if 5 <= h < 8:    return 'asian-late'
+    if 8 <= h < 13:   return 'london'
+    if 13 <= h < 17:  return 'overlap'
+    if 17 <= h < 22:  return 'ny'
+    return 'after-hours'
+
+
+def _smc_positions_for_dash():
+    """Shape SMC + orphan positions for /dash."""
+    out = []
+    for coin, p in state.positions.items():
+        is_smc = p.get('trade_id', '').startswith('smc-')
+        mark = smc_pl_compat.get_mark_price(coin) or p.get('fill_price') or 0
+        entry = p.get('fill_price') or p.get('ob_top') or 0
+        size = p.get('fill_size') or p.get('size') or 0
+        upnl = (mark - entry) * size if entry and size else 0
+        out.append({
+            'coin': coin,
+            'side': 'LONG' if p.get('side') == 'BUY' else (p.get('side') or 'LONG'),
+            'entry': entry,
+            'mark': mark,
+            'size': size,
+            'upnl': upnl,
+            'lev': '10x',
+            'tp': p.get('tp2') or p.get('tp1'),
+            'sl': p.get('sl_current') or p.get('sl_orig') or p.get('sl_price'),
+            'engine': 'SMC' if is_smc else 'ORPHAN',
+            'tp_pct': None,
+            'sl_pct': None,
+        })
+    return out
+
+
 @app.route('/dash', methods=['GET'])
 def dash_compat():
     return jsonify({
         'version': 'smc-1.0',
         'live_trading': bool(int(os.environ.get('LIVE_TRADING', '0'))),
         'equity': smc_pl_compat.get_equity(),
-        'positions': _smc_position_count(),
+        'positions': _smc_positions_for_dash(),
         'armed': len(state.armed),
         'halt': state.halt_flag,
         'btc_trend_up': state.btc_trend_up,
         'universe_size': len(state.universe),
+        'session': {'name': _smc_session_name()},
+        'orderbook': {'verified_coins': len(state.universe)},
+        'whale': {'total_whales': 0},
+        'funding_cached': len(state.funding_cache),
+        'risk_ladder': {'risk': 0.10},
     })
+
 
 @app.route('/engines', methods=['GET'])
 def engines_compat():
-    return jsonify({'engines': [{'name': 'SMC v1.0', 'status': 'live', 'live_trading': bool(int(os.environ.get('LIVE_TRADING', '0')))}]})
+    """Shape engine state for the landing's grid renderer."""
+    smc_live = bool(int(os.environ.get('LIVE_TRADING', '0')))
+    ws_fresh = _ws_fresh()
+    return jsonify({
+        'signal_engines': {
+            'SMC_v1':       smc_live,
+            'pine_webhook': True,
+            'btc_trend':    state.btc_trend_up is not None,
+            'funding':      len(state.funding_cache) > 0,
+        },
+        'guards': {
+            'webhook_secret': True,
+            'short_halt':     True,
+            'rr_min':         True,
+            'session_filter': True,
+            'flight_guard':   True,
+            'atomic_entry':   True,
+            'reconciler':     True,
+            'halt_flag':      not state.halt_flag,
+        },
+        'venues': {
+            'HYPERLIQUID': ws_fresh,
+            'OKX':         True,
+            'BINANCE':     False,
+            'BYBIT':       False,
+            'COINBASE':    False,
+            'BITGET':      False,
+            'KRAKEN':      False,
+        },
+        'sizing': {
+            'fixed_50_usd':    True,
+            'long_only':       True,
+            'max_20_pos':      True,
+            'maker_only_alo':  True,
+        },
+        'venue_ages': {
+            'hl': 0 if ws_fresh else 999,
+            'okx': 0,
+            'by': 999, 'bn': 999, 'cb': 999, 'bg': 999, 'kr': 999,
+        },
+    })
+
 
 @app.route('/signals', methods=['GET'])
 def signals_compat():
-    return jsonify({'signals': smc_trade_log.tail(20)})
+    """Recent SMC trade events as signal feed: ARMED/FILLED/CLOSED."""
+    rows = smc_trade_log.tail(50)
+    items = []
+    KIND_MAP = {
+        'ARMED':         'OPEN',
+        'FILLED':        'OPEN',
+        'CLOSED_TP':     'CLOSED',
+        'CLOSED_SL':     'CLOSED',
+        'CLOSED_BE':     'CLOSED',
+        'CLOSED_MARKET': 'CLOSED',
+        'GATE_PASS':     'PASS',
+        'GATE_FAIL':     'SKIP',
+        'REJECTED':      'REJECTED',
+    }
+    for r in reversed(rows):
+        ev = r.get('event', '')
+        kind = KIND_MAP.get(ev)
+        if not kind:
+            continue
+        ts_ms = r.get('event_ts_ms')
+        try:
+            ts_str = __import__('datetime').datetime.utcfromtimestamp(int(ts_ms) / 1000).strftime('%H:%M:%S')
+        except Exception:
+            ts_str = ''
+        items.append({
+            'coin': r.get('coin') or '—',
+            'kind': kind,
+            'side': r.get('side') or '',
+            'ts':   ts_str,
+            'event': ev,
+            'reason': r.get('reason') or r.get('gate_reason') or '',
+        })
+        if len(items) >= 20:
+            break
+    return jsonify({'items': items})
+
 
 @app.route('/news', methods=['GET'])
 def news_compat():
-    return jsonify({'news': []})
+    return jsonify({'items': []})
+
 
 @app.route('/whales', methods=['GET'])
 def whales_compat():
-    return jsonify({'whales': []})
+    return jsonify({'items': []})
+
 
 @app.route('/orderbook/<coin>', methods=['GET'])
 def orderbook_compat(coin):
-    return jsonify({'coin': coin, 'orderbook': None, 'note': 'not tracked in SMC'})
+    """Lightweight orderbook stub — landing degrades gracefully when mid is null."""
+    mark = smc_pl_compat.get_mark_price(coin)
+    return jsonify({
+        'coin': coin,
+        'mid': mark,
+        'bids': [],
+        'asks': [],
+        'note': 'SMC does not track orderbooks',
+    })
+
 
 @app.route('/audit/deep', methods=['GET'])
 def audit_compat():
-    return jsonify({'rows': smc_trade_log.tail(int(request.args.get('hours', 24)) * 5), 'fmt': request.args.get('format', 'json')})
+    """Aggregate closed trades per coin for the heatmap."""
+    rows = smc_trade_log.tail(2000)
+    per_coin = {}
+    CLOSE_EVENTS = {'CLOSED_TP', 'CLOSED_SL', 'CLOSED_BE', 'CLOSED_MARKET'}
+    for r in rows:
+        if r.get('event') not in CLOSE_EVENTS:
+            continue
+        coin = r.get('coin')
+        if not coin:
+            continue
+        try:
+            pnl_r = float(r.get('pnl_r') or 0)
+        except (ValueError, TypeError):
+            pnl_r = 0
+        try:
+            pnl_usd = float(r.get('pnl_usd') or 0)
+        except (ValueError, TypeError):
+            pnl_usd = 0
+        c = per_coin.setdefault(coin, {'coin': coin, 'n': 0, 'w': 0, 'l': 0, 'pnl': 0.0})
+        c['n'] += 1
+        if pnl_r > 0:   c['w'] += 1
+        elif pnl_r < 0: c['l'] += 1
+        c['pnl'] += pnl_usd
+    return jsonify({'per_coin': list(per_coin.values()), 'rows': len(rows)})
 
 
 @app.route('/smc/alert', methods=['POST'])
