@@ -66,11 +66,19 @@ def round_size(coin: str, sz: float) -> float:
 
 
 def round_price(coin: str, px: float) -> float:
-    """Match precog-hl precog.round_price for small-tick safety."""
+    """Round to HL tick: 5 sig figs AND no more than (6-szDecimals) decimal places.
+    Uses Decimal to avoid binary float drift that float_to_wire rejects.
+    """
+    from decimal import Decimal, ROUND_HALF_EVEN
     _ensure_hl()
+    if px is None or px <= 0:
+        return px
     d = _meta_cache['px_decimals'].get(coin, 4)
-    # 5 sig figs first, then asset-specific decimals
-    return round(float(f"{px:.5g}"), d)
+    # Step 1: constrain to 5 significant figures
+    sig5_str = f"{px:.5g}"
+    # Step 2: re-quantize to asset's max decimal places using Decimal (no float drift)
+    quant = Decimal('1e-' + str(d)) if d > 0 else Decimal('1')
+    return float(Decimal(sig5_str).quantize(quant, rounding=ROUND_HALF_EVEN))
 
 
 # ---------------- Submit ----------------
@@ -87,9 +95,10 @@ def submit_smc_trade(payload: dict, ctx: dict):
 
     coin = (payload.get('coin') or '').upper()
     notional = SMC_CONFIG['force_notional_usd']
-    ob_top = float(payload['ob_top'])
-    sl_px = float(payload['sl_price'])
-    tp_px = float(payload['tp2'])
+    # Pre-round prices to HL tick size (HL float_to_wire is strict on precision)
+    ob_top = round_price(coin, float(payload['ob_top']))
+    sl_px = round_price(coin, float(payload['sl_price']))
+    tp_px = round_price(coin, float(payload['tp2']))
 
     raw_size = notional / ob_top
     size = round_size(coin, raw_size)
