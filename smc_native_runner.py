@@ -76,12 +76,11 @@ class NativeSMCRunner:
                 except Exception as e:
                     log.exception(f"on_setup_callback raised: {e}")
             
-            # 5. Start feed
+            # 5. Start feed (pass pre-warmed detectors so live candles continue from warmup state)
             self.feed = CandleFeed(
-                self.universe,
+                detectors=self.detectors,    # use pre-warmed detectors from step 3
                 interval='15m',
                 on_setup=wrapped_setup,
-                detector_kwargs={},   # use validated defaults
                 on_log=self.on_log,
             )
             self.feed.start()

@@ -1,21 +1,13 @@
 """
-smc_native_feed.py — HL websocket candle feed (CORRECTED).
+smc_native_feed.py — HL websocket candle feed.
 
 HL's candle channel updates the SAME bar in-place until a new bar opens.
 We detect close by observing 't' (open_ms) changing.
-
-Strategy:
-  - For each coin, track current bar (latest snapshot of t/o/h/l/c/v).
-  - When a msg arrives with a NEW 't' (different from current_bar['t']),
-    the previous bar is now finalised. Feed it to the detector.
-  - Replace current_bar with the new one.
-  - On startup, the first msg per coin just initialises current_bar (no close yet).
 """
 import json
 import logging
 import threading
 import time
-from collections import deque
 
 import websocket
 
@@ -27,18 +19,25 @@ HL_WS_URL = 'wss://api.hyperliquid.xyz/ws'
 
 
 class CandleFeed:
-    def __init__(self, coins, interval='15m', on_setup=None,
+    def __init__(self, coins=None, detectors=None, interval='15m', on_setup=None,
                  detector_kwargs=None, on_log=None):
-        self.coins = list(coins)
-        self.interval = interval
-        self.on_setup = on_setup or (lambda s: log.info(f"setup: {s}"))
+        """Either pass `coins` (will create fresh detectors) OR `detectors` (use pre-built).
+        Pre-built is needed when bootstrap has already warmed detectors with history.
+        """
         self.detector_kwargs = detector_kwargs or {}
         self.log = on_log or log.info
         
-        self.detectors = {c: SMCDetector(c, **self.detector_kwargs) for c in self.coins}
-        # Latest in-progress bar per coin
+        if detectors is not None:
+            self.detectors = detectors
+            self.coins = list(detectors.keys())
+        else:
+            assert coins is not None, "Must pass either coins or detectors"
+            self.coins = list(coins)
+            self.detectors = {c: SMCDetector(c, **self.detector_kwargs) for c in self.coins}
+        
+        self.interval = interval
+        self.on_setup = on_setup or (lambda s: log.info(f"setup: {s}"))
         self.current_bar = {c: None for c in self.coins}
-        # Track recent close times for stats
         self.last_close_t = {c: 0 for c in self.coins}
         
         self.stats = {
@@ -53,7 +52,6 @@ class CandleFeed:
     
     def _on_open(self, ws):
         self.log(f"smc_native_feed: WS open, subscribing {len(self.coins)} coins × {self.interval}")
-        # Send subscriptions in batches with small delay to avoid burst-throttle
         for i, coin in enumerate(self.coins):
             sub = {
                 'method': 'subscribe',
@@ -64,7 +62,7 @@ class CandleFeed:
             except Exception as e:
                 self.log(f"sub err {coin}: {e}")
             if i % 50 == 49:
-                time.sleep(0.5)   # throttle every 50 subs
+                time.sleep(0.5)
     
     def _on_message(self, ws, raw):
         try:
@@ -100,9 +98,7 @@ class CandleFeed:
         
         cur = self.current_bar[coin]
         
-        # CLOSE DETECTION: if new bar's open_t differs from current_bar's open_t, the cur is now closed.
         if cur is not None and new_bar['t'] != cur['t']:
-            # Cur is finalised
             closed_bar = cur
             self.last_close_t[coin] = closed_bar['t']
             self.stats['closes_processed'] += 1
@@ -125,7 +121,6 @@ class CandleFeed:
                 self.stats['errors'] += 1
                 log.exception(f"detector.on_close raised for {coin}: {e}")
         
-        # Always update current_bar to latest snapshot
         self.current_bar[coin] = new_bar
     
     def _on_error(self, ws, err):
@@ -188,19 +183,3 @@ class CandleFeed:
                     c: d.state for c, d in self.detectors.items() if d.state != 'NONE'
                 },
             }
-
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
-    
-    coins = ['JUP', 'JTO', 'SOL', 'INJ']
-    feed = CandleFeed(coins, on_setup=lambda s: print(f"SETUP: {s['coin']}"), on_log=print)
-    feed.start()
-    
-    print("Running 90s — wait for 15m boundary if you want to see a real close")
-    for i in range(9):
-        time.sleep(10)
-        st = feed.status()
-        print(f"t+{(i+1)*10}s msgs={st['msgs']} closes={st['closes_processed']} setups={st['setups_fired']}")
-    
-    feed.stop()
