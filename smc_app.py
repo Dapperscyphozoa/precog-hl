@@ -284,10 +284,10 @@ def weekly():
     return jsonify(smc_daily_rollup.weekly_summary(weeks))
 
 
-@app.route('/smc/halt', methods=['POST'])
+@app.route('/smc/halt', methods=['POST', 'GET'])
 def halt():
     if request.args.get('secret') != WEBHOOK_SECRET:
-        return jsonify({'status': 'unauthorized'}), 401
+        return jsonify({'status': 'unauthorized', 'usage': 'POST /smc/halt?secret=...'}), 401
     state.halt_flag = True
     state.halt_reason = 'manual'
     smc_state.persist()
@@ -295,15 +295,25 @@ def halt():
     return jsonify({'status': 'halted'})
 
 
-@app.route('/smc/unhalt', methods=['POST'])
+@app.route('/smc/unhalt', methods=['POST', 'GET'])
 def unhalt():
     if request.args.get('secret') != WEBHOOK_SECRET:
-        return jsonify({'status': 'unauthorized'}), 401
+        return jsonify({'status': 'unauthorized', 'usage': 'POST /smc/unhalt?secret=...'}), 401
     state.halt_flag = False
     state.halt_reason = None
     smc_state.persist()
     smc_trade_log.log_system('UNHALT')
     return jsonify({'status': 'unhalted'})
+
+
+# Catch-all: any unknown path falls back to landing page (no more 404/405)
+@app.route('/<path:_anything>', methods=['GET'])
+def _catchall(_anything):
+    try:
+        with open('landing.html', 'r') as f:
+            return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+    except FileNotFoundError:
+        return jsonify({'service': 'SMC v1.0', 'path': _anything}), 200
 
 
 # ---------------- Local dev ----------------
