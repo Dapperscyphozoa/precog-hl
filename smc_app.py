@@ -325,6 +325,133 @@ def orderbook_compat(coin):
     })
 
 
+def _aggregate_smc_window(hours: int = 12):
+    """Compute landing-panel-shaped aggregates from SMC trade log over `hours`."""
+    cutoff_ms = int(time.time() * 1000) - hours * 3600 * 1000
+    rows = smc_trade_log.tail(5000)
+    rows_window = [r for r in rows if int(r.get('event_ts_ms', 0) or 0) >= cutoff_ms]
+
+    CLOSE_EVENTS = {'CLOSED_TP', 'CLOSED_SL', 'CLOSED_BE', 'CLOSED_MARKET'}
+    closes = [r for r in rows_window if r.get('event') in CLOSE_EVENTS]
+
+    def _f(v, dflt=0.0):
+        try: return float(v)
+        except (ValueError, TypeError): return dflt
+
+    wins = [c for c in closes if _f(c.get('pnl_r')) > 0]
+    losses = [c for c in closes if _f(c.get('pnl_r')) < 0]
+    breakevens = [c for c in closes if _f(c.get('pnl_r')) == 0]
+
+    total_pnl = sum(_f(c.get('pnl_usd')) for c in closes)
+    avg_win = (sum(_f(c.get('pnl_usd')) for c in wins) / len(wins)) if wins else 0.0
+    avg_loss = (sum(_f(c.get('pnl_usd')) for c in losses) / len(losses)) if losses else 0.0
+    closed_count = len(closes)
+    wr_pct = (len(wins) / closed_count * 100) if closed_count else 0.0
+
+    # Per-engine breakdown — for SMC this is just one engine
+    by_engine = {
+        'SMC_v1': {
+            'n': closed_count,
+            'w': len(wins),
+            'l': len(losses),
+            'b': len(breakevens),
+            'wr_pct': round(wr_pct, 1),
+            'pnl_usd': round(total_pnl, 2),
+        },
+    }
+
+    # Counters from event types in window
+    alerts_recv = sum(1 for r in rows_window if r.get('event') == 'ALERT_RECV')
+    armed_count = sum(1 for r in rows_window if r.get('event') == 'ARMED')
+    rejected = sum(1 for r in rows_window if r.get('event') == 'REJECTED')
+    filled = sum(1 for r in rows_window if r.get('event') == 'FILLED')
+    expired = sum(1 for r in rows_window if r.get('event') == 'EXPIRED')
+
+    # Gate-fail breakdown for rejects display
+    gate_fails = [r for r in rows_window if r.get('event') == 'GATE_FAIL']
+    rejects = {}
+    for r in gate_fails:
+        reason = r.get('gate_reason') or 'unknown'
+        rejects[reason] = rejects.get(reason, 0) + 1
+
+    return {
+        'total_pnl_usd': round(total_pnl, 2),
+        'wr_pct_window': round(wr_pct, 1),
+        'wins_window': len(wins),
+        'losses_window': len(losses),
+        'breakevens_window': len(breakevens),
+        'closed_count': closed_count,
+        'avg_win_usd': round(avg_win, 4),
+        'avg_loss_usd': round(avg_loss, 4),
+        'by_engine': by_engine,
+        'alerts_recv_window': alerts_recv,
+        'armed_window': armed_count,
+        'rejected_window': rejected,
+        'filled_window': filled,
+        'expired_window': expired,
+        'rejects_last_scan': rejects,
+    }
+
+
+@app.route('/precog_status', methods=['GET'])
+def precog_status():
+    """Shape SMC + SA data for the landing's SA panel (renderSystemA)."""
+    hours = int(request.args.get('hours', 12))
+    agg = _aggregate_smc_window(hours)
+    return jsonify({
+        **agg,
+        'enabled': bool(int(os.environ.get('LIVE_TRADING', '0'))),
+        'disabled_engines': '',
+        'engine_auto_pause': {},
+        'risk_pct': SMC_CONFIG['force_notional_usd'] / max(smc_pl_compat.get_equity() or 525, 1),
+    })
+
+
+@app.route('/confluence', methods=['GET'])
+def confluence():
+    """Shape SMC data for the landing's SMC panel (renderSystemB, was confluence)."""
+    hours = int(request.args.get('hours', 12))
+    agg = _aggregate_smc_window(hours)
+
+    # Open positions in confluence panel shape
+    open_positions = {}
+    for coin, p in state.positions.items():
+        if not p.get('trade_id', '').startswith('smc-'):
+            continue
+        risk = abs((p.get('fill_price') or 0) - (p.get('sl_orig') or 0))
+        entry = p.get('fill_price') or p.get('ob_top') or 0
+        tp_pct = ((p.get('tp2') or 0) - entry) / entry * 100 if entry else 0
+        sl_pct = ((p.get('sl_orig') or 0) - entry) / entry * 100 if entry else 0
+        open_positions[coin] = {
+            'side': p.get('side') or 'BUY',
+            'entry': entry,
+            'systems': ['SMC'],
+            'tp_pct': round(tp_pct, 2),
+            'sl_pct': round(sl_pct, 2),
+            'sl_at_be': bool(p.get('be_done')),
+            'mfe_pct': p.get('mfe_pct'),
+            'mae_pct': p.get('mae_pct'),
+            'ts': p.get('fill_time_ms'),
+        }
+
+    return jsonify({
+        **agg,
+        'dry_run': not bool(int(os.environ.get('LIVE_TRADING', '0'))),
+        'enabled': not state.halt_flag,
+        'open_positions': open_positions,
+        'max_positions': SMC_CONFIG['max_concurrent_positions'],
+        'engine_stats': {'signals_yielded': agg['armed_window']},
+        'last_scan_signals': agg['alerts_recv_window'],
+        'last_scan_fires': agg['armed_window'],
+        'total_fires': agg['armed_window'],
+        'place_attempts': agg['armed_window'],
+        'place_filled': agg['filled_window'],
+        'place_no_fill': agg['expired_window'],
+        'place_error': agg['rejected_window'],
+        'killed_coins': [],
+    })
+
+
 @app.route('/audit/deep', methods=['GET'])
 def audit_compat():
     """Aggregate closed trades per coin for the heatmap."""
