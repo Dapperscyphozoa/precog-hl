@@ -220,7 +220,6 @@ def dash_compat():
         'equity': smc_pl_compat.get_equity(),
         'positions': _smc_positions_for_dash(),
         'armed': len(state.armed),
-        'halt': state.halt_flag,
         'btc_trend_up': state.btc_trend_up,
         'universe_size': len(state.universe),
         'session': {'name': _smc_session_name()},
@@ -245,13 +244,11 @@ def engines_compat():
         },
         'guards': {
             'webhook_secret': True,
-            'short_halt':     True,
             'rr_min':         True,
             'session_filter': True,
             'flight_guard':   True,
             'atomic_entry':   True,
             'reconciler':     True,
-            'halt_flag':      not state.halt_flag,
         },
         'venues': {
             'HYPERLIQUID': ws_fresh,
@@ -450,7 +447,7 @@ def confluence():
     return jsonify({
         **agg,
         'dry_run': not bool(int(os.environ.get('LIVE_TRADING', '0'))),
-        'enabled': not state.halt_flag,
+        'enabled': True,
         'open_positions': open_positions,
         'max_positions': SMC_CONFIG['max_concurrent_positions'],
         'engine_stats': {'signals_yielded': agg['armed_window']},
@@ -517,8 +514,6 @@ def status():
         'version': 'smc-1.0',
         'live_trading': bool(int(os.environ.get('LIVE_TRADING', '0'))),
         'long_only': bool(int(os.environ.get('LONG_ONLY', '1'))),
-        'halt_flag': state.halt_flag,
-        'halt_reason': state.halt_reason,
         'armed_count': len(state.armed),
         'positions_count': smc_pos_count,
         'orphan_positions': orphans,
@@ -575,28 +570,6 @@ def daily():
 def weekly():
     weeks = int(request.args.get('weeks', 4))
     return jsonify(smc_daily_rollup.weekly_summary(weeks))
-
-
-@app.route('/smc/halt', methods=['POST', 'GET'])
-def halt():
-    if request.args.get('secret') != WEBHOOK_SECRET:
-        return jsonify({'status': 'unauthorized', 'usage': 'POST /smc/halt?secret=...'}), 401
-    state.halt_flag = True
-    state.halt_reason = 'manual'
-    smc_state.persist()
-    smc_trade_log.log_system('HALT_TRIGGERED', reason='manual')
-    return jsonify({'status': 'halted'})
-
-
-@app.route('/smc/unhalt', methods=['POST', 'GET'])
-def unhalt():
-    if request.args.get('secret') != WEBHOOK_SECRET:
-        return jsonify({'status': 'unauthorized', 'usage': 'POST /smc/unhalt?secret=...'}), 401
-    state.halt_flag = False
-    state.halt_reason = None
-    smc_state.persist()
-    smc_trade_log.log_system('UNHALT')
-    return jsonify({'status': 'unhalted'})
 
 
 @app.route('/smc/native/status', methods=['GET'])

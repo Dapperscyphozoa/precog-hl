@@ -35,7 +35,7 @@ HEADERS = [
     # mfe/mae
     'avg_mfe_pct', 'avg_mae_pct',
     # system
-    'halts_triggered', 'ws_stale_events', 'orphans_pruned',
+    'ws_stale_events', 'orphans_pruned',
     # equity
     'equity_eod', 'cumulative_net_pnl',
 ]
@@ -116,8 +116,6 @@ def generate_rollup(date_str=None, current_equity=None):
     holds = [_safe_float(c.get('hold_minutes')) for c in closes]
 
     # ---- system ----
-    halts = [r for r in smc_trade_log.filter_by(event='HALT_TRIGGERED', since_ms=start_ms)
-             if int(r.get('event_ts_ms', 0)) < end_ms]
     ws_stale = [r for r in smc_trade_log.filter_by(event='WS_STALE', since_ms=start_ms)
                 if int(r.get('event_ts_ms', 0)) < end_ms]
     orphans = [r for r in smc_trade_log.filter_by(event='ORPHAN_PRUNED', since_ms=start_ms)
@@ -159,7 +157,6 @@ def generate_rollup(date_str=None, current_equity=None):
         'closes_market': sum(1 for c in closes if c.get('event') == 'CLOSED_MARKET'),
         'avg_mfe_pct': round(_avg([c.get('mfe_pct') for c in closes]), 4),
         'avg_mae_pct': round(_avg([c.get('mae_pct') for c in closes]), 4),
-        'halts_triggered': len(halts),
         'ws_stale_events': len(ws_stale),
         'orphans_pruned': len(orphans),
         'equity_eod': current_equity if current_equity is not None else '',

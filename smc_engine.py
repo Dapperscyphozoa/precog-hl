@@ -85,7 +85,6 @@ def _gate_value(num: int, payload: dict, ctx: dict):
     if num == 2:  return [f for f in REQUIRED_PAYLOAD_FIELDS if f not in payload]
     if num == 3:  return 'within_dedupe_window'
     if num == 4:  return payload.get('side')
-    if num == 5:  return state.halt_reason
     if num == 6:  return payload.get('coin')
     if num == 7:  return ctx.get('session_utc_hour')
     if num == 8:  return payload.get('rr_to_tp2')
@@ -155,7 +154,6 @@ def handle_smc_alert(payload: dict):
         (2,  'schema',         lambda: all(f in payload for f in REQUIRED_PAYLOAD_FIELDS)),
         (3,  'dedupe',         lambda: not dedupe_check(payload['alert_id'])),
         (4,  'short_signal',   lambda: payload.get('side') != 'SELL'),
-        (5,  'halt_flag',      lambda: not state.halt_flag),
         (6,  'major_excluded', lambda: payload['coin'] not in SMC_CONFIG['excluded_majors']),
         (7,  'session',        lambda: not _in_skip_session()),
         (8,  'rr_min',         lambda: float(payload.get('rr_to_tp2', 0)) >= SMC_CONFIG['min_rr_to_take']),
@@ -180,25 +178,12 @@ def handle_smc_alert(payload: dict):
         value = _gate_value(num, payload, ctx)
         smc_trade_log.log_gate_fail(payload, num, name, value, ctx)
 
-        # Gate 4: short signal HALTS the system
+        # Gate 4: short signal rejected
         if num == 4:
-            state.halt_flag = True
-            state.halt_reason = f"short_signal_{payload.get('coin')}_{payload.get('alert_id')}"
-            try:
-                state_persist()
-            except Exception:
-                pass
-            smc_trade_log.log_system(
-                'HALT_TRIGGERED',
-                coin=payload.get('coin'),
-                reason=state.halt_reason,
-                alert_id=payload.get('alert_id'),
-            )
             pushover_alert(
-                f"SMC HALT: SHORT signal on {payload.get('coin')} "
+                f"SMC: SHORT signal rejected on {payload.get('coin')} "
                 f"({payload.get('alert_id')})"
             )
-            return {'status': 'halted_on_short'}, 200
 
         return {'status': f'gate_fail_{name}', 'gate': num, 'value': value}, 200
 

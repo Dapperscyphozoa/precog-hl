@@ -158,12 +158,11 @@ def nightly_rollup():
 
 def heartbeat():
     log.info(
-        "[hb] armed=%d pos=%d eq=%s btc_trend=%s halt=%s ws_fresh=%s",
+        "[hb] armed=%d pos=%d eq=%s btc_trend=%s ws_fresh=%s",
         len(state.armed),
         sum(1 for p in state.positions.values() if p.get('trade_id', '').startswith('smc-')),
         smc_pl_compat.get_equity(),
         state.btc_trend_up,
-        state.halt_flag,
         smc_pl_compat.ws_is_fresh(),
     )
 

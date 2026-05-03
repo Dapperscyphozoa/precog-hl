@@ -16,7 +16,7 @@ EVENTS = [
     'FILLED', 'BE_MOVED',
     'CLOSED_TP', 'CLOSED_SL', 'CLOSED_BE', 'CLOSED_MARKET',
     # system
-    'WS_STALE', 'HALT_TRIGGERED', 'UNHALT',
+    'WS_STALE',
     'ORPHAN_PRUNED', 'RECONCILE_MISMATCH',
 ]
 
@@ -231,5 +231,5 @@ def log_close(pos, exit_event, exit_px, exit_time_ms, fees_usd=0, funding_paid_u
 
 
 def log_system(event, **fields):
-    """WS_STALE, HALT_TRIGGERED, UNHALT, ORPHAN_PRUNED, RECONCILE_MISMATCH."""
+    """WS_STALE, ORPHAN_PRUNED, RECONCILE_MISMATCH."""
     append({'event': event, **fields})
