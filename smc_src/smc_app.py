@@ -112,12 +112,71 @@ def _ws_fresh():
 
 # ---------------- Routes ----------------
 
+@app.route('/', methods=['GET'])
+def landing():
+    """Serve the landing page (PRECOG / CYBER PSYCHO dashboard)."""
+    try:
+        with open('landing.html', 'r') as f:
+            return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+    except FileNotFoundError:
+        return jsonify({
+            'service': 'SMC v1.0',
+            'health': '/health',
+            'status': '/smc/status',
+            'note': 'landing.html not found in working dir'
+        }), 200
+
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         'ok': True,
         'ws_fresh': _ws_fresh(),
     })
+
+
+# ---------------- Landing page compatibility shims ----------------
+# The landing page hits old PRECOG endpoints (/dash, /engines, /signals,
+# /news, /whales, /orderbook/BTC, /audit/deep). These don't exist in SMC.
+# We stub them to return 200 with empty/SMC-equivalent data so the page
+# renders without console-error storms.
+
+@app.route('/dash', methods=['GET'])
+def dash_compat():
+    return jsonify({
+        'version': 'smc-1.0',
+        'live_trading': bool(int(os.environ.get('LIVE_TRADING', '0'))),
+        'equity': smc_pl_compat.get_equity(),
+        'positions': _smc_position_count(),
+        'armed': len(state.armed),
+        'halt': state.halt_flag,
+        'btc_trend_up': state.btc_trend_up,
+        'universe_size': len(state.universe),
+    })
+
+@app.route('/engines', methods=['GET'])
+def engines_compat():
+    return jsonify({'engines': [{'name': 'SMC v1.0', 'status': 'live', 'live_trading': bool(int(os.environ.get('LIVE_TRADING', '0')))}]})
+
+@app.route('/signals', methods=['GET'])
+def signals_compat():
+    return jsonify({'signals': smc_trade_log.tail(20)})
+
+@app.route('/news', methods=['GET'])
+def news_compat():
+    return jsonify({'news': []})
+
+@app.route('/whales', methods=['GET'])
+def whales_compat():
+    return jsonify({'whales': []})
+
+@app.route('/orderbook/<coin>', methods=['GET'])
+def orderbook_compat(coin):
+    return jsonify({'coin': coin, 'orderbook': None, 'note': 'not tracked in SMC'})
+
+@app.route('/audit/deep', methods=['GET'])
+def audit_compat():
+    return jsonify({'rows': smc_trade_log.tail(int(request.args.get('hours', 24)) * 5), 'fmt': request.args.get('format', 'json')})
 
 
 @app.route('/smc/alert', methods=['POST'])
