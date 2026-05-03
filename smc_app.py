@@ -90,6 +90,18 @@ def _boot():
     # 4. Start SMC scheduler (15min position_tick + hourly + daily)
     smc_monitors.start()
 
+    # 5. Native SMC engine — bypass Pine, generate signals from HL WS candles
+    if os.environ.get('SMC_NATIVE', '0') == '1':
+        try:
+            import smc_native_runner
+            smc_native_runner.init_native(
+                on_setup_callback=handle_smc_alert,
+                on_log=lambda m: log.info(f"native: {m}"),
+            )
+            log.info("SMC native runner initialised")
+        except Exception as e:
+            log.exception(f"smc_native_runner init failed: {e}")
+
     log.info("SMC v1.0 boot complete")
 
 
@@ -585,6 +597,19 @@ def unhalt():
     smc_state.persist()
     smc_trade_log.log_system('UNHALT')
     return jsonify({'status': 'unhalted'})
+
+
+@app.route('/smc/native/status', methods=['GET'])
+def smc_native_status():
+    """Native engine telemetry."""
+    try:
+        import smc_native_runner
+        runner = smc_native_runner.get_runner()
+        if runner:
+            return jsonify(runner.status())
+        return jsonify({'enabled': False, 'reason': 'not_initialized'})
+    except Exception as e:
+        return jsonify({'enabled': False, 'error': str(e)}), 500
 
 
 # Catch-all: any unknown path falls back to landing page (no more 404/405)
