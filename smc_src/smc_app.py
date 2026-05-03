@@ -112,19 +112,46 @@ def _ws_fresh():
 
 # ---------------- Routes ----------------
 
+SA_BASE = os.environ.get('SA_BASE', 'https://trading-signals-aggn.onrender.com')
+
 @app.route('/', methods=['GET'])
 def landing():
-    """Serve the landing page (PRECOG / CYBER PSYCHO dashboard)."""
+    """Proxy SA's landing page so the SMC service renders the same UI."""
     try:
-        with open('landing.html', 'r') as f:
-            return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
-    except FileNotFoundError:
-        return jsonify({
-            'service': 'SMC v1.0',
-            'health': '/health',
-            'status': '/smc/status',
-            'note': 'landing.html not found in working dir'
-        }), 200
+        import requests as _req
+        r = _req.get(f"{SA_BASE}/", timeout=8)
+        return r.text, r.status_code, {'Content-Type': 'text/html; charset=utf-8'}
+    except Exception:
+        # Fallback to local landing.html if SA unreachable
+        try:
+            with open('landing.html', 'r') as f:
+                return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+        except FileNotFoundError:
+            return jsonify({'service': 'SMC v1.0', 'sa_unreachable': True}), 200
+
+
+@app.route('/stats', methods=['GET'])
+def stats_proxy():
+    """Proxy SA's /stats so the landing's fetch(`${origin}/stats`) works."""
+    try:
+        import requests as _req
+        r = _req.get(f"{SA_BASE}/stats", timeout=5)
+        return r.content, r.status_code, dict(r.headers)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+
+@app.route('/trades', methods=['GET'])
+def trades_proxy():
+    """Proxy SA's /trades; fall back to SMC trade log if SA missing."""
+    try:
+        import requests as _req
+        r = _req.get(f"{SA_BASE}/trades", timeout=5)
+        if r.status_code == 200:
+            return r.content, 200, {'Content-Type': r.headers.get('Content-Type', 'application/json')}
+    except Exception:
+        pass
+    return jsonify(smc_trade_log.tail(50))
 
 
 @app.route('/health', methods=['GET'])
