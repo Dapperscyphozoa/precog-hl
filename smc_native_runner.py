@@ -51,6 +51,10 @@ class NativeSMCRunner:
     
     def _boot_async(self):
         try:
+            # Stagger: wait so smc_monitors initial REST calls (refresh_universe, refresh_funding,
+            # refresh_btc_trend) finish before we hit the same endpoints. Avoids 429 cascade.
+            self.on_log("native_runner: boot delayed 45s to avoid REST 429 cascade with smc_monitors")
+            time.sleep(45)
             self.on_log("native_runner: boot starting")
             
             # 1. Load universe
@@ -62,7 +66,7 @@ class NativeSMCRunner:
             
             # 3. Bootstrap candle history (this takes ~217/5 = 43 seconds throttled)
             self.on_log("native_runner: bootstrapping candle history…")
-            warmup_detectors(self.detectors, throttle_per_sec=5, on_log=self.on_log)
+            warmup_detectors(self.detectors, throttle_per_sec=3, on_log=self.on_log)
             
             # 4. Wrap callback to inject secret (so handle_smc_alert gate 1 passes)
             secret = os.environ.get('WEBHOOK_SECRET', '')
@@ -90,22 +94,28 @@ class NativeSMCRunner:
         except Exception as e:
             log.exception(f"native_runner: boot failed: {e}")
     
-    def _load_universe(self):
-        """Fetch HL meta, exclude majors, return list."""
+    def _load_universe(self, max_retries=5):
+        """Fetch HL meta, exclude majors, return list. Retries on 429."""
         EXCLUDED = {
             'BTC','ETH','BNB','SOL','BCH','LTC','XRP','ADA',
             'DOGE','AVAX','DOT','TRX','TON',
         }
-        try:
-            from hyperliquid.info import Info
-            from hyperliquid.utils import constants
-            info = Info(constants.MAINNET_API_URL, skip_ws=True)
-            meta = info.meta()
-            return [u['name'] for u in meta.get('universe', [])
-                    if u.get('name') and u['name'] not in EXCLUDED]
-        except Exception as e:
-            log.exception(f"_load_universe failed: {e}")
-            return []
+        from hyperliquid.info import Info
+        from hyperliquid.utils import constants
+        
+        for attempt in range(max_retries):
+            try:
+                info = Info(constants.MAINNET_API_URL, skip_ws=True)
+                meta = info.meta()
+                return [u['name'] for u in meta.get('universe', [])
+                        if u.get('name') and u['name'] not in EXCLUDED]
+            except Exception as e:
+                wait = (2 ** attempt) * 5  # 5, 10, 20, 40, 80 sec
+                self.on_log(f"_load_universe attempt {attempt+1}/{max_retries} failed: {str(e)[:200]}; retry in {wait}s")
+                if attempt < max_retries - 1:
+                    time.sleep(wait)
+        log.error("_load_universe: all retries exhausted")
+        return []
     
     def stop(self):
         if self.feed:
