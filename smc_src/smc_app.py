@@ -116,18 +116,12 @@ SA_BASE = os.environ.get('SA_BASE', 'https://trading-signals-aggn.onrender.com')
 
 @app.route('/', methods=['GET'])
 def landing():
-    """Proxy SA's landing page so the SMC service renders the same UI."""
+    """Serve the precog-hl landing page from this repo."""
     try:
-        import requests as _req
-        r = _req.get(f"{SA_BASE}/", timeout=8)
-        return r.text, r.status_code, {'Content-Type': 'text/html; charset=utf-8'}
-    except Exception:
-        # Fallback to local landing.html if SA unreachable
-        try:
-            with open('landing.html', 'r') as f:
-                return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
-        except FileNotFoundError:
-            return jsonify({'service': 'SMC v1.0', 'sa_unreachable': True}), 200
+        with open('landing.html', 'r') as f:
+            return f.read(), 200, {'Content-Type': 'text/html; charset=utf-8'}
+    except FileNotFoundError:
+        return jsonify({'service': 'SMC v1.0', 'note': 'landing.html missing'}), 200
 
 
 @app.route('/stats', methods=['GET'])
