@@ -112,6 +112,21 @@ def pushover_alert(message: str):
         log.warning(f"pushover_alert failed: {e}")
 
 
+def _normalize_coin(raw: str) -> str:
+    """TV ticker → HL coin. BINANCE:LINKUSDT → LINK, OKX:JUPUSDT → JUP, 1000PEPEUSDT.P → 1000PEPE."""
+    if not raw:
+        return raw
+    if ':' in raw:
+        raw = raw.split(':', 1)[1]
+    if raw.endswith('.P'):
+        raw = raw[:-2]
+    for suf in ('USDT', 'USDC', 'USD'):
+        if raw.endswith(suf):
+            raw = raw[:-len(suf)]
+            break
+    return raw.upper()
+
+
 # ---------------- Public API ----------------
 
 def handle_smc_alert(payload: dict):
@@ -121,6 +136,10 @@ def handle_smc_alert(payload: dict):
     """
     webhook_recv_ms = _now_ms()
     payload['webhook_recv_ms'] = webhook_recv_ms
+
+    # Normalize coin (TV ticker → HL coin)
+    if payload.get('coin'):
+        payload['coin'] = _normalize_coin(payload['coin'])
 
     smc_trade_log.log_alert_recv(payload, webhook_recv_ms)
     state.last_alert_ms = webhook_recv_ms
