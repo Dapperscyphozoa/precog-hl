@@ -144,6 +144,17 @@ def submit_smc_trade(payload: dict, ctx: dict):
     }
 
     if not result.get('success'):
+        # CRITICAL: when entry rejects but SL/TP got placed, cancel the orphans
+        for oid_key in ('sl_oid', 'tp_oid', 'entry_oid'):
+            oid = result.get(oid_key)
+            if not oid:
+                continue
+            try:
+                flight_guard.acquire(coin)
+                _exchange.cancel(coin, oid)
+                log.info(f"orphan_cancel {coin}/{oid_key}={oid} after entry rejection")
+            except Exception as e:
+                log.warning(f"orphan_cancel {coin}/{oid_key}={oid} failed: {e}")
         smc_trade_log.append({
             'event': 'REJECTED',
             'trade_id': trade_id,
