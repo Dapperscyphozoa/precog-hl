@@ -29,6 +29,7 @@ import hl_user_ws
 import smc_fill_hook
 import smc_monitors
 import smc_state
+from smc_config import SMC_CONFIG
 from smc_engine import handle_smc_alert, WEBHOOK_SECRET
 from smc_state import state
 
