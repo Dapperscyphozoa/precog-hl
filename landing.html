@@ -178,11 +178,12 @@ body::after {
 .news-meta { font-size: 9px; letter-spacing: 0.15em; opacity: 0.5; }
 
 /* ENGINE STATUS */
-.engine-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+.engine-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
 .engine { padding: 10px 12px; background: rgba(0,0,0,0.3); border: 1px solid var(--line); position: relative; }
 .engine-name { font-size: 10px; letter-spacing: 0.15em; color: var(--chrome); margin-bottom: 4px; }
 .engine-val { font-size: 16px; font-weight: 600; color: var(--acid); font-family: 'JetBrains Mono'; }
 .engine.active::before { content: ''; position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; background: var(--acid); border-radius: 50%; box-shadow: 0 0 8px var(--glow); }
+.panel.full-width { grid-column: 1 / -1; }
 
 /* METRICS BAR */
 .metrics-bar { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; margin-bottom: 32px; padding: 20px 28px; background: linear-gradient(90deg, var(--carbon), transparent); border-top: 1px solid var(--acid); border-bottom: 1px solid var(--line); }
@@ -652,23 +653,30 @@ body::after {
     </div>
 
     <!-- ENGINES -->
-    <div class="panel">
+    <div class="panel full-width">
         <div class="panel-head">
             <div class="panel-title">Engine Stack</div>
             <div class="panel-meta">5 signal · 9 guard · 6 venue · 1 sizing</div>
         </div>
 
-        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// SIGNAL ENGINES</div>
-        <div class="engine-grid" id="eng-signal"></div>
-
-        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// GUARDS</div>
-        <div class="engine-grid" id="eng-guards"></div>
-
-        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// VENUE FEEDS (6-way orderbook)</div>
-        <div class="engine-grid" id="eng-venues"></div>
-
-        <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// SIZING</div>
-        <div class="engine-grid" id="eng-sizing"></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));gap:24px">
+            <div>
+                <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// SIGNAL ENGINES</div>
+                <div class="engine-grid" id="eng-signal"></div>
+            </div>
+            <div>
+                <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// GUARDS</div>
+                <div class="engine-grid" id="eng-guards"></div>
+            </div>
+            <div>
+                <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// VENUE FEEDS</div>
+                <div class="engine-grid" id="eng-venues"></div>
+            </div>
+            <div>
+                <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// SIZING</div>
+                <div class="engine-grid" id="eng-sizing"></div>
+            </div>
+        </div>
     </div>
 </div>
 
