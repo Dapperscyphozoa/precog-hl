@@ -882,14 +882,27 @@ async function loadWhales() {
         const d = await r.json();
         const items = d.items || [];
         document.getElementById('whales').innerHTML = items.map(w => {
-            const sideCls = w.side === 'BUY' ? 'pnl-pos' : 'pnl-neg';
-            return `<div class="pos-row" style="grid-template-columns:60px 50px 1fr;font-size:11px">
-                <div class="pos-coin">${w.coin}</div>
-                <div class="${sideCls}" style="font-weight:600">${w.side}</div>
-                <div style="text-align:right">$${(w.usd/1000).toFixed(0)}k</div>
-            </div>`;
-        }).join('') || '<div class="pos-row" style="opacity:0.5">// no whale prints yet</div>';
-        document.getElementById('whale-meta').textContent = items.length + ' last 5m';
+            if (w.kind === 'WALLET_FILL') {
+                const sideCls = w.side === 'BUY' ? 'pnl-pos' : 'pnl-neg';
+                const pnlStr = w.pnl ? ` · pnl ${w.pnl >= 0 ? '+' : ''}$${w.pnl.toFixed(2)}` : '';
+                const ageMin = w.ts ? Math.floor((Date.now() - w.ts) / 60000) : 0;
+                return `<div class="pos-row" style="grid-template-columns:60px 50px 1fr;font-size:11px">
+                    <div class="pos-coin">${w.coin}<br><span style="opacity:0.45;font-size:9px">FILL ${ageMin}m</span></div>
+                    <div class="${sideCls}" style="font-weight:600">${w.side}</div>
+                    <div style="text-align:right">$${(w.notional/1000).toFixed(1)}k${pnlStr}</div>
+                </div>`;
+            } else {
+                // TOP_MOVER
+                const sideCls = w.side === 'UP' ? 'pnl-pos' : 'pnl-neg';
+                const sign = w.pct_24h >= 0 ? '+' : '';
+                return `<div class="pos-row" style="grid-template-columns:60px 50px 1fr;font-size:11px;opacity:0.85">
+                    <div class="pos-coin">${w.coin}<br><span style="opacity:0.45;font-size:9px">24H</span></div>
+                    <div class="${sideCls}" style="font-weight:600">${w.side}</div>
+                    <div style="text-align:right">${sign}${w.pct_24h.toFixed(2)}% · vol $${(w.vol_usd_24h/1e6).toFixed(1)}M</div>
+                </div>`;
+            }
+        }).join('') || '<div class="pos-row" style="opacity:0.5">// awaiting flow</div>';
+        document.getElementById('whale-meta').textContent = items.length + ' tracked';
     } catch (e) {
         document.getElementById('whales').innerHTML = '<div class="pos-row" style="opacity:0.5">// loading</div>';
     }
@@ -899,13 +912,18 @@ async function loadNews() {
     try {
         const r = await fetch('/news');
         const d = await r.json();
-        const items = (d.items || []).slice(0,5);
+        const items = (d.items || []).slice(0,8);
         document.getElementById('news').innerHTML = items.map(n => {
-            const mag = n.magnitude || 3;
+            const cats = (n.categories || []).join(' · ') || (n.source || '');
+            const ageH = n.ts ? Math.floor((Date.now()/1000 - n.ts) / 3600) : 0;
+            const ageStr = ageH > 24 ? `${Math.floor(ageH/24)}d` : `${ageH}h`;
+            const titleHtml = n.url
+                ? `<a href="${n.url}" target="_blank" rel="noopener" style="color:inherit;text-decoration:none">${n.title}</a>`
+                : (n.title || '—');
             return `<div class="news-item">
-                <span class="news-mag mag-${mag}">MAG ${mag}</span>
-                <div class="news-title">${n.title || n.headline || '—'}</div>
-                <div class="news-meta">${n.source || ''} · ${n.direction > 0 ? 'BULL' : n.direction < 0 ? 'BEAR' : 'NEUTRAL'}</div>
+                <span class="news-mag mag-3">${n.source ? n.source.substring(0,8).toUpperCase() : 'NEWS'}</span>
+                <div class="news-title">${titleHtml}</div>
+                <div class="news-meta">${cats} · ${ageStr} ago</div>
             </div>`;
         }).join('') || '<div class="news-item" style="opacity:0.5">// awaiting feed</div>';
     } catch (e) {
