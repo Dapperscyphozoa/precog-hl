@@ -573,7 +573,8 @@ def fetch_candles(coin, tf, days):
 # STATE PERSISTENCE
 # ═══════════════════════════════════════════════════════
 def load_state():
-    default = {'positions': {}, 'history': [], 'last_scan_ts': 0, 'consec_losses': 0}
+    default = {'positions': {}, 'history': [], 'last_scan_ts': 0,
+               'last_fill_check_ts': 0, 'consec_losses': 0}
     try:
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH) as f:
@@ -736,68 +737,134 @@ def fire_setup(coin, setup, state):
     return True
 
 
-def reconcile_positions(state):
-    """Poll HL user_state, detect TP1 fills (move SL→BE), detect closes."""
+def fetch_recent_fills(since_ms):
+    """Fetch user fills since since_ms via userFillsByTime endpoint.
+    Returns list of fill dicts, each with keys including 'cloid', 'time',
+    'coin', 'px', 'sz', 'side', 'closedPnl', 'oid'.
+    """
     try:
-        us = info.user_state(WALLET)
+        import urllib.request as _ur
+        body = json.dumps({
+            'type': 'userFillsByTime',
+            'user': WALLET,
+            'startTime': since_ms,
+            'endTime': int(time.time()*1000),
+        }).encode('utf-8')
+        req = _ur.Request('https://api.hyperliquid.xyz/info', data=body,
+                          headers={'Content-Type': 'application/json'})
+        with _ur.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        return data if isinstance(data, list) else []
     except Exception as e:
-        log(f'reconcile err: {e}')
-        return
-    live_positions = {}
-    for ap in us.get('assetPositions', []):
-        p = ap.get('position', {})
-        if not p: continue
-        coin = p.get('coin')
-        sz = float(p.get('szi', 0))
-        if abs(sz) > 0:
-            live_positions[coin] = {'sz': sz, 'entry_px': float(p.get('entryPx', 0))}
+        log(f'fills fetch err: {e}')
+        return []
 
-    # Detect TP1 fills: position size halved
-    for coin, pos in list(state['positions'].items()):
-        if pos['phase'] in ('done', 'pending_fill'):
-            # If pending_fill and now live, transition
-            if pos['phase'] == 'pending_fill' and coin in live_positions:
-                live_sz = abs(live_positions[coin]['sz'])
-                if live_sz >= pos['sz_total'] * 0.95:
-                    pos['phase'] = 'live'
-                    log(f'  {coin} ENTRY FILLED sz={live_sz}')
+
+def reconcile_positions(state):
+    """Cloid-matched reconciliation. Isolated from PreCog activity.
+
+    Source of truth: HL userFillsByTime → match fills against our cloids.
+    Phase transitions:
+      pending_fill → live: entry leg cumulative fill ≥ 95% of sz_total
+      live → tp1_filled: tp1 leg fill (then cancel SL, place new SL at entry/BE)
+      live → done:       sl leg fill OR tp2 leg fill (rare, gap)
+      tp1_filled → done: sl leg fill (BE-stop) OR tp2 leg fill
+    """
+    last_check = state.get('last_fill_check_ts', 0)
+    if last_check == 0:
+        last_check = int(time.time()*1000) - 24*3600*1000  # cold start: last 24h
+
+    fills = fetch_recent_fills(last_check)
+
+    # Build cloid → (coin, leg_key) map from current positions
+    cloid_map = {}
+    for coin, pos in state['positions'].items():
+        for leg_key, cloid_field in (('entry','cloid_entry'), ('sl','cloid_sl'),
+                                      ('tp1','cloid_tp1'), ('tp2','cloid_tp2')):
+            c = pos.get(cloid_field)
+            if c:
+                cloid_map[c] = (coin, leg_key)
+
+    fills_processed = 0
+    for fill in fills:
+        cloid = fill.get('cloid')
+        if not cloid: continue
+        if cloid not in cloid_map: continue
+        coin, leg = cloid_map[cloid]
+        pos = state['positions'].get(coin)
+        if not pos or pos.get('phase') == 'done': continue
+
+        try:
+            fill_px = float(fill.get('px', 0))
+            fill_sz = float(fill.get('sz', 0))
+        except (ValueError, TypeError):
             continue
+        fills_processed += 1
+        log(f'  {coin} {leg.upper()} fill sz={fill_sz} px={fill_px}')
 
-        if pos['phase'] == 'live':
-            if coin not in live_positions:
-                # Position closed (SL hit or both TPs hit) — cleanup
-                pos['phase'] = 'done'
-                pos['closed_t'] = int(time.time()*1000)
-                state['history'].append(pos)
-                del state['positions'][coin]
-                log(f'  {coin} CLOSED (full position gone)')
-                continue
-            live_sz = abs(live_positions[coin]['sz'])
-            if live_sz <= pos['sz_half2'] * 1.05 and live_sz > 0:
-                # TP1 filled: half closed. Move SL to entry (BE).
-                log(f'  {coin} TP1 FILLED — moving SL to BE @ {pos["entry"]}')
-                cancel_order(coin, pos.get('cloid_sl'))
-                new_cloid = make_cloid(coin, 'sb')
-                place_native_stop(coin, pos['is_long'], pos['sz_half2'], pos['entry'], new_cloid)
-                pos['cloid_sl'] = new_cloid
-                pos['sl'] = pos['entry']
-                pos['phase'] = 'tp1_filled'
+        # ENTRY leg
+        if leg == 'entry' and pos['phase'] == 'pending_fill':
+            cum = pos.get('entry_filled_sz', 0.0) + fill_sz
+            pos['entry_filled_sz'] = cum
+            if cum >= pos['sz_total'] * 0.95:
+                pos['phase'] = 'live'
+                pos['actual_entry_px'] = fill_px  # last partial fill price
+                log(f'  {coin} ENTRY FILLED cum={cum:.6f} (≥95% of {pos["sz_total"]})')
 
-        elif pos['phase'] == 'tp1_filled':
-            if coin not in live_positions:
-                pos['phase'] = 'done'
-                pos['closed_t'] = int(time.time()*1000)
-                state['history'].append(pos)
-                del state['positions'][coin]
-                log(f'  {coin} RUNNER CLOSED (TP2 hit or BE-stopped)')
+        # TP1 leg → move SL to BE
+        elif leg == 'tp1' and pos['phase'] in ('live', 'pending_fill'):
+            log(f'  {coin} TP1 hit at {fill_px} — moving SL to BE @ {pos["entry"]}')
+            cancel_order(coin, pos.get('cloid_sl'))  # NOTE: cancel-by-cloid bug pending B4
+            new_cloid = make_cloid(coin, 'sb')
+            place_native_stop(coin, pos['is_long'], pos['sz_half2'], pos['entry'], new_cloid)
+            pos['cloid_sl'] = new_cloid
+            pos['sl'] = pos['entry']
+            pos['phase'] = 'tp1_filled'
+            pos['tp1_fill_px'] = fill_px
+            pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
 
-        # Time stop
-        age_sec = (time.time()*1000 - pos['fired_t']) / 1000
-        if pos['phase'] in ('live','tp1_filled') and age_sec > MAX_HOLD_SEC:
-            log(f'  {coin} TIME STOP — closing market ({age_sec/3600:.1f}h held)')
-            sz_remain = pos['sz_half2'] if pos['phase']=='tp1_filled' else pos['sz_total']
-            market_close(coin, pos['is_long'], sz_remain)
+        # TP2 leg → done
+        elif leg == 'tp2' and pos['phase'] in ('live', 'tp1_filled'):
+            log(f'  {coin} TP2 hit at {fill_px} — runner closed')
+            pos['phase'] = 'done'
+            pos['close_reason'] = 'tp2'
+            pos['close_px'] = fill_px
+            pos['closed_t'] = fill.get('time', int(time.time()*1000))
+            state['history'].append(pos)
+            del state['positions'][coin]
 
+        # SL leg → done (label as BE-stop if it fired after TP1)
+        elif leg == 'sl' and pos['phase'] in ('live', 'tp1_filled'):
+            label = 'be_stop' if pos['phase'] == 'tp1_filled' else 'sl'
+            log(f'  {coin} {label.upper()} hit at {fill_px}')
+            pos['phase'] = 'done'
+            pos['close_reason'] = label
+            pos['close_px'] = fill_px
+            pos['closed_t'] = fill.get('time', int(time.time()*1000))
+            state['history'].append(pos)
+            del state['positions'][coin]
+
+    # Time-stop check (independent of fills)
+    for coin, pos in list(state['positions'].items()):
+        if pos.get('phase') in ('live', 'tp1_filled'):
+            age_sec = (time.time()*1000 - pos['fired_t']) / 1000
+            if age_sec > MAX_HOLD_SEC:
+                log(f'  {coin} TIME STOP — market close ({age_sec/3600:.1f}h held, '
+                    f'phase={pos["phase"]})')
+                sz_remain = pos['sz_half2'] if pos['phase']=='tp1_filled' else pos['sz_total']
+                market_close(coin, pos['is_long'], sz_remain)
+                # Don't mark done here — wait for the close-fill to arrive
+                # (close fill won't have our cloid; will need OID-tagging in B3)
+
+    # Update fill cursor: latest fill time minus 60s overlap; or now-60s if no fills
+    if fills:
+        latest_fill_t = max(int(f.get('time', 0)) for f in fills)
+        state['last_fill_check_ts'] = max(latest_fill_t - 60_000, last_check)
+    else:
+        state['last_fill_check_ts'] = int(time.time()*1000) - 60_000
+
+    if fills_processed > 0:
+        log(f'reconcile: {fills_processed} of {len(fills)} fills matched our cloids')
     save_state(state)
 
 
