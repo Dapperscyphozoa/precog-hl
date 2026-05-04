@@ -1,0 +1,30 @@
+services:
+  - type: worker
+    name: smc-v2
+    runtime: python
+    plan: standard
+    region: oregon
+    branch: smc-v2
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 smc_v2_service.py
+    disk:
+      name: smcv2-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: HL_ADDRESS
+        sync: false
+      - key: HL_PRIVATE_KEY
+        sync: false
+      - key: SMCV2_LIVE
+        value: '0'
+      - key: SMCV2_NOTIONAL_USD
+        value: '25'
+      - key: SMCV2_LEVERAGE
+        value: '10'
+      - key: SMCV2_MAX_CONCURRENT
+        value: '20'
+      - key: SMCV2_STATE_PATH
+        value: /var/data/smc_v2_state.json
+      - key: PYTHONUNBUFFERED
+        value: '1'
