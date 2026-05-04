@@ -1441,6 +1441,10 @@ def _oneshot_close_cake(state):
 
 def main():
     log(f'SMC v2 service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
+    notify('Service online',
+           f'LIVE={LIVE_TRADING} notional=${FIXED_NOTIONAL_USD} '
+           f'leverage={DEFAULT_LEVERAGE}x max={MAX_CONCURRENT}',
+           priority=0)
     log(f'PARAMS={PARAMS}')
     log(f'BLACKLIST={sorted(BLACKLIST)}')
     state = load_state()
