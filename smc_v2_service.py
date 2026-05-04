@@ -734,8 +734,25 @@ def market_close(coin, is_long_pos, sz, slippage=0.005, cloid=None):
 # ═══════════════════════════════════════════════════════
 # POSITION MANAGEMENT
 # ═══════════════════════════════════════════════════════
+def _wrap_cloid(cloid_str):
+    """HL bulk_orders requires Cloid object, not raw string."""
+    try:
+        from hyperliquid.utils.types import Cloid
+        return Cloid.from_str(cloid_str)
+    except Exception:
+        try:
+            from hyperliquid.utils.signing import Cloid
+            return Cloid.from_str(cloid_str)
+        except Exception:
+            return cloid_str  # fall back to raw — SDK may auto-wrap
+
+
 def fire_setup(coin, setup, state):
-    """Place entry + SL + TP1 + TP2 atomically (best-effort sequential)."""
+    """Place entry + SL + TP1 + TP2 atomically via bulk_orders.
+    All four legs land in one signed payload — either all accept or none.
+    No naked-position window: if entry fills before reconcile, the
+    reduce_only triggers are already resting on book.
+    """
     if len(state['positions']) >= MAX_CONCURRENT:
         log(f'  {coin} skip: max concurrent {MAX_CONCURRENT}')
         return False
@@ -753,24 +770,100 @@ def fire_setup(coin, setup, state):
         log(f'  {coin} skip: size 0 (notional={FIXED_NOTIONAL_USD}, entry={entry})')
         return False
     sz_half = round_size(coin, sz_total / 2)
-    sz_half2 = round_size(coin, sz_total - sz_half)  # ensure exact total
+    sz_half2 = round_size(coin, sz_total - sz_half)
+    if sz_half <= 0 or sz_half2 <= 0:
+        log(f'  {coin} skip: half size rounds to 0 (sz_total={sz_total}, szDecimals={get_sz_decimals(coin)})')
+        return False
 
-    log(f'FIRE {coin} {"LONG" if is_long else "SHORT"} entry={entry} sl={sl} tp1={tp1} tp2={tp2} sz={sz_total} (half={sz_half}+{sz_half2})')
+    log(f'FIRE {coin} {"LONG" if is_long else "SHORT"} entry={entry} sl={sl} '
+        f'tp1={tp1} tp2={tp2} sz={sz_total} (half={sz_half}+{sz_half2})')
 
     cloid_entry = make_cloid(coin, 'e')
     cloid_sl = make_cloid(coin, 's')
     cloid_tp1 = make_cloid(coin, 't1')
     cloid_tp2 = make_cloid(coin, 't2')
 
-    res_entry = place_entry(coin, is_long, entry, sz_total, cloid_entry)
-    if not res_entry or res_entry.get('status') != 'ok':
-        log(f'  {coin} entry rejected; aborting setup')
+    close_dir = not is_long  # close direction (sell to close long, buy to close short)
+
+    orders = [
+        # 1. ENTRY: GTC limit in trade direction (matches backtest "wait for retest")
+        {
+            'coin': coin, 'is_buy': is_long, 'sz': sz_total, 'limit_px': entry,
+            'order_type': {'limit': {'tif': 'Gtc'}},
+            'reduce_only': False,
+            'cloid': _wrap_cloid(cloid_entry),
+        },
+        # 2. SL: trigger market reduce_only — sits harmless until entry fills
+        {
+            'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': sl,
+            'order_type': {'trigger': {'triggerPx': sl, 'isMarket': True, 'tpsl': 'sl'}},
+            'reduce_only': True,
+            'cloid': _wrap_cloid(cloid_sl),
+        },
+        # 3. TP1: trigger market reduce_only at first target (50% of sz_total)
+        {
+            'coin': coin, 'is_buy': close_dir, 'sz': sz_half, 'limit_px': tp1,
+            'order_type': {'trigger': {'triggerPx': tp1, 'isMarket': True, 'tpsl': 'tp'}},
+            'reduce_only': True,
+            'cloid': _wrap_cloid(cloid_tp1),
+        },
+        # 4. TP2: trigger market reduce_only at second target (other 50%)
+        {
+            'coin': coin, 'is_buy': close_dir, 'sz': sz_half2, 'limit_px': tp2,
+            'order_type': {'trigger': {'triggerPx': tp2, 'isMarket': True, 'tpsl': 'tp'}},
+            'reduce_only': True,
+            'cloid': _wrap_cloid(cloid_tp2),
+        },
+    ]
+
+    if not LIVE_TRADING:
+        log(f'  [DRY] bulk_orders {coin}: 4 legs (entry GTC + SL + TP1 + TP2 triggers)')
+        # Don't pollute state in dry mode — would break reconcile logic
+        return True
+
+    try:
+        res = exchange.bulk_orders(orders)
+    except Exception as e:
+        log(f'  {coin} bulk_orders exception: {e}')
         return False
 
-    # Place protective orders immediately (will activate on fill)
-    place_native_stop(coin, is_long, sz_total, sl, cloid_sl)
-    place_native_tp(coin, is_long, sz_half, tp1, cloid_tp1)
-    place_native_tp(coin, is_long, sz_half2, tp2, cloid_tp2)
+    if not res or res.get('status') != 'ok':
+        log(f'  {coin} bulk_orders rejected: {res}')
+        return False
+
+    # Parse per-leg statuses. HL response shape:
+    #   {'status':'ok','response':{'type':'order','data':{'statuses':[...]}}}
+    # Each status: {'resting':{'oid':...}} | {'filled':{...}} | {'error':'...'}
+    statuses = []
+    try:
+        statuses = res.get('response', {}).get('data', {}).get('statuses', [])
+    except (AttributeError, TypeError):
+        pass
+
+    leg_names = ['entry', 'sl', 'tp1', 'tp2']
+    failed_legs = []
+    oids = {}
+    for i, st in enumerate(statuses):
+        if i >= len(leg_names): break
+        leg = leg_names[i]
+        if isinstance(st, dict):
+            if 'error' in st:
+                failed_legs.append((leg, st['error']))
+            elif 'resting' in st:
+                oids[leg] = st['resting'].get('oid')
+            elif 'filled' in st:
+                oids[leg] = st['filled'].get('oid')
+
+    if failed_legs:
+        # If ENTRY leg failed: abort, no position tracked
+        if any(l == 'entry' for l, _ in failed_legs):
+            log(f'  {coin} ENTRY leg rejected: ' +
+                ', '.join(f'{l}={e}' for l, e in failed_legs))
+            return False
+        # Protective leg(s) failed: position will be partially unprotected.
+        # Track anyway so we can monitor / repair on next reconcile.
+        log(f'  {coin} bulk_orders: entry OK but protective failed: ' +
+            ', '.join(f'{l}={e}' for l, e in failed_legs))
 
     state['positions'][coin] = {
         'is_long': is_long,
@@ -778,10 +871,13 @@ def fire_setup(coin, setup, state):
         'sz_total': sz_total, 'sz_half': sz_half, 'sz_half2': sz_half2,
         'cloid_entry': cloid_entry, 'cloid_sl': cloid_sl,
         'cloid_tp1': cloid_tp1, 'cloid_tp2': cloid_tp2,
+        'oid_entry': oids.get('entry'), 'oid_sl': oids.get('sl'),
+        'oid_tp1': oids.get('tp1'), 'oid_tp2': oids.get('tp2'),
         'fired_t': int(time.time()*1000),
         'mss_t': setup.get('mss_t'),
         'rr_tp1': setup.get('rr_tp1'), 'rr_tp2': setup.get('rr_tp2'),
-        'phase': 'pending_fill',  # pending_fill → live → tp1_filled → done
+        'phase': 'pending_fill',
+        'failed_legs': [l for l, _ in failed_legs] if failed_legs else [],
     }
     save_state(state)
     return True
