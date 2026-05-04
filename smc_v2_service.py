@@ -717,7 +717,7 @@ def place_entry(coin, is_long, entry_px, sz, cloid):
         return {'status': 'ok', 'response': {'data': {'statuses': [{'resting': {'oid': 0}}]}}}
     try:
         return exchange.order(coin, is_long, sz, entry_px,
-                              {'limit': {'tif': 'Gtc'}}, cloid=cloid)
+                              {'limit': {'tif': 'Gtc'}}, cloid=_wrap_cloid(cloid))
     except Exception as e:
         log(f'  entry order err {coin}: {e}')
         return None
@@ -732,7 +732,8 @@ def place_native_stop(coin, is_long_pos, sz, trigger_px, cloid, is_market=True):
         return {'status': 'ok'}
     try:
         return exchange.order(coin, is_buy, sz, trigger_px,
-                              {'trigger': trigger}, reduce_only=True, cloid=cloid)
+                              {'trigger': trigger}, reduce_only=True,
+                              cloid=_wrap_cloid(cloid))
     except Exception as e:
         log(f'  sl order err {coin}: {e}')
         return None
@@ -747,7 +748,8 @@ def place_native_tp(coin, is_long_pos, sz, trigger_px, cloid):
         return {'status': 'ok'}
     try:
         return exchange.order(coin, is_buy, sz, trigger_px,
-                              {'trigger': trigger}, reduce_only=True, cloid=cloid)
+                              {'trigger': trigger}, reduce_only=True,
+                              cloid=_wrap_cloid(cloid))
     except Exception as e:
         log(f'  tp order err {coin}: {e}')
         return None
@@ -817,7 +819,8 @@ def market_close(coin, is_long_pos, sz, slippage=0.005, cloid=None):
 
     try:
         res = exchange.order(coin, is_buy, sz_rounded, limit_px,
-                             {'limit': {'tif': 'Ioc'}}, reduce_only=True, cloid=cloid)
+                             {'limit': {'tif': 'Ioc'}}, reduce_only=True,
+                             cloid=_wrap_cloid(cloid))
         log(f'  market_close {coin}: sent reduce_only IOC sz={sz_rounded} '
             f'px={limit_px} (mid={mid}, slip={slippage*100:.1f}%)')
         return res
