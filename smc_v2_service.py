@@ -1394,12 +1394,54 @@ def scan_for_setups(state, reconcile_fn=None):
 # ═══════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════
+def _oneshot_close_cake(state):
+    """Manual cleanup: close CAKE position. Triggered once via env flag.
+
+    CAKE was placed before B21 (positionTpsl) so its TP triggers were killed
+    at submission time. Position currently open with no profit protection.
+    Close at market to lock the win.
+    """
+    if os.environ.get('SMCV2_ONESHOT_CLOSE_CAKE') != '1':
+        return
+    try:
+        # Direct HL state read — independent of our state['positions']
+        us = info.user_state(WALLET)
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            if p.get('coin') != 'CAKE':
+                continue
+            sz = float(p.get('szi', 0))
+            if abs(sz) <= 0:
+                log('  oneshot CAKE: no position found — already closed')
+                return
+            is_long = sz > 0
+            log(f'  oneshot CAKE: closing {sz} (is_long={is_long})')
+            res = market_close('CAKE', is_long, abs(sz))
+            log(f'  oneshot CAKE result: {res}')
+            # Remove from state['positions'] if present
+            if 'CAKE' in state['positions']:
+                pos = state['positions']['CAKE']
+                pos['phase'] = 'done'
+                pos['close_reason'] = 'oneshot_manual'
+                pos['closed_t'] = int(time.time()*1000)
+                append_history(state, pos)
+                del state['positions']['CAKE']
+                save_state(state)
+            return
+        log('  oneshot CAKE: not in wallet positions')
+    except Exception as e:
+        log(f'  oneshot CAKE err: {e}')
+
+
 def main():
     log(f'SMC v2 service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
     log(f'PARAMS={PARAMS}')
     log(f'BLACKLIST={sorted(BLACKLIST)}')
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')
+
+    # B21 cleanup: close CAKE if env flag set (one-shot)
+    _oneshot_close_cake(state)
 
     last_scan = state.get('last_scan_ts', 0) / 1000.0
     last_reconcile = 0
