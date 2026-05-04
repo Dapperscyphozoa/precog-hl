@@ -86,7 +86,6 @@ def _gate_value(num: int, payload: dict, ctx: dict):
     if num == 3:  return 'within_dedupe_window'
     if num == 4:  return payload.get('side')
     if num == 6:  return payload.get('coin')
-    if num == 7:  return ctx.get('session_utc_hour')
     if num == 8:  return payload.get('rr_to_tp2')
     if num == 9:  return state.btc_trend_up
     if num == 10: return ctx.get('funding_rate')
@@ -155,7 +154,6 @@ def handle_smc_alert(payload: dict):
         (3,  'dedupe',         lambda: not dedupe_check(payload['alert_id'])),
         (4,  'short_signal',   lambda: payload.get('side') != 'SELL'),
         (6,  'major_excluded', lambda: payload['coin'] not in SMC_CONFIG['excluded_majors']),
-        (7,  'session',        lambda: not _in_skip_session()),
         (8,  'rr_min',         lambda: float(payload.get('rr_to_tp2', 0)) >= SMC_CONFIG['min_rr_to_take']),
         (9,  'btc_trend',      lambda: bool(state.btc_trend_up)),
         (10, 'funding_max',    lambda: ctx['funding_rate'] < SMC_CONFIG['funding_max_adverse_per_hour']),
