@@ -993,13 +993,31 @@ def fire_setup(coin, setup, state):
                 oids[leg] = st['filled'].get('oid')
 
     if failed_legs:
-        # If ENTRY leg failed: abort, no position tracked
+        # B30: If ENTRY leg failed but protective legs accepted (rested),
+        # we have orphan reduce_only triggers on book. With grouping=
+        # positionTpsl they sit waiting for a position; if PreCog later
+        # opens one on this coin, our orphans could fire against it.
+        # Cancel any resting protective legs immediately.
         if any(l == 'entry' for l, _ in failed_legs):
             log(f'  {coin} ENTRY leg rejected: ' +
                 ', '.join(f'{l}={e}' for l, e in failed_legs))
+            # Cancel any protective legs that DID rest
+            failed_set = {l for l, _ in failed_legs}
+            orphans_to_cancel = []
+            for leg, cloid in (('sl', cloid_sl), ('tp1', cloid_tp1), ('tp2', cloid_tp2)):
+                if leg not in failed_set:  # this leg accepted (rested or filled)
+                    orphans_to_cancel.append((leg, cloid))
+            if orphans_to_cancel:
+                log(f'  {coin} cancelling {len(orphans_to_cancel)} orphan '
+                    f'protective leg(s): {[l for l,_ in orphans_to_cancel]}')
+                for leg, cloid in orphans_to_cancel:
+                    try:
+                        cancel_order(coin, cloid)
+                    except Exception as e:
+                        log(f'  {coin} orphan cancel err leg={leg}: {e}')
             return False
-        # Protective leg(s) failed: position will be partially unprotected.
-        # Track anyway so we can monitor / repair on next reconcile.
+        # Protective leg(s) failed but entry OK: position will be partially
+        # unprotected. Track anyway so we can monitor / repair on next reconcile.
         log(f'  {coin} bulk_orders: entry OK but protective failed: ' +
             ', '.join(f'{l}={e}' for l, e in failed_legs))
 
@@ -1250,6 +1268,12 @@ def reconcile_positions(state):
 
         if pos.get('phase') in ('live', 'tp1_filled'):
             age_sec = (time.time()*1000 - pos['fired_t']) / 1000
+            sent_ts = pos.get('time_stop_sent_t', 0)
+            sent_age_sec = (time.time()*1000 - sent_ts) / 1000 if sent_ts else 0
+            attempts = pos.get('time_stop_attempts', 0)
+
+            # First-shot: position aged past MAX_HOLD_SEC and we haven't tried
+            # closing yet. Send sized reduce_only IOC at mid±0.5%.
             if age_sec > MAX_HOLD_SEC and not pos.get('cloid_close'):
                 log(f'  {coin} TIME STOP — sized reduce_only IOC ({age_sec/3600:.1f}h held, '
                     f'phase={pos["phase"]})')
@@ -1257,10 +1281,66 @@ def reconcile_positions(state):
                 close_cloid = make_cloid(coin, 'mc')
                 res = market_close(coin, pos['is_long'], sz_remain, cloid=close_cloid)
                 if res is not None:
-                    # Record cloid so the close-fill drives phase=done on next reconcile
                     pos['cloid_close'] = close_cloid
                     pos['time_stop_sent_t'] = int(time.time()*1000)
-                # If res is None (no mid, etc.), retry next reconcile
+                    pos['time_stop_attempts'] = 1
+                # If res is None (no mid), retry next reconcile
+
+            # B35: Retry if first IOC didn't fill within 3 minutes.
+            # IOC may be rejected if mark moves >0.5% during processing,
+            # leaving us with cloid_close set but no close-fill ever arriving.
+            # Without retry, position is stuck forever. Escalate slippage on
+            # each retry: 1%, 2%, 4%. Cap at 4 attempts; after that, alert
+            # operator to close manually.
+            elif pos.get('cloid_close') and sent_age_sec > 180 and attempts < 4:
+                # Verify position still exists and hasn't been closed by
+                # the IOC's late fill or a manual action
+                try:
+                    us = info.user_state(WALLET)
+                    live_sz = 0.0
+                    for ap in us.get('assetPositions', []):
+                        p = ap.get('position', {})
+                        if p.get('coin') == coin:
+                            live_sz = abs(float(p.get('szi', 0)))
+                            break
+                except Exception as e:
+                    log(f'  {coin} time-stop retry: user_state err: {e}')
+                    continue
+
+                if live_sz <= 0:
+                    # Position closed (likely the IOC filled but fill-record
+                    # was missed). Mark done.
+                    log(f'  {coin} time-stop: position already closed (no live size)')
+                    pos['phase'] = 'done'
+                    pos['close_reason'] = 'time_stop_recovered'
+                    pos['closed_t'] = int(time.time()*1000)
+                    append_history(state, pos)
+                    del state['positions'][coin]
+                    continue
+
+                # Position still open; retry with wider slippage
+                slippage = 0.01 * (2 ** attempts)  # 0.01, 0.02, 0.04, 0.08
+                attempts_next = attempts + 1
+                log(f'  {coin} TIME STOP RETRY {attempts_next}/4 — '
+                    f'live_sz={live_sz} slippage={slippage*100:.1f}% '
+                    f'(prev cloid={pos.get("cloid_close","")[:14]}... no fill in {sent_age_sec:.0f}s)')
+                # Cancel the old (likely-rejected-but-still-tracked) close cloid
+                old_close_cloid = pos.get('cloid_close')
+                if old_close_cloid:
+                    try: cancel_order(coin, old_close_cloid)
+                    except Exception: pass
+                new_cloid = make_cloid(coin, f'mc{attempts_next}')
+                res = market_close(coin, pos['is_long'], live_sz,
+                                   slippage=slippage, cloid=new_cloid)
+                if res is not None:
+                    pos['cloid_close'] = new_cloid
+                    pos['time_stop_sent_t'] = int(time.time()*1000)
+                    pos['time_stop_attempts'] = attempts_next
+                    if attempts_next == 4:
+                        notify(f'TIME STOP STUCK {coin}',
+                               f'4th retry sent at {slippage*100:.0f}% slippage. '
+                               f'If this also fails, close manually.',
+                               priority=2)
 
     # B18: cursor must move forward monotonically. Use the latest fill time we
     # actually saw (less a 5s overlap to catch concurrent same-ms fills) — this
