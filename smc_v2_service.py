@@ -945,7 +945,16 @@ def fire_setup(coin, setup, state):
         return True
 
     try:
-        res = exchange.bulk_orders(orders)
+        # B21: grouping='positionTpsl' makes the TP/SL triggers only activate
+        # when a position exists. Without this, if the price is already past
+        # a TP trigger at placement time (common for SMC retests where price
+        # has moved AWAY from entry to confirm MSS), the TP fires immediately,
+        # gets reduceOnlyRejected (no position to reduce), and is killed.
+        # Verified live on LDO (2026-05-04): TP1 0.3704 and TP2 0.36926
+        # placed when mark was 0.367 — both rejected at placement, position
+        # filled 3h later with no profit protection, ran +2.81% past TP2
+        # then reversed to SL for -$0.16.
+        res = exchange.bulk_orders(orders, grouping='positionTpsl')
     except Exception as e:
         log(f'  {coin} bulk_orders exception: {e}')
         return False
