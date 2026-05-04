@@ -698,25 +698,58 @@ def load_state():
                'coin_cooldown_until': {},  # {coin: unix_ms}
                'processed_fills': [],  # B18: dedup keys for processed fills
                'consec_losses': 0}
+
+    def _try_load(path):
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            return json.load(f)
+
+    loaded = None
     try:
-        if os.path.exists(STATE_PATH):
-            with open(STATE_PATH) as f:
-                loaded = json.load(f)
-            for k,v in default.items():
-                if k not in loaded: loaded[k] = v
-            # B18 cleanup: positions inflated by replay bug get entry_filled_sz
-            # clamped to sz_total. Phase logic handles correctly going forward.
-            for coin, pos in (loaded.get('positions') or {}).items():
-                cum = pos.get('entry_filled_sz', 0.0)
-                tot = pos.get('sz_total', 0.0)
-                if cum > tot * 1.5 and tot > 0:
-                    log(f'  state load: clamping {coin} entry_filled_sz '
-                        f'{cum:.4f}→{tot:.4f} (replay-bloat fixup)')
-                    pos['entry_filled_sz'] = tot
-            return loaded
+        loaded = _try_load(STATE_PATH)
+        if loaded is not None:
+            # B105: state file parsed cleanly — snapshot it as .bak for next
+            # boot's recovery if main file gets corrupted (incomplete write,
+            # disk error, kill-9 during save).
+            try:
+                bak_path = STATE_PATH + '.bak'
+                with open(bak_path, 'w') as bf:
+                    json.dump(loaded, bf)
+            except Exception as bak_e:
+                log(f'state .bak write err (non-fatal): {bak_e}')
     except Exception as e:
-        log(f'state load err: {e}')
-    return default
+        log(f'state load err on main file: {e}')
+        # B105: try the backup file before giving up. Losing all open-position
+        # tracking would mean those positions stay on HL with no service-side
+        # awareness until B101 zombie detection eventually flags them — but
+        # by then we'd have missed any TP1/SL/TP2 fills in the gap.
+        try:
+            loaded = _try_load(STATE_PATH + '.bak')
+            if loaded is not None:
+                log(f'state load: recovered from .bak ({len(loaded.get("positions", {}))} '
+                    f'positions, {len(loaded.get("history", []))} closed)')
+        except Exception as e2:
+            log(f'state .bak load err: {e2} — falling to default empty state')
+            loaded = None
+
+    if loaded is None:
+        return default
+
+    # Merge any missing top-level keys (forward-compat for new fields)
+    for k, v in default.items():
+        if k not in loaded:
+            loaded[k] = v
+    # B18 cleanup: positions inflated by replay bug get entry_filled_sz
+    # clamped to sz_total. Phase logic handles correctly going forward.
+    for coin, pos in (loaded.get('positions') or {}).items():
+        cum = pos.get('entry_filled_sz', 0.0)
+        tot = pos.get('sz_total', 0.0)
+        if cum > tot * 1.5 and tot > 0:
+            log(f'  state load: clamping {coin} entry_filled_sz '
+                f'{cum:.4f}→{tot:.4f} (replay-bloat fixup)')
+            pos['entry_filled_sz'] = tot
+    return loaded
 
 
 def save_state(state):
@@ -1233,15 +1266,52 @@ def reconcile_positions(state):
         # TP1 leg → move SL to BE
         elif leg == 'tp1' and pos['phase'] in ('live', 'pending_fill'):
             log(f'  {coin} TP1 hit at {fill_px} — moving SL to BE @ {pos["entry"]}')
-            cancel_order(coin, pos.get('cloid_sl'))
+            # B96: place new BE-stop FIRST, verify it rests on book, THEN cancel
+            # the old SL. If we cancel first and the place fails, the runner
+            # has no protection — sharp reversal would lose the whole runner
+            # instead of BE. Order: place → verify → cancel old.
             new_cloid = make_cloid(coin, 'sb')
-            place_native_stop(coin, pos['is_long'], pos['sz_half2'], pos['entry'], new_cloid)
-            pos['cloid_sl'] = new_cloid
-            pos['sl'] = pos['entry']
-            pos['phase'] = 'tp1_filled'
-            pos['tp1_fill_px'] = fill_px
-            pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
-            notify(f'TP1 {coin}', f'half closed @ {fill_px}, SL→BE @ {pos["entry"]}', priority=0)
+            new_res = place_native_stop(coin, pos['is_long'], pos['sz_half2'],
+                                         pos['entry'], new_cloid)
+            new_ok = False
+            if new_res and isinstance(new_res, dict):
+                if new_res.get('status') == 'ok':
+                    # Inspect leg statuses for resting/filled (success) vs error
+                    try:
+                        statuses = new_res.get('response', {}).get('data', {}).get('statuses', [])
+                        if statuses:
+                            st0 = statuses[0]
+                            if isinstance(st0, dict) and ('resting' in st0 or 'filled' in st0):
+                                new_ok = True
+                            elif isinstance(st0, dict) and 'error' in st0:
+                                log(f'  {coin} BE-stop placement returned error: {st0["error"]}')
+                    except Exception as e:
+                        log(f'  {coin} BE-stop status parse err: {e}')
+
+            if new_ok:
+                # Safe to cancel old SL now — runner is protected by new BE-stop
+                cancel_order(coin, pos.get('cloid_sl'))
+                pos['cloid_sl'] = new_cloid
+                pos['sl'] = pos['entry']
+                pos['phase'] = 'tp1_filled'
+                pos['tp1_fill_px'] = fill_px
+                pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
+                notify(f'TP1 {coin}', f'half closed @ {fill_px}, SL→BE @ {pos["entry"]}', priority=0)
+            else:
+                # B96: place failed. Do NOT cancel old SL — runner stays
+                # protected by the original SL at -1R (worse than BE but
+                # better than naked). Mark TP1 progress so we don't loop
+                # the placement attempt every fill, but keep phase='live'
+                # so next reconcile cycle can retry the BE move.
+                log(f'  {coin} BE-stop placement FAILED — keeping original SL '
+                    f'as fallback. Will retry BE move next reconcile.')
+                # Track that TP1 fired even though BE move pending — so we
+                # don't double-process this fill. Use a separate field.
+                pos['tp1_filled_pending_be'] = True
+                pos['tp1_fill_px'] = fill_px
+                pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
+                notify(f'TP1 {coin}', f'half closed @ {fill_px} but BE move FAILED — '
+                       f'still on -1R original SL. Service will retry.', priority=2)
 
         # TP2 leg → done
         elif leg == 'tp2' and pos['phase'] in ('live', 'tp1_filled'):
@@ -1409,6 +1479,82 @@ def reconcile_positions(state):
                                f'4th retry sent at {slippage*100:.0f}% slippage. '
                                f'If this also fails, close manually.',
                                priority=2)
+
+    # B96: retry failed BE-stop placement. If TP1 fired but the new BE-stop
+    # placement failed earlier, tp1_filled_pending_be is set and phase still
+    # 'live'. Re-attempt placing the BE-stop each reconcile until it sticks.
+    for coin, pos in list(state['positions'].items()):
+        if pos.get('tp1_filled_pending_be') and pos.get('phase') == 'live':
+            log(f'  {coin} BE-stop RETRY — TP1 fired earlier, original SL still active')
+            new_cloid = make_cloid(coin, 'sb')
+            new_res = place_native_stop(coin, pos['is_long'], pos['sz_half2'],
+                                         pos['entry'], new_cloid)
+            new_ok = False
+            if new_res and isinstance(new_res, dict) and new_res.get('status') == 'ok':
+                try:
+                    statuses = new_res.get('response', {}).get('data', {}).get('statuses', [])
+                    if statuses and isinstance(statuses[0], dict) and \
+                       ('resting' in statuses[0] or 'filled' in statuses[0]):
+                        new_ok = True
+                except Exception:
+                    pass
+            if new_ok:
+                cancel_order(coin, pos.get('cloid_sl'))
+                pos['cloid_sl'] = new_cloid
+                pos['sl'] = pos['entry']
+                pos['phase'] = 'tp1_filled'
+                pos.pop('tp1_filled_pending_be', None)
+                log(f'  {coin} BE-stop RETRY succeeded; SL→BE @ {pos["entry"]}')
+                notify(f'BE recovered {coin}',
+                       f'BE-stop now active at {pos["entry"]}', priority=0)
+            else:
+                log(f'  {coin} BE-stop retry still failing — original SL remains active')
+
+    # B101: zombie position detection. State only mutates via the fill stream;
+    # if a fill is missed (HL outage during 60s backoff window, edge-case
+    # cloid mismatch), positions stay tracked even after HL closed them.
+    # Dedup then permanently blocks new setups on that coin.
+    # Authoritative check: query user_state, mark any tracked position with
+    # no on-chain size as 'zombie_recovered'.
+    active_phases = ('live', 'tp1_filled')
+    has_active = any(p.get('phase') in active_phases
+                     for p in state['positions'].values())
+    if has_active:
+        try:
+            us = info.user_state(WALLET)
+            on_chain = {}
+            for ap in us.get('assetPositions', []):
+                p = ap.get('position', {})
+                if not p: continue
+                c = p.get('coin')
+                sz = abs(float(p.get('szi', 0) or 0))
+                if c and sz > 0:
+                    on_chain[c] = sz
+        except Exception as e:
+            log(f'zombie check: user_state err: {e}')
+            on_chain = None
+
+        if on_chain is not None:
+            for coin, pos in list(state['positions'].items()):
+                if pos.get('phase') not in active_phases:
+                    continue
+                # Allow some grace if position was JUST fired (HL may not show
+                # the fill on user_state for a few seconds)
+                fired_age_sec = (time.time()*1000 - pos.get('fired_t', 0)) / 1000
+                if fired_age_sec < 120:
+                    continue
+                if coin not in on_chain:
+                    log(f'  {coin} ZOMBIE: state phase={pos["phase"]} but no on-chain '
+                        f'position. Marking done (recovered).')
+                    pos['phase'] = 'done'
+                    pos['close_reason'] = 'zombie_recovered'
+                    pos['closed_t'] = int(time.time()*1000)
+                    append_history(state, pos)
+                    del state['positions'][coin]
+                    notify(f'ZOMBIE {coin}',
+                           f'Position closed on HL but state was tracking it. '
+                           f'Cleaned up; coin now eligible for new setups.',
+                           priority=1)
 
     # B18: cursor must move forward monotonically. Use the latest fill time we
     # actually saw (less a 5s overlap to catch concurrent same-ms fills) — this
@@ -1589,6 +1735,10 @@ def main():
 
     last_scan = state.get('last_scan_ts', 0) / 1000.0
     last_reconcile = 0
+    # B103: liveness heartbeat — push to ntfy every 30 min so a silent freeze
+    # (hung network call, deadlock, infinite loop) is visible to operator.
+    last_heartbeat = time.time()
+    HEARTBEAT_INTERVAL_SEC = 30 * 60
 
     while True:
         try:
@@ -1608,6 +1758,22 @@ def main():
             if on_bar_boundary and (now - last_scan) >= 14*60:
                 scan_for_setups(state, reconcile_fn=reconcile_positions)
                 last_scan = now
+
+            # B103: heartbeat
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+                positions = state.get('positions', {})
+                phase_counts = {}
+                for p in positions.values():
+                    ph = p.get('phase', 'unknown')
+                    phase_counts[ph] = phase_counts.get(ph, 0) + 1
+                pc_str = ', '.join(f'{k}={v}' for k, v in sorted(phase_counts.items())) or 'none'
+                last_scan_age_min = int((now - last_scan) / 60) if last_scan else -1
+                notify('heartbeat',
+                       f'open={len(positions)} ({pc_str})\n'
+                       f'closed={len(state.get("history", []))}\n'
+                       f'last_scan={last_scan_age_min}m ago',
+                       priority=-1)  # min priority — won't wake phone
+                last_heartbeat = now
 
             time.sleep(TICK_SEC)
         except KeyboardInterrupt:
