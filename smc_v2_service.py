@@ -766,14 +766,21 @@ def fire_setup(coin, setup, state):
     sl = round_price(coin, setup['sl'])
     tp1 = round_price(coin, setup['tp1'])
     tp2 = round_price(coin, setup['tp2'])
-    sz_total = calc_size(coin, entry)
-    if sz_total <= 0:
-        log(f'  {coin} skip: size 0 (notional={FIXED_NOTIONAL_USD}, entry={entry})')
+    # B9: ensure sz_total is exactly halvable at szDecimals precision so
+    # TP1+TP2 sum to sz_total with no residual. Round down to nearest 2*unit.
+    szD = get_sz_decimals(coin)
+    unit = 10 ** (-szD)
+    raw_sz = FIXED_NOTIONAL_USD / entry
+    n_pairs = int(raw_sz / (2 * unit))
+    if n_pairs <= 0:
+        log(f'  {coin} skip: notional too small for szDecimals={szD} '
+            f'(raw_sz={raw_sz:.8f}, min_pair={2*unit:.8f})')
         return False
-    sz_half = round_size(coin, sz_total / 2)
-    sz_half2 = round_size(coin, sz_total - sz_half)
-    if sz_half <= 0 or sz_half2 <= 0:
-        log(f'  {coin} skip: half size rounds to 0 (sz_total={sz_total}, szDecimals={get_sz_decimals(coin)})')
+    sz_total = round(n_pairs * 2 * unit, szD)
+    sz_half = round(n_pairs * unit, szD)
+    sz_half2 = sz_half  # exactly equal halves; sum = sz_total
+    if sz_half <= 0:
+        log(f'  {coin} skip: half size 0 (szDecimals={szD})')
         return False
 
     log(f'FIRE {coin} {"LONG" if is_long else "SHORT"} entry={entry} sl={sl} '
