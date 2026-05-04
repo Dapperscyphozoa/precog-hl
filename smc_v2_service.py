@@ -426,26 +426,133 @@ def get_universe():
 
 
 # ═══════════════════════════════════════════════════════
-# CANDLE FETCH (paginated for full history)
+# CANDLE FETCH — OKX primary (avoids HL CloudFront 429), HL fallback
 # ═══════════════════════════════════════════════════════
+import urllib.request
+import urllib.parse
+
+OKX_CANDLES = 'https://www.okx.com/api/v5/market/candles'
+OKX_HISTORY = 'https://www.okx.com/api/v5/market/history-candles'
+
+OKX_TF = {'4h': '4H', '1h': '1H', '15m': '15m', '5m': '5m'}
+
+# HL coin → OKX inst (subset; full map in okx_fetch.py)
+HL_OKX = {
+    'kPEPE':'PEPE-USDT-SWAP', 'kSHIB':'SHIB-USDT-SWAP', 'kBONK':'BONK-USDT-SWAP',
+    'kFLOKI':'FLOKI-USDT-SWAP', 'kDOGS':'DOGS-USDT-SWAP', 'kCAT':'CAT-USDT-SWAP',
+    'kNEIRO':'NEIRO-USDT-SWAP', 'kLUNC':'LUNC-USDT-SWAP',
+    'MATIC':'POL-USDT-SWAP', 'FTM':'S-USDT-SWAP', 'RNDR':'RENDER-USDT-SWAP',
+}
+# Coins not on OKX — return [] immediately (skip silently)
+NOT_ON_OKX = {'PURR','HYPE','XMR','MKR','RUNE','VET','KAS','BAL','EOS','VVV',
+              'STABLE','HFUN','OMNI','MEW','BIO','TST','MEGA','BABY',
+              'FARTCOIN','TAO','HMSTR','SCR','GOAT','MOODENG','GRASS'}
+
+_okx_last_call = [0.0]
+
+
+def _okx_throttle():
+    gap = 0.1  # 10 req/sec to stay well under OKX 20/2s limit
+    delta = time.time() - _okx_last_call[0]
+    if delta < gap:
+        time.sleep(gap - delta)
+    _okx_last_call[0] = time.time()
+
+
+def _hl_to_okx_inst(coin):
+    if coin in NOT_ON_OKX:
+        return None
+    return HL_OKX.get(coin, f'{coin}-USDT-SWAP')
+
+
+def _okx_fetch_page(inst, tf, after_ms=None, history=False):
+    """Fetch up to 300 (candles) or 100 (history-candles) bars from OKX."""
+    url = OKX_HISTORY if history else OKX_CANDLES
+    limit = 100 if history else 300
+    params = {'instId': inst, 'bar': tf, 'limit': limit}
+    if after_ms is not None:
+        params['after'] = str(after_ms)
+    qs = urllib.parse.urlencode(params)
+    _okx_throttle()
+    try:
+        req = urllib.request.Request(f'{url}?{qs}',
+            headers={'Accept':'application/json','User-Agent':'smcv2/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            payload = json.loads(r.read())
+    except Exception as e:
+        return None, f'net err: {e}'
+    if not isinstance(payload, dict) or payload.get('code') != '0':
+        return None, f'okx err: {payload.get("code")} {payload.get("msg","")}'
+    rows = payload.get('data') or []
+    bars = []
+    for k in rows:
+        try:
+            bars.append({'t': int(k[0]), 'o': float(k[1]), 'h': float(k[2]),
+                         'l': float(k[3]), 'c': float(k[4]), 'v': float(k[5])})
+        except (IndexError, ValueError, TypeError):
+            continue
+    bars.sort(key=lambda b: b['t'])
+    return bars, None
+
+
+def fetch_candles_okx(coin, tf, days):
+    """Paginated fetch from OKX. /candles for first page, /history-candles for older."""
+    inst = _hl_to_okx_inst(coin)
+    if inst is None:
+        return []
+    okx_tf = OKX_TF.get(tf, tf)
+    target_start_ms = int(time.time()*1000) - days*86400*1000
+
+    # First page: most recent 300 bars from /candles
+    bars, err = _okx_fetch_page(inst, okx_tf, after_ms=None, history=False)
+    if err:
+        return []
+    if not bars:
+        return []
+
+    # Paginate older via /history-candles using 'after' = oldest_t
+    # Loop limited to avoid runaway calls
+    for _ in range(20):
+        if not bars or bars[0]['t'] <= target_start_ms:
+            break
+        oldest = bars[0]['t']
+        page, err = _okx_fetch_page(inst, okx_tf, after_ms=oldest, history=True)
+        if err or not page:
+            break
+        # Merge (page may overlap; dedupe on 't')
+        seen = {b['t'] for b in bars}
+        new = [b for b in page if b['t'] not in seen]
+        if not new:
+            break
+        bars = sorted(new + bars, key=lambda b: b['t'])
+
+    # Trim to target window
+    bars = [b for b in bars if b['t'] >= target_start_ms]
+    return bars
+
+
 def fetch_candles(coin, tf, days):
+    """Public fetcher: OKX with HL fallback."""
+    bars = fetch_candles_okx(coin, tf, days)
+    if bars and len(bars) >= 30:
+        return bars
+    # Fallback to HL only if OKX returned too little (rare)
     end = int(time.time()*1000)
     target = end - days*86400000
     intvl_ms = {'4h': 4*3600*1000, '1h': 3600*1000, '15m': 15*60*1000}[tf]
     win_ms = 4900 * intvl_ms
     seen = {}
     cur_end = end
-    while cur_end > target:
+    for _ in range(5):
+        if cur_end <= target: break
         cur_start = max(cur_end - win_ms, target)
         try:
             raw = info.candles_snapshot(coin, tf, cur_start, cur_end)
-        except Exception as e:
-            log(f'  candles err {coin} {tf}: {e}')
+        except Exception:
             break
         if not isinstance(raw, list) or not raw:
             break
-        new = 0
-        oldest = cur_end
+        new = 0; oldest = cur_end
         for c in raw:
             try:
                 t = int(c['t'])
@@ -458,7 +565,7 @@ def fetch_candles(coin, tf, days):
                 pass
         if new == 0 or oldest <= target: break
         cur_end = oldest - 1
-        time.sleep(0.15)
+        time.sleep(0.4)
     return sorted(seen.values(), key=lambda x: x['t'])
 
 
