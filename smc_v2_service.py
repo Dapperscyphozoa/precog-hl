@@ -51,6 +51,8 @@ EXCLUDED_MAJORS = {'BTC','ETH','BNB','SOL','BCH','LTC','XRP','ADA','DOGE','AVAX'
 FIXED_NOTIONAL_USD = float(os.environ.get('SMCV2_NOTIONAL_USD', '25'))
 DEFAULT_LEVERAGE = int(os.environ.get('SMCV2_LEVERAGE', '10'))
 MAX_CONCURRENT = int(os.environ.get('SMCV2_MAX_CONCURRENT', '20'))
+COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCV2_COIN_LOSS_THRESHOLD', '2'))
+COIN_COOLDOWN_HOURS = int(os.environ.get('SMCV2_COIN_COOLDOWN_HOURS', '24'))
 LIVE_TRADING = os.environ.get('SMCV2_LIVE', '0') == '1'
 
 # Timing
@@ -623,6 +625,8 @@ def append_history(state, pos):
 def load_state():
     default = {'positions': {}, 'history': [], 'last_scan_ts': 0,
                'last_fill_check_ts': 0, 'last_fired_mss_t': {},
+               'coin_consec_losses': {},  # {coin: count}
+               'coin_cooldown_until': {},  # {coin: unix_ms}
                'consec_losses': 0}
     try:
         if os.path.exists(STATE_PATH):
@@ -1063,6 +1067,8 @@ def reconcile_positions(state):
             append_history(state, pos)
             del state['positions'][coin]
             notify(f'TP2 {coin}', f'WIN — runner closed @ {fill_px} (entry={pos["entry"]})', priority=0)
+            # B15: TP2 win clears the consec-loss counter for this coin
+            state.get('coin_consec_losses', {}).pop(coin, None)
 
         # SL leg → done (label as BE-stop if it fired after TP1)
         elif leg == 'sl' and pos['phase'] in ('live', 'tp1_filled'):
@@ -1077,6 +1083,21 @@ def reconcile_positions(state):
             outcome = 'BE' if label == 'be_stop' else 'LOSS'
             notify(f'{outcome} {coin}', f'{label.upper()} @ {fill_px} (entry={pos["entry"]})',
                    priority=1 if label == 'sl' else 0)
+            # B15: track consecutive losses per coin; cool down after threshold
+            if label == 'sl':
+                cl = state.setdefault('coin_consec_losses', {})
+                cl[coin] = cl.get(coin, 0) + 1
+                if cl[coin] >= COIN_LOSS_COOLDOWN_THRESHOLD:
+                    cd = state.setdefault('coin_cooldown_until', {})
+                    cd[coin] = int(time.time()*1000) + COIN_COOLDOWN_HOURS * 3600 * 1000
+                    log(f'  {coin} COOLDOWN: {cl[coin]} consec losses → '
+                        f'paused {COIN_COOLDOWN_HOURS}h')
+                    notify(f'COOLDOWN {coin}',
+                           f'{cl[coin]} consec losses; paused {COIN_COOLDOWN_HOURS}h',
+                           priority=1)
+            else:
+                # BE-stop is not a loss — reset counter
+                state.get('coin_consec_losses', {}).pop(coin, None)
 
         # CLOSE leg (time-stop close fill arrived)
         elif leg == 'close' and pos['phase'] in ('live', 'tp1_filled'):
@@ -1143,6 +1164,16 @@ def scan_for_setups(state, reconcile_fn=None):
         if len(state['positions']) >= MAX_CONCURRENT:
             log(f'  max concurrent reached ({MAX_CONCURRENT}); stopping scan')
             break
+
+        # B15: skip coin if in cooldown after consecutive losses
+        cd_until = state.get('coin_cooldown_until', {}).get(coin, 0)
+        if cd_until > int(time.time()*1000):
+            continue
+        # Cooldown expired — reset counter and clear cooldown
+        if cd_until and cd_until <= int(time.time()*1000):
+            state.get('coin_cooldown_until', {}).pop(coin, None)
+            state.get('coin_consec_losses', {}).pop(coin, None)
+            log(f'  {coin} cooldown expired; eligible again')
 
         # B11: interleave reconcile so TP1 fills get SL-to-BE within 30s
         # even during long cold-cache scans
