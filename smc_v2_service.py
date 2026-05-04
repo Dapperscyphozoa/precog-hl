@@ -658,15 +658,27 @@ def place_native_tp(coin, is_long_pos, sz, trigger_px, cloid):
         return None
 
 
-def cancel_order(coin, oid):
+def cancel_order(coin, cloid):
+    """Cancel a resting order by cloid (string, 0x-prefixed 32-hex).
+    HL SDK has cancel(coin, oid) for numeric oid and cancel_by_cloid(coin, cloid)
+    for string cloid — must use the latter since we never store numeric oids.
+    """
     if not LIVE_TRADING:
-        log(f'  [DRY] cancel {coin} oid={oid}')
+        log(f'  [DRY] cancel {coin} cloid={cloid}')
         return {'status': 'ok'}
-    try:
-        return exchange.cancel(coin, oid)
-    except Exception as e:
-        log(f'  cancel err {coin} {oid}: {e}')
+    if not cloid:
+        log(f'  cancel {coin}: no cloid provided')
         return None
+    try:
+        return exchange.cancel_by_cloid(coin, cloid)
+    except Exception as e:
+        # Fallback: SDK may require Cloid object wrapper instead of raw string
+        try:
+            from hyperliquid.utils.signing import Cloid
+            return exchange.cancel_by_cloid(coin, Cloid.from_str(cloid))
+        except Exception as e2:
+            log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: {e} (wrapper fallback: {e2})')
+            return None
 
 
 def market_close(coin, is_long_pos, sz, slippage=0.005, cloid=None):
@@ -853,7 +865,7 @@ def reconcile_positions(state):
         # TP1 leg → move SL to BE
         elif leg == 'tp1' and pos['phase'] in ('live', 'pending_fill'):
             log(f'  {coin} TP1 hit at {fill_px} — moving SL to BE @ {pos["entry"]}')
-            cancel_order(coin, pos.get('cloid_sl'))  # NOTE: cancel-by-cloid bug pending B4
+            cancel_order(coin, pos.get('cloid_sl'))
             new_cloid = make_cloid(coin, 'sb')
             place_native_stop(coin, pos['is_long'], pos['sz_half2'], pos['entry'], new_cloid)
             pos['cloid_sl'] = new_cloid
