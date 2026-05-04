@@ -17,6 +17,7 @@ Procfile:
 import os
 import time
 import logging
+import json as json_lib
 
 from flask import Flask, request, jsonify
 
@@ -320,6 +321,83 @@ def news_compat():
 @app.route('/whales', methods=['GET'])
 def whales_compat():
     return jsonify({'items': []})
+
+
+@app.route('/pending', methods=['GET'])
+def pending_compat():
+    """Resting orders on the wallet, grouped per coin into pending bracket sets.
+    Captures SMC v2's atomic-bulk fires (entry GTC + SL/TP triggers) before they
+    fill, plus any other limit orders sitting on book. Landing renders these as
+    pending rows so the user can see what's queued.
+    """
+    import urllib.request as _ur
+    wallet = os.environ.get('HL_ADDRESS', '')
+    if not wallet:
+        return jsonify({'items': [], 'note': 'HL_ADDRESS unset'})
+    try:
+        body = json_lib.dumps({'type': 'frontendOpenOrders', 'user': wallet}).encode()
+        req = _ur.Request('https://api.hyperliquid.xyz/info', data=body,
+                          headers={'Content-Type': 'application/json'})
+        with _ur.urlopen(req, timeout=6) as r:
+            orders = json_lib.loads(r.read())
+    except Exception as e:
+        return jsonify({'items': [], 'err': str(e)[:120]})
+
+    # Group by coin: collect entry leg + SL trigger + TP triggers
+    by_coin = {}
+    for o in orders:
+        if not isinstance(o, dict): continue
+        coin = o.get('coin')
+        if not coin: continue
+        bucket = by_coin.setdefault(coin, {'entries': [], 'sls': [], 'tps': []})
+        is_trigger = bool(o.get('isTrigger'))
+        ro = bool(o.get('reduceOnly'))
+        ot = (o.get('orderType') or '').lower()
+        if not is_trigger and not ro:
+            bucket['entries'].append(o)
+        elif is_trigger and ro:
+            if 'stop' in ot:
+                bucket['sls'].append(o)
+            elif 'profit' in ot or 'tp' in ot:
+                bucket['tps'].append(o)
+
+    items = []
+    for coin, group in by_coin.items():
+        if not group['entries']:
+            continue  # no entry leg = orphan triggers, skip for now
+        for entry in group['entries']:
+            entry_side = entry.get('side')  # 'B'=buy/long, 'A'=ask/short
+            close_side = 'A' if entry_side == 'B' else 'B'
+            side_label = 'LONG' if entry_side == 'B' else 'SHORT'
+            # Match triggers by close direction
+            sl_match = next((s for s in group['sls']
+                             if s.get('side') == close_side), None)
+            tp_matches = sorted(
+                [t for t in group['tps'] if t.get('side') == close_side],
+                key=lambda t: float(t.get('triggerPx', 0)),
+                reverse=(entry_side == 'B'),  # for long, TP1 is lower trigger first; for short, higher trigger first
+            )
+            tp1 = tp_matches[0] if len(tp_matches) > 0 else None
+            tp2 = tp_matches[1] if len(tp_matches) > 1 else None
+            try:
+                entry_px = float(entry.get('limitPx', 0))
+                sz = float(entry.get('sz', 0))
+            except (TypeError, ValueError):
+                continue
+            items.append({
+                'coin': coin,
+                'side': side_label,
+                'entry': entry_px,
+                'size': sz,
+                'sl': float(sl_match.get('triggerPx', 0)) if sl_match else None,
+                'tp1': float(tp1.get('triggerPx', 0)) if tp1 else None,
+                'tp2': float(tp2.get('triggerPx', 0)) if tp2 else None,
+                'placed_ts': int(entry.get('timestamp', 0)),
+            })
+
+    # Sort by most recently placed first
+    items.sort(key=lambda x: x.get('placed_ts', 0), reverse=True)
+    return jsonify({'items': items, 'count': len(items)})
 
 
 @app.route('/orderbook/<coin>', methods=['GET'])

@@ -633,6 +633,15 @@ body::after {
         <div id="positions"></div>
     </div>
 
+    <!-- PENDING -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Pending · Resting Orders</div>
+            <div class="panel-meta" id="pending-meta">—</div>
+        </div>
+        <div id="pending"></div>
+    </div>
+
     <!-- NEWS -->
     <div class="panel">
         <div class="panel-head">
@@ -1377,13 +1386,46 @@ async function loadMacroStrip() {
 loadMacroStrip();
 setInterval(loadMacroStrip, 5000);
 
-loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); updateClock();
+async function loadPending() {
+    try {
+        const r = await fetch('/pending');
+        const d = await r.json();
+        const items = d.items || [];
+        const div = document.getElementById('pending');
+        if (!div) return;
+        if (items.length === 0) {
+            div.innerHTML = '<div class="pos-row" style="opacity:0.5">// no pending orders</div>';
+        } else {
+            div.innerHTML = items.map(p => {
+                const sl = p.sl != null ? Number(p.sl).toPrecision(5) : '-';
+                const tp1 = p.tp1 != null ? Number(p.tp1).toPrecision(5) : '-';
+                const tp2 = p.tp2 != null ? Number(p.tp2).toPrecision(5) : '-';
+                const ageMin = p.placed_ts ? Math.floor((Date.now() - p.placed_ts) / 60000) : 0;
+                const sideClass = p.side === 'LONG' ? 'side-LONG' : 'side-SHORT';
+                return `<div class="pos-row">
+                    <div class="pos-coin">${p.coin}<br><span style="opacity:0.45;font-size:9px;letter-spacing:0.05em">PENDING ${ageMin}m</span></div>
+                    <div><span class="pos-side ${sideClass}">${p.side}</span></div>
+                    <div class="pos-size">${p.size} @ ${Number(p.entry).toPrecision(5)}<br><span style="opacity:0.5;font-size:9px">TP1 ${tp1} · TP2 ${tp2} · SL ${sl}</span></div>
+                    <div class="pos-pnl" style="opacity:0.45;font-size:10px">RESTING</div>
+                </div>`;
+            }).join('');
+        }
+        document.getElementById('pending-meta').textContent = items.length + ' resting';
+    } catch (e) {
+        console.error('pending fetch err', e);
+        const div = document.getElementById('pending');
+        if (div) div.innerHTML = '<div class="pos-row" style="opacity:0.5">// loading</div>';
+    }
+}
+
+loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); loadPending(); updateClock();
 setInterval(loadDash, 5000);
 setInterval(loadNews, 60000);
 setInterval(loadSignals, 5000);
 setInterval(loadWhales, 5000);
 setInterval(loadHeatmap, 30000);
 setInterval(loadOrderbook, 3000);
+setInterval(loadPending, 5000);
 setInterval(updateClock, 1000);
 </script>
 </body>
