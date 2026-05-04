@@ -122,6 +122,9 @@ def _normalize_coin(raw: str) -> str:
         if raw.endswith(suf):
             raw = raw[:-len(suf)]
             break
+    # HL k-prefix coins (kNEIRO, kBONK, kPEPE, kFLOKI, kSHIB, kDOGS) keep lowercase k
+    if len(raw) > 1 and raw[0] == 'k' and raw[1].isupper():
+        return raw
     return raw.upper()
 
 

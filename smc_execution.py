@@ -19,6 +19,16 @@ import time
 import threading
 import logging
 
+
+def _coin_upper(c):
+    """Uppercase except for HL k-prefix tokens (kNEIRO, kBONK, kPEPE, kFLOKI, kSHIB, kDOGS)."""
+    if not c: return c
+    if len(c) > 1 and c[0] == 'k' and c[1].isupper():
+        return c
+    return c.upper()
+
+
+
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from hyperliquid.utils import constants
@@ -93,7 +103,7 @@ def submit_smc_trade(payload: dict, ctx: dict):
     if SMC_CONFIG.get('order_type') == 'maker_only':
         os.environ.setdefault('ENTRY_TIF', 'Alo')
 
-    coin = (payload.get('coin') or '').upper()
+    coin = _coin_upper(payload.get('coin') or '')
     notional = SMC_CONFIG['force_notional_usd']
     # Pre-round prices to HL tick size (HL float_to_wire is strict on precision)
     ob_top = round_price(coin, float(payload['ob_top']))
@@ -263,7 +273,7 @@ def on_smc_fill(fill: dict):
         # Could be SL/TP fill (close) — handled by close detection
         return
 
-    coin = (armed_match.get('coin') or fill.get('coin') or '').upper()
+    coin = _coin_upper(armed_match.get('coin') or fill.get('coin') or '')
     px = float(fill.get('px') or 0)
     size = float(fill.get('sz') or fill.get('size') or 0)
     ts_ms = int(fill.get('ts_ms') or time.time() * 1000)
@@ -299,7 +309,7 @@ def _build_pos(armed: dict, fill_px: float, fill_size: float, fill_ms: int) -> d
 
 def on_smc_position_closed(coin: str, exit_px: float, exit_ts_ms: int):
     """Called by position_ledger when an SMC position closes."""
-    coin = coin.upper()
+    coin = _coin_upper(coin)
     pos = state.positions.get(coin)
     if not pos or not pos.get('trade_id', '').startswith('smc-'):
         return
@@ -336,7 +346,7 @@ def replace_sl(pos: dict, new_sl_px: float):
     _ensure_hl()
     if _exchange is None:
         return
-    coin = (pos.get('coin') or '').upper()
+    coin = _coin_upper(pos.get('coin') or '')
     trade_id = pos['trade_id']
     new_sl_px = round_price(coin, new_sl_px)
 
@@ -381,8 +391,8 @@ def reconciler_cancel(coin: str, oid):
     if _exchange is None:
         return
     try:
-        flight_guard.acquire(coin.upper())
-        _exchange.cancel(coin.upper(), oid)
+        flight_guard.acquire(_coin_upper(coin))
+        _exchange.cancel(_coin_upper(coin), oid)
     except Exception as e:
         log.warning(f"reconciler_cancel {coin}/{oid} failed: {e}")
 
@@ -392,7 +402,7 @@ def reconciler_place_sl(coin: str, is_long: bool, entry: float, size: float):
     _ensure_hl()
     if _exchange is None:
         return None
-    coin = coin.upper()
+    coin = _coin_upper(coin)
     pos = state.positions.get(coin) or {}
     sl_px = pos.get('sl_current') or pos.get('sl_orig') or pos.get('sl_price')
     if not sl_px:
@@ -418,7 +428,7 @@ def reconciler_place_tp(coin: str, is_long: bool, entry: float, size: float):
     _ensure_hl()
     if _exchange is None:
         return None
-    coin = coin.upper()
+    coin = _coin_upper(coin)
     pos = state.positions.get(coin) or {}
     tp_px = pos.get('tp2') or pos.get('tp1')
     if not tp_px:
@@ -441,7 +451,7 @@ def reconciler_place_tp(coin: str, is_long: bool, entry: float, size: float):
 
 def reconciler_emergency_close(coin: str, reason: str):
     """Hard-flatten coin when reconciler cannot resync SL/TP."""
-    coin = coin.upper()
+    coin = _coin_upper(coin)
     pos = state.positions.get(coin)
     if pos:
         close_market(pos, reason=f'reconciler:{reason}')
@@ -460,7 +470,7 @@ def close_market(pos: dict, reason: str = 'MANUAL'):
     _ensure_hl()
     if _exchange is None:
         return
-    coin = (pos.get('coin') or '').upper()
+    coin = _coin_upper(pos.get('coin') or '')
     pos['forced_close'] = True
     pos['close_reason'] = reason
     try:
