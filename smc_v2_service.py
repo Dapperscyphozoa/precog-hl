@@ -418,15 +418,34 @@ info = Info(constants.MAINNET_API_URL, skip_ws=True)
 exchange = Exchange(acct, constants.MAINNET_API_URL, account_address=WALLET)
 
 _META_CACHE = {}
+_LEVERAGE_CACHE = {}  # B37: per-coin maxLeverage from HL meta
 def get_sz_decimals(coin):
     if not _META_CACHE:
         try:
             m = info.meta()
             for u in m['universe']:
                 _META_CACHE[u['name']] = int(u.get('szDecimals', 0))
+                # B37: also cache per-coin maxLeverage; HL caps each coin
+                # separately (3x for some, up to 50x for majors)
+                ml = u.get('maxLeverage')
+                if ml is not None:
+                    try:
+                        _LEVERAGE_CACHE[u['name']] = int(ml)
+                    except (ValueError, TypeError):
+                        pass
         except Exception as e:
             log(f'meta fetch err: {e}')
     return _META_CACHE.get(coin, 2)
+
+
+def get_max_leverage(coin):
+    """B37: Return the lesser of HL's per-coin cap and our DEFAULT_LEVERAGE.
+    Used by margin precheck to avoid underestimating required margin.
+    """
+    if not _LEVERAGE_CACHE:
+        get_sz_decimals(coin)  # warms both caches
+    coin_cap = _LEVERAGE_CACHE.get(coin, DEFAULT_LEVERAGE)
+    return min(DEFAULT_LEVERAGE, coin_cap)
 
 
 def round_price(coin, px):
@@ -565,6 +584,20 @@ def fetch_candles_okx(coin, tf, days):
     return bars
 
 
+_HL_LAST_CALL = [0.0]
+
+
+def _hl_throttle():
+    """B48: throttle HL info endpoint to avoid 429. Shared with PreCog
+    on this account so we keep the gap conservative.
+    """
+    gap = 0.4
+    delta = time.time() - _HL_LAST_CALL[0]
+    if delta < gap:
+        time.sleep(gap - delta)
+    _HL_LAST_CALL[0] = time.time()
+
+
 def fetch_candles(coin, tf, days):
     """Public fetcher: OKX with HL fallback."""
     bars = fetch_candles_okx(coin, tf, days)
@@ -580,6 +613,8 @@ def fetch_candles(coin, tf, days):
     for _ in range(5):
         if cur_end <= target: break
         cur_start = max(cur_end - win_ms, target)
+        # B48: throttle each HL call to avoid 429 on this shared wallet
+        _hl_throttle()
         try:
             raw = info.candles_snapshot(coin, tf, cur_start, cur_end)
         except Exception:
@@ -599,7 +634,6 @@ def fetch_candles(coin, tf, days):
                 pass
         if new == 0 or oldest <= target: break
         cur_end = oldest - 1
-        time.sleep(0.4)
     return sorted(seen.values(), key=lambda x: x['t'])
 
 
@@ -760,8 +794,8 @@ def place_native_tp(coin, is_long_pos, sz, trigger_px, cloid):
 
 def cancel_order(coin, cloid):
     """Cancel a resting order by cloid (string, 0x-prefixed 32-hex).
-    HL SDK has cancel(coin, oid) for numeric oid and cancel_by_cloid(coin, cloid)
-    for string cloid — must use the latter since we never store numeric oids.
+    HL SDK requires Cloid object — wrap proactively to avoid the error+retry
+    cycle that pollutes logs.
     """
     if not LIVE_TRADING:
         log(f'  [DRY] cancel {coin} cloid={cloid}')
@@ -769,16 +803,22 @@ def cancel_order(coin, cloid):
     if not cloid:
         log(f'  cancel {coin}: no cloid provided')
         return None
+    # B22: wrap cloid first; SDK rejects raw strings.
+    cloid_obj = cloid
     try:
-        return exchange.cancel_by_cloid(coin, cloid)
-    except Exception as e:
-        # Fallback: SDK may require Cloid object wrapper instead of raw string
+        from hyperliquid.utils.types import Cloid
+        cloid_obj = Cloid.from_str(cloid) if isinstance(cloid, str) else cloid
+    except Exception:
         try:
             from hyperliquid.utils.signing import Cloid
-            return exchange.cancel_by_cloid(coin, Cloid.from_str(cloid))
-        except Exception as e2:
-            log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: {e} (wrapper fallback: {e2})')
-            return None
+            cloid_obj = Cloid.from_str(cloid) if isinstance(cloid, str) else cloid
+        except Exception:
+            pass  # fall through with raw string; SDK may still handle
+    try:
+        return exchange.cancel_by_cloid(coin, cloid_obj)
+    except Exception as e:
+        log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: {e}')
+        return None
 
 
 def market_close(coin, is_long_pos, sz, slippage=0.005, cloid=None):
@@ -889,8 +929,13 @@ def fire_setup(coin, setup, state):
     # B10: pre-flight margin check. Avoid cascade-rejection when wallet
     # free margin can't cover this entry. Read live account value and used
     # margin from HL (same call PreCog uses).
+    # B37: use per-coin maxLeverage cap, not DEFAULT_LEVERAGE. HL caps some
+    # coins at 3x or 5x; if we assume 10x we underestimate required margin
+    # by 2-3x and the entry leg gets HL-rejected for insufficient margin
+    # (which then triggers B30 orphan cancel — better to never get there).
     notional_for_entry = sz_total * entry
-    required_margin = notional_for_entry / max(DEFAULT_LEVERAGE, 1)
+    eff_leverage = max(get_max_leverage(coin), 1)
+    required_margin = notional_for_entry / eff_leverage
     try:
         us = info.user_state(WALLET)
         ms = us.get('marginSummary', {}) if us else {}
@@ -1118,11 +1163,14 @@ def reconcile_positions(state):
     if fills is None:
         return
 
-    # B18: per-fill dedup. Use 'tid' (trade id, unique per fill) as primary key,
-    # fall back to (oid, time, sz, px) tuple if tid absent. State stores last
-    # 1000 IDs to bound size.
-    processed = state.setdefault('processed_fills', [])
-    processed_set = set(processed)
+    # B18+B33: per-fill dedup. Track BOTH a list (insertion order, for true
+    # FIFO eviction) and a set (O(1) membership). Use 'tid' (trade id) as
+    # primary key, fall back to (oid+time+sz+px) tuple if tid absent. The
+    # earlier set-only approach lost ordering, so the [-1000:] slice would
+    # evict arbitrary entries instead of the oldest.
+    processed_list = state.setdefault('processed_fills', [])
+    processed_set = set(processed_list)
+    new_dedup_keys = []  # appended in fill-arrival order this round
 
     # Build cloid → (coin, leg_key) map from current positions
     cloid_map = {}
@@ -1158,6 +1206,7 @@ def reconcile_positions(state):
         if not pos or pos.get('phase') == 'done':
             # Mark as processed so it doesn't keep getting checked
             processed_set.add(dedup_key)
+            new_dedup_keys.append(dedup_key)
             continue
 
         try:
@@ -1166,8 +1215,10 @@ def reconcile_positions(state):
         except (ValueError, TypeError):
             continue
         fills_processed += 1
-        # B18: record this fill so it never replays
+        # B18+B33: record this fill so it never replays — track in both the
+        # set (for membership) and the ordered list (for true FIFO eviction)
         processed_set.add(dedup_key)
+        new_dedup_keys.append(dedup_key)
         log(f'  {coin} {leg.upper()} fill sz={fill_sz} px={fill_px}')
 
         # ENTRY leg
@@ -1246,16 +1297,33 @@ def reconcile_positions(state):
             notify(f'TIME-STOP {coin}', f'closed @ {fill_px} (entry={pos["entry"]})', priority=0)
 
     # Time-stop check (independent of fills)
-    PENDING_FILL_MAX_SEC = PARAMS['timeout_bars'] * 15 * 60  # mirror engine timeout
+    # B41: pending_fill timeout is measured from MSS (the bar when setup
+    # confirmed), NOT from fire_t. Engine's ARMED→IDLE timeout is "timeout_bars
+    # of 15m bars after MSS bar". If we discover ARMED late (e.g. service
+    # restart, slow scan), MSS may already be hours old; we should respect
+    # the engine's total budget rather than starting a fresh 10h clock.
+    ENGINE_TIMEOUT_SEC = PARAMS['timeout_bars'] * 15 * 60
 
     for coin, pos in list(state['positions'].items()):
         # Pending-fill timeout: limit never filled within engine's timeout_bars
-        # Cancel all 4 legs and clear from state. Mirrors the engine's
-        # ARMED→IDLE timeout transition.
+        # measured from MSS. Cancel all 4 legs and clear from state.
         if pos.get('phase') == 'pending_fill':
-            age = (time.time()*1000 - pos['fired_t']) / 1000
-            if age > PENDING_FILL_MAX_SEC:
-                log(f'  {coin} PENDING TIMEOUT ({age/3600:.1f}h) — cancelling 4 legs')
+            mss_t = pos.get('mss_t', 0)
+            if mss_t:
+                # Time since MSS (engine reference)
+                age_from_mss_sec = (time.time()*1000 - mss_t) / 1000
+                deadline = ENGINE_TIMEOUT_SEC
+                age_for_log = age_from_mss_sec
+                reason_label = 'PENDING TIMEOUT (mss-based)'
+            else:
+                # Fallback for legacy positions without mss_t recorded
+                age_from_mss_sec = (time.time()*1000 - pos['fired_t']) / 1000
+                deadline = ENGINE_TIMEOUT_SEC
+                age_for_log = age_from_mss_sec
+                reason_label = 'PENDING TIMEOUT (fire-based)'
+
+            if age_from_mss_sec > deadline:
+                log(f'  {coin} {reason_label} ({age_for_log/3600:.1f}h since MSS) — cancelling 4 legs')
                 for cloid_field in ('cloid_entry', 'cloid_sl', 'cloid_tp1', 'cloid_tp2'):
                     c = pos.get(cloid_field)
                     if c: cancel_order(coin, c)
@@ -1354,8 +1422,16 @@ def reconcile_positions(state):
     # Strictly monotonic
     state['last_fill_check_ts'] = max(candidate, state.get('last_fill_check_ts', 0))
 
-    # B18: persist dedup set, capped at 1000 entries (FIFO)
-    state['processed_fills'] = list(processed_set)[-1000:]
+    # B18+B33: persist dedup list as a true FIFO. Append new keys (in
+    # arrival order this round) to the existing ordered list, then keep
+    # the last 1000 entries. Set-based eviction lost insertion order; the
+    # list-based approach evicts the actually-oldest entries.
+    if new_dedup_keys:
+        processed_list.extend(new_dedup_keys)
+        # Bound size: keep the last 1000
+        if len(processed_list) > 1000:
+            processed_list = processed_list[-1000:]
+        state['processed_fills'] = processed_list
 
     if fills_processed > 0 or fills_skipped_dup > 0:
         log(f'reconcile: matched={fills_processed} dup={fills_skipped_dup} '
@@ -1463,6 +1539,26 @@ def scan_for_setups(state, reconcile_fn=None):
             already = last_fired.get(coin, 0)
             if mss_t and mss_t <= already:
                 continue
+
+            # B41: refuse to fire if MSS is already too old. Engine's
+            # ARMED→IDLE timeout is timeout_bars*15min from MSS. If most of
+            # that budget has elapsed, the live behaviour will diverge from
+            # backtest (which fires immediately when state hits ARMED in
+            # the bar-by-bar replay). Require at least 25% of the timeout
+            # budget remaining for a fresh fire.
+            if mss_t:
+                age_since_mss_sec = (time.time()*1000 - mss_t) / 1000
+                budget_total_sec = PARAMS['timeout_bars'] * 15 * 60
+                budget_remaining_sec = budget_total_sec - age_since_mss_sec
+                MIN_REMAINING_FRACTION = 0.25
+                if budget_remaining_sec < budget_total_sec * MIN_REMAINING_FRACTION:
+                    log(f'  {coin} ARMED but stale: '
+                        f'{age_since_mss_sec/3600:.1f}h since MSS, '
+                        f'only {budget_remaining_sec/60:.0f}m of budget left — '
+                        f'skipping (would diverge from backtest)')
+                    # Mark as fired to suppress further attempts on this MSS
+                    last_fired[coin] = mss_t
+                    continue
 
             log(f'  ARMED {coin}: {"LONG" if s["is_long"] else "SHORT"} entry={s["entry"]:.5f} mss_t={mss_t}')
             if fire_setup(coin, s, state):
