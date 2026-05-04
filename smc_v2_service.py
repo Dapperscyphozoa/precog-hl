@@ -16,7 +16,7 @@ Sizing: FIXED_NOTIONAL_USD per trade (default $25). Leverage: from leverage_map 
 """
 import os, sys, time, json, math, hashlib, traceback
 from datetime import datetime, timezone
-from collections import defaultdict, deque
+from collections import deque
 
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
@@ -57,8 +57,6 @@ LIVE_TRADING = os.environ.get('SMCV2_LIVE', '0') == '1'
 
 # Timing
 TICK_SEC = 60                       # main loop cadence
-LTF_SCAN_INTERVAL_SEC = 5 * 60      # scan setups every 15m bar boundary
-HTF_REFRESH_SEC = 4 * 3600          # refresh HTF state every 4h boundary
 POSITION_CHECK_SEC = 30             # poll position state for TP1 fills
 MAX_HOLD_BARS_LTF = 40 * 4          # 40 bars × 15m = 10h; keep liberal time-stop
 MAX_HOLD_SEC = MAX_HOLD_BARS_LTF * 15 * 60
@@ -991,6 +989,20 @@ def fire_setup(coin, setup, state):
     try:
         _hl_throttle()  # B127: shared HL gap with PreCog on same account
         us = info.user_state(WALLET)
+        # B143: now that SMC v2 and PreCog share an agent on the same wallet,
+        # both can fire on the same coin. HL nets same-direction positions —
+        # firing JUP LONG when PreCog already has JUP LONG open just adds to
+        # PreCog's size. SMC v2's reduce_only legs only cover OUR sz_total,
+        # so reconcile sees on_chain[coin] = our_sz + PreCog_sz and accounting
+        # diverges. Refuse to fire if any non-zero position exists on the coin.
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {}) if ap else {}
+            if p.get('coin') == coin and abs(float(p.get('szi', 0) or 0)) > 0:
+                log(f'  {coin} skip: wallet already has position on this coin '
+                    f'(szi={p.get("szi")}, likely PreCog) — refusing to stack')
+                # B166: dedup so we don't keep re-evaluating the same MSS
+                state.setdefault('last_fired_mss_t', {})[coin] = setup.get('mss_t', 0)
+                return False
         ms = us.get('marginSummary', {}) if us else {}
         account_value = float(ms.get('accountValue', 0))
         margin_used = float(ms.get('totalMarginUsed', 0))
@@ -1001,6 +1013,10 @@ def fire_setup(coin, setup, state):
             log(f'  {coin} skip: insufficient margin '
                 f'(free=${free:.2f}, need=${required_margin*1.5:.2f}, '
                 f'account=${account_value:.2f}, used=${margin_used:.2f})')
+            # B166: dedup so we don't re-evaluate the same MSS each scan when
+            # margin is exhausted. Next MSS on this coin (different mss_t)
+            # will get a fresh evaluation.
+            state.setdefault('last_fired_mss_t', {})[coin] = setup.get('mss_t', 0)
             return False
     except Exception as e:
         log(f'  {coin} margin check err (proceeding): {e}')
@@ -1587,74 +1603,89 @@ def reconcile_positions(state):
             else:
                 log(f'  {coin} BE-stop retry still failing — original SL remains active')
 
-    # B101: zombie position detection. State only mutates via the fill stream;
-    # if a fill is missed (HL outage during 60s backoff window, edge-case
-    # cloid mismatch), positions stay tracked even after HL closed them.
-    # Dedup then permanently blocks new setups on that coin.
-    # Authoritative check: query user_state, mark any tracked position with
-    # no on-chain size as 'zombie_recovered'.
-    # B109: a single transient user_state glitch (returns stale or empty
-    # assetPositions during heavy load) could mark a healthy live position
-    # as zombie, free the slot, and let a duplicate fire on the same coin.
-    # Require 2 CONSECUTIVE zombie detections (~60s apart at 30s reconcile
-    # cadence) before acting — a one-off glitch will be cleared by the
-    # next successful response.
+    # B101+B147: zombie position detection. State only mutates via the fill
+    # stream; if a fill is missed (HL outage during 60s backoff window,
+    # edge-case cloid mismatch), positions stay tracked even after HL
+    # closed them. Dedup then permanently blocks new setups on that coin.
+    #
+    # B147: original B101 used "coin in on_chain" as the proof-of-life
+    # primitive. That breaks once SMC v2 shares an agent with PreCog —
+    # if PreCog has JUP open while SMC v2's JUP closed (fill missed),
+    # on_chain[JUP] is truthy and zombie check returns "alive." SMC v2
+    # stays stuck on JUP forever.
+    #
+    # Better primitive: are MY protective cloids still resting on the order
+    # book? If our SL/TP cloids are gone (filled, cancelled, or otherwise
+    # consumed), our position is closed regardless of what other agents do
+    # on the same coin.
+    #
+    # B109: a single transient open-orders glitch could false-positive zombie.
+    # Require 2 CONSECUTIVE zombie detections (~60s apart) before acting.
     active_phases = ('live', 'tp1_filled')
     has_active = any(p.get('phase') in active_phases
                      for p in state['positions'].values())
     if has_active:
+        # Fetch resting open orders, build set of resting cloids
+        resting_cloids = None
         try:
             _hl_throttle()
-            us = info.user_state(WALLET)
-            on_chain = {}
-            for ap in us.get('assetPositions', []):
-                p = ap.get('position', {})
-                if not p: continue
-                c = p.get('coin')
-                sz = abs(float(p.get('szi', 0) or 0))
-                if c and sz > 0:
-                    on_chain[c] = sz
+            oo = info.frontend_open_orders(WALLET)
+            resting_cloids = set()
+            for o in oo or []:
+                c = o.get('cloid')
+                if c:
+                    # Normalise to lowercase 0x... for membership match
+                    resting_cloids.add(c.lower() if isinstance(c, str) else c)
         except Exception as e:
-            log(f'zombie check: user_state err: {e}')
-            on_chain = None
+            log(f'zombie check: open_orders err: {e}')
+            resting_cloids = None
 
-        if on_chain is not None:
+        if resting_cloids is not None:
             ZOMBIE_CONSEC_REQUIRED = 2
             for coin, pos in list(state['positions'].items()):
                 if pos.get('phase') not in active_phases:
-                    pos.pop('zombie_consec', None)  # reset stale counter
+                    pos.pop('zombie_consec', None)
                     continue
-                # Allow some grace if position was JUST fired (HL may not show
-                # the fill on user_state for a few seconds)
+                # Grace: very fresh fires may not have HL-acknowledged the
+                # protective legs yet
                 fired_age_sec = (time.time()*1000 - pos.get('fired_t', 0)) / 1000
                 if fired_age_sec < 120:
                     continue
 
-                if coin in on_chain:
-                    # B109: clear the consecutive counter — we have proof of life
+                # B147: collect our cloids and check if any rest on book.
+                # cloid_close (time-stop IOC) doesn't rest, so don't include.
+                our_cloids = {c for c in (pos.get('cloid_sl'),
+                                          pos.get('cloid_tp1'),
+                                          pos.get('cloid_tp2')) if c}
+                our_cloids = {c.lower() if isinstance(c, str) else c
+                              for c in our_cloids}
+
+                if our_cloids & resting_cloids:
+                    # At least one of our protective legs still resting →
+                    # position is alive (with protection)
                     if pos.get('zombie_consec'):
                         pos.pop('zombie_consec', None)
                     continue
 
-                # On-chain says no position. Increment consec counter.
+                # None of our cloids rest. Increment consec counter.
                 consec = pos.get('zombie_consec', 0) + 1
                 pos['zombie_consec'] = consec
                 if consec < ZOMBIE_CONSEC_REQUIRED:
                     log(f'  {coin} zombie suspected ({consec}/{ZOMBIE_CONSEC_REQUIRED}) '
-                        f'— waiting for confirmation')
+                        f'— no protective cloids resting (waiting for confirmation)')
                     continue
 
-                # Two consecutive checks confirm it
                 log(f'  {coin} ZOMBIE confirmed ({consec} consec): state '
-                    f'phase={pos["phase"]} but no on-chain position. Recovering.')
+                    f'phase={pos["phase"]} but none of our protective cloids '
+                    f'rest on book. Recovering.')
                 pos['phase'] = 'done'
                 pos['close_reason'] = 'zombie_recovered'
                 pos['closed_t'] = int(time.time()*1000)
                 append_history(state, pos)
                 del state['positions'][coin]
                 notify(f'ZOMBIE {coin}',
-                       f'Position closed on HL but state was tracking it. '
-                       f'Cleaned up; coin now eligible for new setups.',
+                       f'Position no longer protected on HL but state was '
+                       f'tracking it. Cleaned up; coin now eligible for new setups.',
                        priority=1)
 
     # B18: cursor must move forward monotonically. Use the latest fill time we
@@ -1689,7 +1720,6 @@ def reconcile_positions(state):
 # ═══════════════════════════════════════════════════════
 # SCAN LOOP
 # ═══════════════════════════════════════════════════════
-_last_full_scan = 0
 _coin_data_cache = {}  # {coin: {'4h': [...], '1h': [...], '15m': [...], 'fetched': ts}}
 
 
@@ -1698,7 +1728,6 @@ def scan_for_setups(state, reconcile_fn=None):
     If reconcile_fn provided, called every N coins to keep TP1/SL fills
     detected during long cold-cache scans (B11).
     """
-    global _last_full_scan
     coins = get_universe()
     log(f'scanning {len(coins)} coins (open positions: {len(state["positions"])})')
 
@@ -1823,8 +1852,65 @@ def scan_for_setups(state, reconcile_fn=None):
 # ═══════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════
+def verify_agent_approval():
+    """B160: at boot, confirm our derived agent address is in the wallet's
+    approved extraAgents list. If not, all order/cancel calls will silently
+    fail with 'User or API Wallet ... does not exist' — the service stays
+    'running' but can't trade. Detect this up front and drop to dry mode
+    + alert operator.
+
+    Returns: (approved: bool, reason: str)
+    """
+    try:
+        agent_addr = acct.address.lower()
+    except Exception as e:
+        return False, f'cannot derive agent address from key: {e}'
+
+    try:
+        import urllib.request as _ur
+        body = json.dumps({'type': 'extraAgents', 'user': WALLET}).encode()
+        req = _ur.Request('https://api.hyperliquid.xyz/info', data=body,
+                          headers={'Content-Type': 'application/json'})
+        with _ur.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        return False, f'extraAgents query failed: {e}'
+
+    if not isinstance(data, list):
+        return False, f'extraAgents returned unexpected shape: {type(data).__name__}'
+
+    approved_set = {a.get('address', '').lower() for a in data
+                    if isinstance(a, dict) and a.get('address')}
+    if agent_addr in approved_set:
+        # Find name for the log
+        name = None
+        for a in data:
+            if isinstance(a, dict) and a.get('address', '').lower() == agent_addr:
+                name = a.get('name', '?')
+                break
+        return True, f'agent {agent_addr} approved (name="{name}")'
+    return False, (f'agent {agent_addr} NOT in approved list. '
+                   f'Approved agents on this wallet: {sorted(approved_set) or "(none)"}')
+
+
 def main():
+    global LIVE_TRADING
     log(f'SMC v2 service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
+
+    # B160: verify agent approval before going live
+    if LIVE_TRADING:
+        approved, reason = verify_agent_approval()
+        if approved:
+            log(f'agent check: ✓ {reason}')
+        else:
+            log(f'agent check: ✗ {reason}')
+            log('FALLING BACK TO DRY MODE — re-approve the agent on HL and restart')
+            notify('AGENT NOT APPROVED',
+                   f'{reason}\n\nService is in DRY MODE — no trades will be placed. '
+                   f'Re-approve the agent on Hyperliquid and restart the service.',
+                   priority=2)
+            LIVE_TRADING = False
+
     notify('Service online',
            f'LIVE={LIVE_TRADING} notional=${FIXED_NOTIONAL_USD} '
            f'leverage={DEFAULT_LEVERAGE}x max={MAX_CONCURRENT}',
