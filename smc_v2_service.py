@@ -1066,6 +1066,22 @@ def scan_for_setups(state):
                 _coin_data_cache[coin] = cache
             c4, c1, c15 = cache['4h'], cache['1h'], cache['15m']
 
+            # B7: drop the still-forming last bar on each TF. Engine must only
+            # see confirmed-closed bars or it can fire mid-bar setups that
+            # invalidate when the bar actually closes (repaint risk). HL's
+            # candles_snapshot returns the in-progress bar as the last element.
+            now_ms = int(time.time() * 1000)
+            def _drop_unclosed(bars, tf_ms):
+                if not bars: return bars
+                last_open = bars[-1]['t']
+                # Bar is closed once now >= open + tf duration
+                return bars if (now_ms - last_open) >= tf_ms else bars[:-1]
+            c4 = _drop_unclosed(c4, 4*3600*1000)
+            c1 = _drop_unclosed(c1, 3600*1000)
+            c15 = _drop_unclosed(c15, 15*60*1000)
+            if len(c4) < 30 or len(c1) < 100 or len(c15) < 500:
+                continue
+
             # Run engine
             htfs = htf_bias_and_zones(c4, PARAMS['htf_lb'], PARAMS['htf_displace'], PARAMS['htf_max_age'])
             if not htfs: continue
