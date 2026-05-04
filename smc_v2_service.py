@@ -659,6 +659,7 @@ def load_state():
                'last_fill_check_ts': 0, 'last_fired_mss_t': {},
                'coin_consec_losses': {},  # {coin: count}
                'coin_cooldown_until': {},  # {coin: unix_ms}
+               'processed_fills': [],  # B18: dedup keys for processed fills
                'consec_losses': 0}
     try:
         if os.path.exists(STATE_PATH):
@@ -666,6 +667,15 @@ def load_state():
                 loaded = json.load(f)
             for k,v in default.items():
                 if k not in loaded: loaded[k] = v
+            # B18 cleanup: positions inflated by replay bug get entry_filled_sz
+            # clamped to sz_total. Phase logic handles correctly going forward.
+            for coin, pos in (loaded.get('positions') or {}).items():
+                cum = pos.get('entry_filled_sz', 0.0)
+                tot = pos.get('sz_total', 0.0)
+                if cum > tot * 1.5 and tot > 0:
+                    log(f'  state load: clamping {coin} entry_filled_sz '
+                        f'{cum:.4f}→{tot:.4f} (replay-bloat fixup)')
+                    pos['entry_filled_sz'] = tot
             return loaded
     except Exception as e:
         log(f'state load err: {e}')
@@ -1001,11 +1011,28 @@ def fire_setup(coin, setup, state):
     return True
 
 
+# B19: rate-limit + backoff for HL info endpoint (shared with PreCog)
+_FILLS_LAST_CALL_TS = 0.0
+_FILLS_BACKOFF_UNTIL = 0.0
+_FILLS_MIN_GAP_SEC = 8.0  # min seconds between userFillsByTime calls
+_FILLS_BACKOFF_SEC = 60.0  # on 429, skip fetches this long
+
+
 def fetch_recent_fills(since_ms):
     """Fetch user fills since since_ms via userFillsByTime endpoint.
-    Returns list of fill dicts, each with keys including 'cloid', 'time',
-    'coin', 'px', 'sz', 'side', 'closedPnl', 'oid'.
+    Returns list of fill dicts.
+
+    B19: throttle to one call per _FILLS_MIN_GAP_SEC; on 429, backoff for
+    _FILLS_BACKOFF_SEC. Returns None on throttle/backoff (caller distinguishes
+    from empty list — None = "no data this round, don't advance cursor").
     """
+    global _FILLS_LAST_CALL_TS, _FILLS_BACKOFF_UNTIL
+    now = time.time()
+    if now < _FILLS_BACKOFF_UNTIL:
+        return None  # in backoff
+    if (now - _FILLS_LAST_CALL_TS) < _FILLS_MIN_GAP_SEC:
+        return None  # throttled
+    _FILLS_LAST_CALL_TS = now
     try:
         import urllib.request as _ur
         body = json.dumps({
@@ -1020,8 +1047,13 @@ def fetch_recent_fills(since_ms):
             data = json.loads(r.read())
         return data if isinstance(data, list) else []
     except Exception as e:
-        log(f'fills fetch err: {e}')
-        return []
+        msg = str(e)
+        if '429' in msg or 'Too Many' in msg:
+            _FILLS_BACKOFF_UNTIL = time.time() + _FILLS_BACKOFF_SEC
+            log(f'fills 429 — backoff {int(_FILLS_BACKOFF_SEC)}s')
+        else:
+            log(f'fills fetch err: {e}')
+        return None
 
 
 def reconcile_positions(state):
@@ -1033,12 +1065,31 @@ def reconcile_positions(state):
       live → tp1_filled: tp1 leg fill (then cancel SL, place new SL at entry/BE)
       live → done:       sl leg fill OR tp2 leg fill (rare, gap)
       tp1_filled → done: sl leg fill (BE-stop) OR tp2 leg fill
+
+    B18: every fill matched is recorded by (oid or tid) in
+    state['processed_fills'] — re-deliveries are skipped regardless of cursor.
+    Cursor advances on every successful fetch so we don't walk backwards.
     """
+    # B19: skip reconcile entirely if there's nothing to reconcile
+    active_positions = [p for p in state['positions'].values()
+                        if p.get('phase') != 'done']
+    if not active_positions:
+        return
+
     last_check = state.get('last_fill_check_ts', 0)
     if last_check == 0:
         last_check = int(time.time()*1000) - 24*3600*1000  # cold start: last 24h
 
     fills = fetch_recent_fills(last_check)
+    # B19: throttled / backoff — skip this round, cursor stays
+    if fills is None:
+        return
+
+    # B18: per-fill dedup. Use 'tid' (trade id, unique per fill) as primary key,
+    # fall back to (oid, time, sz, px) tuple if tid absent. State stores last
+    # 1000 IDs to bound size.
+    processed = state.setdefault('processed_fills', [])
+    processed_set = set(processed)
 
     # Build cloid → (coin, leg_key) map from current positions
     cloid_map = {}
@@ -1051,13 +1102,30 @@ def reconcile_positions(state):
                 cloid_map[c] = (coin, leg_key)
 
     fills_processed = 0
+    fills_skipped_dup = 0
     for fill in fills:
         cloid = fill.get('cloid')
         if not cloid: continue
         if cloid not in cloid_map: continue
+
+        # B18: dedup key — tid is HL's unique trade ID
+        tid = fill.get('tid')
+        if tid is not None:
+            dedup_key = f'tid:{tid}'
+        else:
+            # Fallback for malformed fills: oid + time + sz + px
+            dedup_key = f'fall:{fill.get("oid")}:{fill.get("time")}:{fill.get("sz")}:{fill.get("px")}'
+
+        if dedup_key in processed_set:
+            fills_skipped_dup += 1
+            continue
+
         coin, leg = cloid_map[cloid]
         pos = state['positions'].get(coin)
-        if not pos or pos.get('phase') == 'done': continue
+        if not pos or pos.get('phase') == 'done':
+            # Mark as processed so it doesn't keep getting checked
+            processed_set.add(dedup_key)
+            continue
 
         try:
             fill_px = float(fill.get('px', 0))
@@ -1065,6 +1133,8 @@ def reconcile_positions(state):
         except (ValueError, TypeError):
             continue
         fills_processed += 1
+        # B18: record this fill so it never replays
+        processed_set.add(dedup_key)
         log(f'  {coin} {leg.upper()} fill sz={fill_sz} px={fill_px}')
 
         # ENTRY leg
@@ -1177,15 +1247,24 @@ def reconcile_positions(state):
                     pos['time_stop_sent_t'] = int(time.time()*1000)
                 # If res is None (no mid, etc.), retry next reconcile
 
-    # Update fill cursor: latest fill time minus 60s overlap; or now-60s if no fills
+    # B18: cursor must move forward monotonically. Use the latest fill time we
+    # actually saw (less a 5s overlap to catch concurrent same-ms fills) — this
+    # never goes backwards. If no fills, advance to (now - 5s) so we don't
+    # re-fetch the entire empty window. The dedup set protects against re-delivery.
     if fills:
         latest_fill_t = max(int(f.get('time', 0)) for f in fills)
-        state['last_fill_check_ts'] = max(latest_fill_t - 60_000, last_check)
+        candidate = max(latest_fill_t - 5_000, last_check)
     else:
-        state['last_fill_check_ts'] = int(time.time()*1000) - 60_000
+        candidate = max(int(time.time()*1000) - 5_000, last_check)
+    # Strictly monotonic
+    state['last_fill_check_ts'] = max(candidate, state.get('last_fill_check_ts', 0))
 
-    if fills_processed > 0:
-        log(f'reconcile: {fills_processed} of {len(fills)} fills matched our cloids')
+    # B18: persist dedup set, capped at 1000 entries (FIFO)
+    state['processed_fills'] = list(processed_set)[-1000:]
+
+    if fills_processed > 0 or fills_skipped_dup > 0:
+        log(f'reconcile: matched={fills_processed} dup={fills_skipped_dup} '
+            f'of {len(fills)} fills')
     save_state(state)
 
 
