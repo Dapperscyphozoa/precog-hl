@@ -1065,19 +1065,36 @@ _last_full_scan = 0
 _coin_data_cache = {}  # {coin: {'4h': [...], '1h': [...], '15m': [...], 'fetched': ts}}
 
 
-def scan_for_setups(state):
-    """Run engine across the universe; fire any new setups."""
+def scan_for_setups(state, reconcile_fn=None):
+    """Run engine across the universe; fire any new setups.
+    If reconcile_fn provided, called every N coins to keep TP1/SL fills
+    detected during long cold-cache scans (B11).
+    """
     global _last_full_scan
     coins = get_universe()
     log(f'scanning {len(coins)} coins (open positions: {len(state["positions"])})')
 
     fired = 0
-    for coin in coins:
+    last_reconcile_in_scan = time.time()
+    RECONCILE_DURING_SCAN_SEC = 30  # call reconcile_fn every 30s during scan
+
+    for ix, coin in enumerate(coins):
         if coin in state['positions']:
             continue
         if len(state['positions']) >= MAX_CONCURRENT:
             log(f'  max concurrent reached ({MAX_CONCURRENT}); stopping scan')
             break
+
+        # B11: interleave reconcile so TP1 fills get SL-to-BE within 30s
+        # even during long cold-cache scans
+        if reconcile_fn is not None:
+            if (time.time() - last_reconcile_in_scan) >= RECONCILE_DURING_SCAN_SEC:
+                try:
+                    reconcile_fn(state)
+                except Exception as e:
+                    log(f'  scan-interleave reconcile err: {e}')
+                last_reconcile_in_scan = time.time()
+
         try:
             cache = _coin_data_cache.get(coin, {})
             now_s = time.time()
@@ -1177,7 +1194,7 @@ def main():
             mins_in_15 = (int(now) % 900)
             on_bar_boundary = (mins_in_15 < 90)
             if on_bar_boundary and (now - last_scan) >= 14*60:
-                scan_for_setups(state)
+                scan_for_setups(state, reconcile_fn=reconcile_positions)
                 last_scan = now
 
             time.sleep(TICK_SEC)
