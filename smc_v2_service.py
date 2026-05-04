@@ -572,6 +572,30 @@ def fetch_candles(coin, tf, days):
 # ═══════════════════════════════════════════════════════
 # STATE PERSISTENCE
 # ═══════════════════════════════════════════════════════
+HISTORY_FILE = os.environ.get('SMCV2_HISTORY_PATH', '/var/data/smc_v2_history.jsonl')
+HISTORY_IN_MEMORY_CAP = 500
+
+
+def archive_position(pos):
+    """Append a closed position to the JSONL history file. In-memory state
+    keeps only the last HISTORY_IN_MEMORY_CAP entries to bound state file size.
+    """
+    try:
+        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+        with open(HISTORY_FILE, 'a') as f:
+            f.write(json.dumps(pos) + '\n')
+    except Exception as e:
+        log(f'  history archive err: {e}')
+
+
+def append_history(state, pos):
+    archive_position(pos)
+    state['history'].append(pos)
+    # Cap in-memory list
+    if len(state['history']) > HISTORY_IN_MEMORY_CAP:
+        state['history'] = state['history'][-HISTORY_IN_MEMORY_CAP:]
+
+
 def load_state():
     default = {'positions': {}, 'history': [], 'last_scan_ts': 0,
                'last_fill_check_ts': 0, 'last_fired_mss_t': {},
@@ -1006,7 +1030,7 @@ def reconcile_positions(state):
             pos['close_reason'] = 'tp2'
             pos['close_px'] = fill_px
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
-            state['history'].append(pos)
+            append_history(state, pos)
             del state['positions'][coin]
 
         # SL leg → done (label as BE-stop if it fired after TP1)
@@ -1017,7 +1041,7 @@ def reconcile_positions(state):
             pos['close_reason'] = label
             pos['close_px'] = fill_px
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
-            state['history'].append(pos)
+            append_history(state, pos)
             del state['positions'][coin]
 
         # CLOSE leg (time-stop close fill arrived)
@@ -1027,7 +1051,7 @@ def reconcile_positions(state):
             pos['close_reason'] = 'time_stop'
             pos['close_px'] = fill_px
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
-            state['history'].append(pos)
+            append_history(state, pos)
             del state['positions'][coin]
 
     # Time-stop check (independent of fills)
