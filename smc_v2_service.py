@@ -786,6 +786,27 @@ def fire_setup(coin, setup, state):
     log(f'FIRE {coin} {"LONG" if is_long else "SHORT"} entry={entry} sl={sl} '
         f'tp1={tp1} tp2={tp2} sz={sz_total} (half={sz_half}+{sz_half2})')
 
+    # B10: pre-flight margin check. Avoid cascade-rejection when wallet
+    # free margin can't cover this entry. Read live account value and used
+    # margin from HL (same call PreCog uses).
+    notional_for_entry = sz_total * entry
+    required_margin = notional_for_entry / max(DEFAULT_LEVERAGE, 1)
+    try:
+        us = info.user_state(WALLET)
+        ms = us.get('marginSummary', {}) if us else {}
+        account_value = float(ms.get('accountValue', 0))
+        margin_used = float(ms.get('totalMarginUsed', 0))
+        free = account_value - margin_used
+        # Require 1.5x buffer (HL initial margin can exceed nominal due to
+        # cross-margin maintenance buffers and price slippage on fill)
+        if free < required_margin * 1.5:
+            log(f'  {coin} skip: insufficient margin '
+                f'(free=${free:.2f}, need=${required_margin*1.5:.2f}, '
+                f'account=${account_value:.2f}, used=${margin_used:.2f})')
+            return False
+    except Exception as e:
+        log(f'  {coin} margin check err (proceeding): {e}')
+
     cloid_entry = make_cloid(coin, 'e')
     cloid_sl = make_cloid(coin, 's')
     cloid_tp1 = make_cloid(coin, 't1')
