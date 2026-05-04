@@ -213,13 +213,62 @@ def _smc_positions_for_dash():
     return out
 
 
+def _wallet_positions_for_dash():
+    """Fetch real positions from HL clearinghouseState. Captures positions
+    opened by any engine on the wallet (SMC v1, v2, PreCog, manual)."""
+    import urllib.request as _ur
+    wallet = os.environ.get('HL_ADDRESS', '')
+    if not wallet:
+        return []
+    try:
+        body = json_lib.dumps({'type': 'clearinghouseState', 'user': wallet}).encode()
+        req = _ur.Request('https://api.hyperliquid.xyz/info', data=body,
+                          headers={'Content-Type': 'application/json'})
+        with _ur.urlopen(req, timeout=5) as r:
+            cs = json_lib.loads(r.read())
+    except Exception:
+        return []
+    out = []
+    for p in cs.get('assetPositions', []):
+        pp = p.get('position', {})
+        try:
+            sz = float(pp.get('szi', 0))
+        except (TypeError, ValueError):
+            continue
+        if abs(sz) <= 0:
+            continue
+        try:
+            entry = float(pp.get('entryPx', 0))
+            upnl = float(pp.get('unrealizedPnl', 0))
+            lev = int(pp.get('leverage', {}).get('value', 1))
+        except (TypeError, ValueError, KeyError):
+            entry, upnl, lev = 0, 0, 1
+        out.append({
+            'coin': pp.get('coin'),
+            'side': 'LONG' if sz > 0 else 'SHORT',
+            'entry': entry,
+            'mark': 0,
+            'size': abs(sz),
+            'upnl': upnl,
+            'lev': lev,
+            'tp': None, 'sl': None,
+            'engine': 'WALLET',
+            'tp_pct': None, 'sl_pct': None,
+        })
+    return out
+
+
 @app.route('/dash', methods=['GET'])
 def dash_compat():
+    smc_pos = _smc_positions_for_dash()
+    smc_coins = {p.get('coin') for p in smc_pos}
+    # Add wallet positions not already tracked by SMC v1
+    extra = [p for p in _wallet_positions_for_dash() if p.get('coin') not in smc_coins]
     return jsonify({
         'version': 'smc-1.0',
         'live_trading': bool(int(os.environ.get('LIVE_TRADING', '0'))),
         'equity': smc_pl_compat.get_equity(),
-        'positions': _smc_positions_for_dash(),
+        'positions': smc_pos + extra,
         'armed': len(state.armed),
         'btc_trend_up': state.btc_trend_up,
         'universe_size': len(state.universe),
