@@ -669,13 +669,51 @@ def cancel_order(coin, oid):
         return None
 
 
-def market_close(coin, is_long_pos, sz):
+def market_close(coin, is_long_pos, sz, slippage=0.005, cloid=None):
+    """Close exactly `sz` of position via reduce_only IOC limit at mid±slippage.
+    Uses our own tracked cloid (returned for caller to record).
+
+    Does NOT use exchange.market_close — that closes the entire wallet
+    position on this coin, which would wipe shared positions on this account.
+    """
     is_buy = not is_long_pos
+    if cloid is None:
+        cloid = make_cloid(coin, 'mc')
+
     if not LIVE_TRADING:
-        log(f'  [DRY] market_close {coin} closeIsBuy={is_buy} sz={sz}')
-        return {'status': 'ok'}
+        log(f'  [DRY] market_close {coin} closeIsBuy={is_buy} sz={sz} cloid={cloid[:14]}...')
+        return {'status': 'ok', 'cloid': cloid}
+
+    # Fetch mid for slippage-protected IOC. Retry once on transient failure.
+    mid = 0.0
+    for _attempt in range(2):
+        try:
+            mids = info.all_mids()
+            mid = float(mids.get(coin, 0)) if mids else 0
+            if mid > 0: break
+        except Exception as e:
+            log(f'  market_close {coin}: mid fetch err: {e}')
+        time.sleep(0.3)
+    if mid <= 0:
+        log(f'  market_close {coin}: NO MID — refusing to close (would risk '
+            f'unsized close that takes out shared positions). Will retry next reconcile.')
+        return None
+
+    if is_buy:
+        limit_px = round_price(coin, mid * (1 + slippage))
+    else:
+        limit_px = round_price(coin, mid * (1 - slippage))
+    sz_rounded = round_size(coin, sz)
+    if sz_rounded <= 0:
+        log(f'  market_close {coin}: size rounded to 0 (sz={sz})')
+        return None
+
     try:
-        return exchange.market_close(coin)
+        res = exchange.order(coin, is_buy, sz_rounded, limit_px,
+                             {'limit': {'tif': 'Ioc'}}, reduce_only=True, cloid=cloid)
+        log(f'  market_close {coin}: sent reduce_only IOC sz={sz_rounded} '
+            f'px={limit_px} (mid={mid}, slip={slippage*100:.1f}%)')
+        return res
     except Exception as e:
         log(f'  close err {coin}: {e}')
         return None
@@ -780,7 +818,8 @@ def reconcile_positions(state):
     cloid_map = {}
     for coin, pos in state['positions'].items():
         for leg_key, cloid_field in (('entry','cloid_entry'), ('sl','cloid_sl'),
-                                      ('tp1','cloid_tp1'), ('tp2','cloid_tp2')):
+                                      ('tp1','cloid_tp1'), ('tp2','cloid_tp2'),
+                                      ('close','cloid_close')):
             c = pos.get(cloid_field)
             if c:
                 cloid_map[c] = (coin, leg_key)
@@ -844,17 +883,31 @@ def reconcile_positions(state):
             state['history'].append(pos)
             del state['positions'][coin]
 
+        # CLOSE leg (time-stop close fill arrived)
+        elif leg == 'close' and pos['phase'] in ('live', 'tp1_filled'):
+            log(f'  {coin} TIME-STOP close confirmed at {fill_px}')
+            pos['phase'] = 'done'
+            pos['close_reason'] = 'time_stop'
+            pos['close_px'] = fill_px
+            pos['closed_t'] = fill.get('time', int(time.time()*1000))
+            state['history'].append(pos)
+            del state['positions'][coin]
+
     # Time-stop check (independent of fills)
     for coin, pos in list(state['positions'].items()):
         if pos.get('phase') in ('live', 'tp1_filled'):
             age_sec = (time.time()*1000 - pos['fired_t']) / 1000
-            if age_sec > MAX_HOLD_SEC:
-                log(f'  {coin} TIME STOP — market close ({age_sec/3600:.1f}h held, '
+            if age_sec > MAX_HOLD_SEC and not pos.get('cloid_close'):
+                log(f'  {coin} TIME STOP — sized reduce_only IOC ({age_sec/3600:.1f}h held, '
                     f'phase={pos["phase"]})')
                 sz_remain = pos['sz_half2'] if pos['phase']=='tp1_filled' else pos['sz_total']
-                market_close(coin, pos['is_long'], sz_remain)
-                # Don't mark done here — wait for the close-fill to arrive
-                # (close fill won't have our cloid; will need OID-tagging in B3)
+                close_cloid = make_cloid(coin, 'mc')
+                res = market_close(coin, pos['is_long'], sz_remain, cloid=close_cloid)
+                if res is not None:
+                    # Record cloid so the close-fill drives phase=done on next reconcile
+                    pos['cloid_close'] = close_cloid
+                    pos['time_stop_sent_t'] = int(time.time()*1000)
+                # If res is None (no mid, etc.), retry next reconcile
 
     # Update fill cursor: latest fill time minus 60s overlap; or now-60s if no fills
     if fills:
