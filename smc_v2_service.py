@@ -223,8 +223,17 @@ def mtf_state_ok(c1h, mtf_phs, mtf_pls, ts, htf_bias):
     return False
 
 
-def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params):
-    """Replay LTF state machine. Returns list of fired setups."""
+def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=False):
+    """Replay LTF state machine. Returns list of fired setups.
+
+    return_armed_setup=False (backtest): returns FILL setups (one per
+        ARMED→FILL transition) — used to compute backtest WR/PF.
+    return_armed_setup=True  (live):     returns at most one setup, the
+        current ARMED state at the end of the bar series. This is the
+        signal to place a limit + protective orders. HL handles natural
+        fill via the resting limit. No firing on past FILLs (which already
+        happened — price has moved past entry).
+    """
     n = len(c15)
     if n < 30: return []
     LB = params['ltf_lb']
@@ -367,6 +376,17 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params):
                 state = 'IDLE'; setup = {}
             elif (i - state_bar) > timeout_bars:
                 state = 'IDLE'
+
+    # Live mode: return the current ARMED setup if state ends ARMED.
+    # This is the signal to place orders NOW; HL handles natural fill.
+    if return_armed_setup:
+        if state == 'ARMED' and setup:
+            current = dict(setup)
+            current['armed_t'] = current.get('mss_t')
+            current['fill_t'] = current.get('mss_t')  # keep field name for downstream
+            current['_state'] = 'ARMED'
+            return [current]
+        return []
 
     return setups_fired
 
@@ -1111,7 +1131,26 @@ def reconcile_positions(state):
             notify(f'TIME-STOP {coin}', f'closed @ {fill_px} (entry={pos["entry"]})', priority=0)
 
     # Time-stop check (independent of fills)
+    PENDING_FILL_MAX_SEC = PARAMS['timeout_bars'] * 15 * 60  # mirror engine timeout
+
     for coin, pos in list(state['positions'].items()):
+        # Pending-fill timeout: limit never filled within engine's timeout_bars
+        # Cancel all 4 legs and clear from state. Mirrors the engine's
+        # ARMED→IDLE timeout transition.
+        if pos.get('phase') == 'pending_fill':
+            age = (time.time()*1000 - pos['fired_t']) / 1000
+            if age > PENDING_FILL_MAX_SEC:
+                log(f'  {coin} PENDING TIMEOUT ({age/3600:.1f}h) — cancelling 4 legs')
+                for cloid_field in ('cloid_entry', 'cloid_sl', 'cloid_tp1', 'cloid_tp2'):
+                    c = pos.get(cloid_field)
+                    if c: cancel_order(coin, c)
+                pos['phase'] = 'done'
+                pos['close_reason'] = 'pending_timeout'
+                pos['closed_t'] = int(time.time()*1000)
+                append_history(state, pos)
+                del state['positions'][coin]
+                continue
+
         if pos.get('phase') in ('live', 'tp1_filled'):
             age_sec = (time.time()*1000 - pos['fired_t']) / 1000
             if age_sec > MAX_HOLD_SEC and not pos.get('cloid_close'):
@@ -1217,33 +1256,30 @@ def scan_for_setups(state, reconcile_fn=None):
             if len(c4) < 30 or len(c1) < 100 or len(c15) < 500:
                 continue
 
-            # Run engine
+            # Run engine in LIVE mode: returns current ARMED setup (if any)
+            # rather than past FILL transitions. We place a GTC limit at entry
+            # NOW and let HL match naturally when price retests.
             htfs = htf_bias_and_zones(c4, PARAMS['htf_lb'], PARAMS['htf_displace'], PARAMS['htf_max_age'])
             if not htfs: continue
             mtf_phs, mtf_pls = precompute_mtf_pivots(c1, lb=PARAMS['ltf_lb'])
-            setups = run_ltf(c15, htfs, c1, mtf_phs, mtf_pls, PARAMS)
-
-            # Only act on setups that fired in the LAST bar (avoid replaying historical)
+            setups = run_ltf(c15, htfs, c1, mtf_phs, mtf_pls, PARAMS,
+                             return_armed_setup=True)
             if not setups: continue
-            last_bar_t = c15[-1]['t']
-            recent = [s for s in setups if s['fill_t'] >= last_bar_t - 15*60*1000]
-            if not recent: continue
 
-            # Take the most recent setup
-            s = max(recent, key=lambda x: x['fill_t'])
+            # At most one ARMED setup per coin from run_ltf in live mode
+            s = setups[0]
 
-            # DEDUP: skip if already fired this exact setup (mss_t is the
-            # uniqueness key — same MSS candle on the same coin = same setup).
-            # Survives restarts (mss_t persists in state file) and scan overlap.
+            # DEDUP: skip if already fired this exact setup. mss_t is the
+            # uniqueness key (same MSS candle on same coin = same setup).
+            # Survives restarts (mss_t persists in state file).
             last_fired = state.setdefault('last_fired_mss_t', {})
             mss_t = s.get('mss_t', 0)
             already = last_fired.get(coin, 0)
             if mss_t and mss_t <= already:
                 continue
 
-            log(f'  setup {coin}: {"LONG" if s["is_long"] else "SHORT"} @ {s["entry"]:.5f} mss_t={mss_t}')
+            log(f'  ARMED {coin}: {"LONG" if s["is_long"] else "SHORT"} entry={s["entry"]:.5f} mss_t={mss_t}')
             if fire_setup(coin, s, state):
-                # Record AFTER successful fire so retries on rejection still attempt
                 last_fired[coin] = mss_t
                 fired += 1
         except Exception as e:
