@@ -14,7 +14,7 @@ Exits: 50% TP1 → SL→BE → 50% TP2 (or BE-stop, or time-stop).
 
 Sizing: FIXED_NOTIONAL_USD per trade (default $25). Leverage: from leverage_map (default 10x).
 """
-import os, sys, time, json, math, traceback
+import os, sys, time, json, math, hashlib, traceback
 from datetime import datetime, timezone
 from collections import defaultdict, deque
 
@@ -601,9 +601,11 @@ def save_state(state):
 # EXECUTION — entry + native SL + native TP1 + native TP2
 # ═══════════════════════════════════════════════════════
 def make_cloid(coin, suffix):
-    """16-byte hex cloid; HL accepts as identifier."""
-    raw = f'smcv2_{coin}_{int(time.time())}_{suffix}'.encode('utf-8')
-    return '0x' + raw.hex()[:32].ljust(32, '0')
+    """16-byte hex cloid via SHA-256. Uniquely encodes coin+timestamp+suffix
+    regardless of coin name length (was truncating suffix for coins >=5 chars).
+    """
+    raw = f'smcv2_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
+    return '0x' + hashlib.sha256(raw).hexdigest()[:32]
 
 
 def calc_size(coin, entry_px):
