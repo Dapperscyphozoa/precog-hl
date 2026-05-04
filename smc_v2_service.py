@@ -574,7 +574,8 @@ def fetch_candles(coin, tf, days):
 # ═══════════════════════════════════════════════════════
 def load_state():
     default = {'positions': {}, 'history': [], 'last_scan_ts': 0,
-               'last_fill_check_ts': 0, 'consec_losses': 0}
+               'last_fill_check_ts': 0, 'last_fired_mss_t': {},
+               'consec_losses': 0}
     try:
         if os.path.exists(STATE_PATH):
             with open(STATE_PATH) as f:
@@ -1079,8 +1080,20 @@ def scan_for_setups(state):
 
             # Take the most recent setup
             s = max(recent, key=lambda x: x['fill_t'])
-            log(f'  setup {coin}: {"LONG" if s["is_long"] else "SHORT"} @ {s["entry"]:.5f}')
+
+            # DEDUP: skip if already fired this exact setup (mss_t is the
+            # uniqueness key — same MSS candle on the same coin = same setup).
+            # Survives restarts (mss_t persists in state file) and scan overlap.
+            last_fired = state.setdefault('last_fired_mss_t', {})
+            mss_t = s.get('mss_t', 0)
+            already = last_fired.get(coin, 0)
+            if mss_t and mss_t <= already:
+                continue
+
+            log(f'  setup {coin}: {"LONG" if s["is_long"] else "SHORT"} @ {s["entry"]:.5f} mss_t={mss_t}')
             if fire_setup(coin, s, state):
+                # Record AFTER successful fire so retries on rejection still attempt
+                last_fired[coin] = mss_t
                 fired += 1
         except Exception as e:
             log(f'  scan err {coin}: {e}')
@@ -1112,10 +1125,14 @@ def main():
                 reconcile_positions(state)
                 last_reconcile = now
 
-            # Scan on 15m bar close (every 15min, offset by 30s for HL bar closure)
+            # Scan once per 15m bar close, in a 90s window after each boundary.
+            # Wider window than before (60s) to survive main-loop drift after
+            # long cold-cache scans. The min-gap check (>=14min since last
+            # scan) guarantees ≤1 scan per 15-min cycle even if the window
+            # straddles two iterations.
             mins_in_15 = (int(now) % 900)
-            on_bar_boundary = (mins_in_15 < 60)  # within 1 min after :00 :15 :30 :45
-            if on_bar_boundary and (now - last_scan) >= LTF_SCAN_INTERVAL_SEC - 60:
+            on_bar_boundary = (mins_in_15 < 90)
+            if on_bar_boundary and (now - last_scan) >= 14*60:
                 scan_for_setups(state)
                 last_scan = now
 
