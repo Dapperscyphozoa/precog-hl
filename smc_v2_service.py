@@ -572,6 +572,30 @@ def fetch_candles(coin, tf, days):
 # ═══════════════════════════════════════════════════════
 # STATE PERSISTENCE
 # ═══════════════════════════════════════════════════════
+PUSHOVER_USER = os.environ.get('PUSHOVER_USER_KEY', '')
+PUSHOVER_TOKEN = os.environ.get('PUSHOVER_APP_TOKEN', '')
+
+
+def notify(title, message, priority=0):
+    """Pushover push notification. No-op if env vars not set.
+    priority: -2=silent .. 0=normal .. 1=high .. 2=emergency
+    """
+    if not PUSHOVER_USER or not PUSHOVER_TOKEN:
+        return
+    try:
+        import urllib.request as _ur, urllib.parse as _up
+        data = _up.urlencode({
+            'token': PUSHOVER_TOKEN, 'user': PUSHOVER_USER,
+            'title': f'SMCv2: {title}', 'message': message[:1024],
+            'priority': str(priority),
+        }).encode('utf-8')
+        req = _ur.Request('https://api.pushover.net/1/messages.json', data=data)
+        with _ur.urlopen(req, timeout=5) as r:
+            r.read()
+    except Exception as e:
+        log(f'  notify err: {e}')
+
+
 HISTORY_FILE = os.environ.get('SMCV2_HISTORY_PATH', '/var/data/smc_v2_history.jsonl')
 HISTORY_IN_MEMORY_CAP = 500
 
@@ -933,6 +957,11 @@ def fire_setup(coin, setup, state):
         'failed_legs': [l for l, _ in failed_legs] if failed_legs else [],
     }
     save_state(state)
+    notify(f'FIRE {coin}',
+           f'{"LONG" if is_long else "SHORT"} sz={sz_total} entry={entry}\n'
+           f'SL={sl} TP1={tp1} TP2={tp2}\nRR={setup.get("rr_tp2",0):.2f}'
+           + (f'\nFAILED LEGS: {failed_legs}' if failed_legs else ''),
+           priority=0)
     return True
 
 
@@ -1022,6 +1051,7 @@ def reconcile_positions(state):
             pos['phase'] = 'tp1_filled'
             pos['tp1_fill_px'] = fill_px
             pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
+            notify(f'TP1 {coin}', f'half closed @ {fill_px}, SL→BE @ {pos["entry"]}', priority=0)
 
         # TP2 leg → done
         elif leg == 'tp2' and pos['phase'] in ('live', 'tp1_filled'):
@@ -1032,6 +1062,7 @@ def reconcile_positions(state):
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
             append_history(state, pos)
             del state['positions'][coin]
+            notify(f'TP2 {coin}', f'WIN — runner closed @ {fill_px} (entry={pos["entry"]})', priority=0)
 
         # SL leg → done (label as BE-stop if it fired after TP1)
         elif leg == 'sl' and pos['phase'] in ('live', 'tp1_filled'):
@@ -1043,6 +1074,9 @@ def reconcile_positions(state):
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
             append_history(state, pos)
             del state['positions'][coin]
+            outcome = 'BE' if label == 'be_stop' else 'LOSS'
+            notify(f'{outcome} {coin}', f'{label.upper()} @ {fill_px} (entry={pos["entry"]})',
+                   priority=1 if label == 'sl' else 0)
 
         # CLOSE leg (time-stop close fill arrived)
         elif leg == 'close' and pos['phase'] in ('live', 'tp1_filled'):
@@ -1053,6 +1087,7 @@ def reconcile_positions(state):
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
             append_history(state, pos)
             del state['positions'][coin]
+            notify(f'TIME-STOP {coin}', f'closed @ {fill_px} (entry={pos["entry"]})', priority=0)
 
     # Time-stop check (independent of fills)
     for coin, pos in list(state['positions'].items()):
