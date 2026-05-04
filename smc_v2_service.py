@@ -352,6 +352,18 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
 
                 rr_tp1 = abs(tp1 - entry) / risk
                 rr_tp2 = abs(tp2 - entry) / risk
+
+                # Ensure tp1 is the CLOSER target (first to fire on price-path).
+                # Engine assigns tp1 from last pivot and tp2 from 3R-fixed; the
+                # pivot can be further than 3R, inverting label vs distance. The
+                # downstream BE-move logic assumes tp1 fires first, so swap if
+                # tp2 is closer. Profit math is unchanged — both legs still rest
+                # at their respective triggers — but the leg labels now match
+                # chronological fill order under normal price paths.
+                if abs(tp2 - entry) < abs(tp1 - entry):
+                    tp1, tp2 = tp2, tp1
+                    rr_tp1, rr_tp2 = rr_tp2, rr_tp1
+
                 if rr_tp2 >= rr_min and rr_tp1 >= 1.0:
                     setup.update({
                         'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2,
