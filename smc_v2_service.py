@@ -606,24 +606,27 @@ def fetch_candles(coin, tf, days):
 # ═══════════════════════════════════════════════════════
 # STATE PERSISTENCE
 # ═══════════════════════════════════════════════════════
-PUSHOVER_USER = os.environ.get('PUSHOVER_USER_KEY', '')
-PUSHOVER_TOKEN = os.environ.get('PUSHOVER_APP_TOKEN', '')
+NTFY_TOPIC = os.environ.get('NTFY_TOPIC', '')
+NTFY_SERVER = os.environ.get('NTFY_SERVER', 'https://ntfy.sh')
 
 
 def notify(title, message, priority=0):
-    """Pushover push notification. No-op if env vars not set.
-    priority: -2=silent .. 0=normal .. 1=high .. 2=emergency
+    """ntfy.sh push notification. No-op if NTFY_TOPIC not set.
+    priority: 1=min .. 3=default .. 5=max  (we map 0->3, 1->4, 2->5)
     """
-    if not PUSHOVER_USER or not PUSHOVER_TOKEN:
+    if not NTFY_TOPIC:
         return
     try:
-        import urllib.request as _ur, urllib.parse as _up
-        data = _up.urlencode({
-            'token': PUSHOVER_TOKEN, 'user': PUSHOVER_USER,
-            'title': f'SMCv2: {title}', 'message': message[:1024],
-            'priority': str(priority),
-        }).encode('utf-8')
-        req = _ur.Request('https://api.pushover.net/1/messages.json', data=data)
+        import urllib.request as _ur
+        # Map Pushover-style priority (-2..2) to ntfy (1..5)
+        ntfy_pri = {-2: 1, -1: 2, 0: 3, 1: 4, 2: 5}.get(priority, 3)
+        url = f'{NTFY_SERVER}/{NTFY_TOPIC}'
+        req = _ur.Request(url, data=message[:1024].encode('utf-8'),
+                          headers={
+                              'Title': f'SMCv2: {title}'[:200],
+                              'Priority': str(ntfy_pri),
+                              'Tags': 'chart_with_upwards_trend' if priority <= 0 else 'rotating_light',
+                          })
         with _ur.urlopen(req, timeout=5) as r:
             r.read()
     except Exception as e:
