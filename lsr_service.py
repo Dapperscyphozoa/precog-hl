@@ -483,9 +483,14 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
 
             if mss:
                 sweep_wick = setup['sweep_wick']
+                # 2026-05-05: SL floor — sweep_wick anchor produces 0.03–0.20%
+                # SLs that fire on noise. Floor at LSR_MIN_SL_PCT (default 0.5%).
+                # See FIX 1 audit: 63% of trades flushed at near-BE.
+                MIN_SL_PCT = float(os.environ.get('LSR_MIN_SL_PCT', '0.005'))
                 if setup['is_long']:
                     entry = max(opens[i], sweep_wick) if opens[i] < closes[i] else lows[i]
                     sl = sweep_wick * (1 - sl_buf_pct)
+                    sl = min(sl, entry * (1 - MIN_SL_PCT))   # floor: SL ≥ MIN_SL_PCT below entry
                     risk = entry - sl
                     if risk <= 0:
                         state = 'IDLE'; continue
@@ -494,6 +499,7 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
                 else:
                     entry = min(opens[i], sweep_wick) if opens[i] > closes[i] else highs[i]
                     sl = sweep_wick * (1 + sl_buf_pct)
+                    sl = max(sl, entry * (1 + MIN_SL_PCT))   # floor: SL ≥ MIN_SL_PCT above entry
                     risk = sl - entry
                     if risk <= 0:
                         state = 'IDLE'; continue
