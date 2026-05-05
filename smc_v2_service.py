@@ -1944,12 +1944,18 @@ def reconcile_phantoms(state):
         if coin: hl_active_coins.add(coin)
 
     for coin, pos in list(state['positions'].items()):
+        # Cleanup orphan: phase='done' entry stuck in positions dict (should be
+        # in history only). Old reconcile flow set phase=done but never del'd.
         if pos.get('phase') == 'done':
+            log(f'  orphan cleanup: {coin} phase=done in positions dict → del')
+            to_remove.append(coin)
             continue
 
         # Only check positions older than 60s — avoid race with fresh fires
         fired_t_ms = pos.get('fired_t', 0) or pos.get('opened_t', 0)
-        if fired_t_ms and (time.time()*1000 - fired_t_ms) < 60_000:
+        age_sec = (time.time()*1000 - fired_t_ms) / 1000 if fired_t_ms else 99999
+        if fired_t_ms and age_sec < 60:
+            log(f'  skip {coin}: too fresh ({age_sec:.0f}s old)')
             continue
 
         is_phantom = False
@@ -1961,13 +1967,18 @@ def reconcile_phantoms(state):
             # Special case: positions with partial fills are real on-chain even
             # if HL has no orders left. Skip.
             if pos.get('entry_filled_sz', 0) > 0 and pos.get('phase') == 'pending_fill':
+                log(f'  skip {coin}: partial-fill ({pos.get("entry_filled_sz")} of '
+                    f'{pos.get("sz_total","?")})')
                 continue
             is_phantom = True
             phase_str = pos.get('phase', 'unknown')
             reason = f'phantom_{phase_str}'
+        else:
+            log(f'  {coin}: phase={pos.get("phase")} on_hl=True age={age_sec/60:.1f}m '
+                f'(REAL — has HL activity)')
 
         # Live position with HL position == zero (HL closed it externally)
-        elif pos.get('phase') in ('live', 'tp1_filled') and coin not in hl_open_coins:
+        if not is_phantom and pos.get('phase') in ('live', 'tp1_filled') and coin not in hl_open_coins:
             is_phantom = True
             reason = 'phantom_closed'
 
@@ -2000,6 +2011,7 @@ def reconcile_phantoms(state):
         log(f'reconcile_phantoms: purged {purged} phantom position(s)')
         save_state(state)
     else:
+        # Always log even when no purge — so silence doesn't hide a stuck loop.
         log(f'reconcile_phantoms: scanned {len(state.get("positions",{}))} positions, '
             f'hl_open={len(hl_open_coins)} hl_cloids={len(hl_open_cloids)}, '
             f'no phantoms detected')
