@@ -66,7 +66,8 @@ def _compute_stats_12h(history_list):
         if not outcome:
             cr = (h.get('close_reason') or '').lower()
             if cr.startswith('tp2'):                               outcome = 'TP2'
-            elif cr == 'tp1' or cr == 'be_stop':                   outcome = 'TP1_BE'
+            elif cr == 'tp1':                                       outcome = 'TP1'
+            elif cr == 'be_stop':                                   outcome = 'BE'
             elif cr == 'sl':                                        outcome = 'SL'
             elif any(x in cr for x in ('time','pending','zombie')): outcome = 'TIMEOUT'
             elif cr:                                                outcome = cr.upper()
@@ -152,7 +153,8 @@ def _serialize_history_recent(history_list, limit=30):
         if not outcome:
             cr = (h.get('close_reason') or '').lower()
             if cr.startswith('tp2'):                               outcome = 'TP2'
-            elif cr == 'tp1' or cr == 'be_stop':                   outcome = 'TP1_BE'
+            elif cr == 'tp1':                                       outcome = 'TP1'
+            elif cr == 'be_stop':                                   outcome = 'BE'
             elif cr == 'sl':                                        outcome = 'SL'
             elif any(x in cr for x in ('time','pending','zombie')): outcome = 'TIMEOUT'
             elif cr:                                                outcome = cr.upper()
