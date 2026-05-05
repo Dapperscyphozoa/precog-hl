@@ -7699,6 +7699,35 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None, engine=None):
             out['reason'] = 'no_bracket_pcts'
             return out
 
+        # ─────────────────────────────────────────────────────────
+        # ACCOUNT-LEVEL RISK GATE — query dashboard before firing.
+        # Single source of truth for cross-engine cumulative exposure.
+        # Fail-open: if dashboard unreachable, allow fire.
+        # ─────────────────────────────────────────────────────────
+        try:
+            import urllib.request as _ur, urllib.parse as _up, json as _json
+            _ntl = float(size) * float(mark_px)
+            _q = _up.urlencode({
+                'coin':     coin,
+                'side':     'LONG' if is_long else 'SHORT',
+                'notional': f'{_ntl:.4f}',
+                'sl_pct':   f'{sl_pct:.6f}' if sl_pct else '0.005',
+            })
+            _dash_url = os.environ.get('DASH_URL', 'https://dashboard-8b7i.onrender.com').rstrip('/')
+            _req = _ur.Request(f'{_dash_url}/api/risk_check?{_q}',
+                               headers={'User-Agent': 'multi-gate-risk-gate'})
+            with _ur.urlopen(_req, timeout=3) as _r:
+                _rc = _json.loads(_r.read())
+            if not _rc.get('can_fire', True):
+                log(f"{coin} atomic skipped: risk gate blocked — reason={_rc.get('block_reason')} "
+                    f"projected_total=${_rc.get('projected',{}).get('total_notional',0):.2f} "
+                    f"limit=${_rc.get('limits',{}).get('max_total_notional',0):.2f}")
+                out['reason'] = f"risk_gate:{_rc.get('block_reason')}"
+                return out
+        except Exception as _e:
+            log(f"{coin} risk gate query err (failing-open): {_e}")
+            # Continue — fail-open
+
         # Submit atomically
         tid = trade_id or cloid or f"{coin}_{'B' if is_buy else 'S'}_{int(time.time())}"
         result = atomic_entry.submit_atomic(
