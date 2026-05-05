@@ -54,28 +54,34 @@ def _hl_post(payload):
     with urllib.request.urlopen(req, timeout=8) as r:
         return json.loads(r.read())
 
-def _get_hl_open_orders():
+def _get_hl_account_state():
     with _orders_lock:
-        if time.time() - _orders_cache['ts'] < ORDERS_CACHE_TTL_SEC:
-            return _orders_cache['data']
+        if time.time() - _orders_cache['ts'] < ORDERS_CACHE_TTL_SEC and 'account_state' in _orders_cache:
+            return _orders_cache.get('account_state'), _orders_cache.get('data', [])
     try:
-        data = _hl_post({'type':'frontendOpenOrders', 'user':WALLET})
+        account = _hl_post({'type':'clearinghouseState', 'user':WALLET})
+        orders  = _hl_post({'type':'frontendOpenOrders', 'user':WALLET})
     except Exception:
-        return _orders_cache['data']  # serve stale on error
+        return _orders_cache.get('account_state'), _orders_cache.get('data', [])
     with _orders_lock:
-        _orders_cache['data'] = data
+        _orders_cache['account_state'] = account
+        _orders_cache['data'] = orders
         _orders_cache['ts'] = time.time()
-    return data
+    return account, orders
 
 def _compute_exposure(engine_states):
-    """Aggregate open positions across all engines + live HL pending orders.
+    """Aggregate live HL positions + pending limit orders.
+
+    Source of truth: Hyperliquid clearinghouseState + frontendOpenOrders.
+    Engine-reported positions are NOT used here because they can be stale
+    (phantom state from before reconcile, or lag behind actual HL).
 
     Returns:
       {
-        'total_notional': float,
-        'total_risk_usd': float,    # sum of notional × sl_pct
-        'by_coin':        {coin: {'long': $, 'short': $, 'total': $}},
-        'positions':      [list of position dicts for diagnostic],
+        'total_notional': float,       # open positions + pending entries
+        'total_risk_usd': float,       # sum of notional × sl_pct
+        'by_coin':        {coin: {long, short, total, risk_long, risk_short}},
+        'positions':      [list for diagnostic],
       }
     """
     by_coin = defaultdict(lambda: {'long': 0.0, 'short': 0.0, 'total': 0.0,
@@ -84,20 +90,21 @@ def _compute_exposure(engine_states):
     total_risk = 0.0
     diag_positions = []
 
-    # 1. Engine-reported open positions
-    for ename, s in (engine_states or {}).items():
-        for p in (s.get('open_positions') or []):
-            coin = p.get('coin') or '?'
-            side = (p.get('side') or '').upper()
-            entry = float(p.get('entry') or 0)
-            size = float(p.get('size') or 0)
-            sl_px = float(p.get('sl') or 0)
-            ntl = entry * size
-            if ntl <= 0:
+    account, orders = _get_hl_account_state()
+
+    # 1. ACTUAL OPEN POSITIONS on HL
+    if account:
+        for ap in account.get('assetPositions', []):
+            pos = ap.get('position', {})
+            coin = pos.get('coin', '?')
+            szi = float(pos.get('szi', 0) or 0)
+            entry = float(pos.get('entryPx', 0) or 0)
+            if szi == 0 or entry == 0:
                 continue
-            sl_pct = abs(entry - sl_px) / entry if (entry and sl_px) else DEFAULT_SL_PCT
-            risk_usd = ntl * sl_pct
-            is_long = (side == 'LONG')
+            ntl = abs(szi) * entry
+            is_long = szi > 0
+            # SL distance unknown from HL position data — use default
+            risk_usd = ntl * DEFAULT_SL_PCT
             by_coin[coin]['total'] += ntl
             if is_long:
                 by_coin[coin]['long'] += ntl
@@ -107,49 +114,58 @@ def _compute_exposure(engine_states):
                 by_coin[coin]['risk_short'] += risk_usd
             total_notional += ntl
             total_risk += risk_usd
-            diag_positions.append({'engine': ename, 'coin': coin, 'side': side,
-                                   'notional': round(ntl, 2), 'risk_usd': round(risk_usd, 4)})
+            diag_positions.append({'engine': '(hl-open)', 'coin': coin,
+                                   'side': 'LONG' if is_long else 'SHORT',
+                                   'notional': round(ntl, 2),
+                                   'risk_usd': round(risk_usd, 4)})
 
-    # 2. Live HL pending limit-entry orders (un-filled but committed)
-    # These count toward exposure because they could fill at any moment.
-    orders = _get_hl_open_orders()
-    pending_by_coin = defaultdict(lambda: {'long': 0.0, 'short': 0.0})
-    for o in orders:
-        # Skip triggers (SL/TP) — only count the entry limit
+    # 2. PENDING LIMIT ENTRIES on HL (committed but not filled)
+    for o in orders or []:
         if o.get('isTrigger'): continue
         if o.get('reduceOnly'): continue
         coin = o.get('coin', '?')
-        side = o.get('side')  # 'B' = buy/long, 'A' = ask/short
+        side = o.get('side')
         is_long = (side == 'B')
-        sz = float(o.get('sz', 0))
-        px = float(o.get('limitPx', 0))
+        sz = float(o.get('sz', 0) or 0)
+        px = float(o.get('limitPx', 0) or 0)
         ntl = sz * px
         if ntl <= 0: continue
-        # Pending notional adds to exposure but at default risk pct (since SL not visible here)
-        if is_long:
-            pending_by_coin[coin]['long'] += ntl
-        else:
-            pending_by_coin[coin]['short'] += ntl
+
+        # If we have a matching SL trigger on HL for this coin, derive its sl_pct
+        sl_pct = DEFAULT_SL_PCT
+        for t in orders:
+            if not t.get('isTrigger') or not t.get('reduceOnly'): continue
+            if t.get('coin') != coin: continue
+            t_side = t.get('side')
+            t_px = float(t.get('triggerPx', 0) or 0)
+            if t_px == 0: continue
+            # SL on the losing side: long entry → SL below + sell trigger
+            if (is_long and t_side == 'A' and t_px < px) or \
+               (not is_long and t_side == 'B' and t_px > px):
+                sl_pct = abs(t_px - px) / px
+                break
+
+        risk_usd = ntl * sl_pct
         by_coin[coin]['total'] += ntl
         if is_long:
             by_coin[coin]['long'] += ntl
-            by_coin[coin]['risk_long'] += ntl * DEFAULT_SL_PCT
+            by_coin[coin]['risk_long'] += risk_usd
         else:
             by_coin[coin]['short'] += ntl
-            by_coin[coin]['risk_short'] += ntl * DEFAULT_SL_PCT
+            by_coin[coin]['risk_short'] += risk_usd
         total_notional += ntl
-        total_risk += ntl * DEFAULT_SL_PCT
-        diag_positions.append({'engine': '(pending)', 'coin': coin,
+        total_risk += risk_usd
+        diag_positions.append({'engine': '(hl-pending)', 'coin': coin,
                                'side': 'LONG' if is_long else 'SHORT',
                                'notional': round(ntl, 2),
-                               'risk_usd': round(ntl * DEFAULT_SL_PCT, 4)})
+                               'risk_usd': round(risk_usd, 4),
+                               'sl_pct': round(sl_pct * 100, 3)})
 
     return {
         'total_notional': round(total_notional, 2),
         'total_risk_usd': round(total_risk, 4),
         'by_coin': {k: {kk: round(vv, 2) for kk, vv in v.items()} for k, v in by_coin.items()},
         'positions': diag_positions,
-        'pending_by_coin': {k: dict(v) for k, v in pending_by_coin.items()},
     }
 
 def evaluate(equity, engine_states, requested_coin=None,
