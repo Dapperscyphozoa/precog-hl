@@ -25,4 +25,4 @@ VOLUME ["/var/data"]
 # Default command — overridden by Render per-service:
 #   worker:  python3 precog.py
 #   web:     python3 precog.py   (same — Flask is embedded)
-CMD ["python3", "precog.py"]
+CMD ["python3", "smc_v2_service.py"]

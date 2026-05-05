@@ -1,18 +1,24 @@
 #!/usr/bin/env python3
 """
-smc_v2_service.py — Standalone SMC v2 (R3) live trader.
+smc_v2_service.py — SMC-LOOSE engine (R-1_max params, 4-coin whitelist).
 
-Runs alongside PreCog v8.28 on the same HL account. Total isolation:
-  - Tags all orders with cloid prefix `smcv2_`
-  - Owns only positions it placed (tracked in /var/data/smc_v2_state.json)
-  - Does NOT touch precog.py, does NOT manage other engines' positions
-  - Does NOT read/modify PreCog's state file
+Runs alongside SMC v2, Multi-gate, and SMC v1 on the same HL account.
+Total isolation:
+  - Tags all orders with cloid prefix `smcloose_`
+  - Owns only positions it placed (tracked in /var/data/smc_loose_state.json)
+  - Does NOT touch other engines' state, code, or open positions
 
-Strategy: SMC top-down (HTF=4H → MTF=1H → LTF=15m), Rank 3 config.
-Setup pipeline: IDLE → IN_ZONE → SWEPT → ARMED → FILL.
-Exits: 50% TP1 → SL→BE → 50% TP2 (or BE-stop, or time-stop).
+Strategy: same SMC top-down state machine as v2, with LOOSER thresholds
+(R-1_max preset) and a CURATED whitelist of 4 coins that showed
+consistent positive edge across both halves of a 7-week 50d backtest.
 
-Sizing: FIXED_NOTIONAL_USD per trade (default $25). Leverage: from leverage_map (default 10x).
+Whitelist (validated 2026-05-05):
+  DYM   — n=6 +6.87R 67% WR, both halves positive
+  AVAX  — n=4 +5.62R 75% WR, both halves positive
+  XLM   — n=5 +3.10R 60% WR, both halves positive
+  BCH   — n=5 +2.00R 60% WR, both halves positive
+
+Sizing: FIXED_NOTIONAL_USD per trade. Leverage: per-coin HL caps.
 """
 import os, sys, time, json, math, hashlib, traceback
 from datetime import datetime, timezone
@@ -25,44 +31,45 @@ from eth_account import Account
 
 
 # ═══════════════════════════════════════════════════════
-# CONFIG — R3 (locked from sweep results)
+# CONFIG — R-1_max (LOOSE) — validated on whitelist coins only
 # ═══════════════════════════════════════════════════════
 PARAMS = {
-    'htf_lb': 5,
-    'htf_displace': 1.75,
+    'htf_lb': 3,             # was 5 — smaller pivot lookback, more zones
+    'htf_displace': 0.8,     # was 1.75 — smaller HTF displacement filter
     'htf_max_age': 540,
-    'ltf_lb': 4,
-    'sweep_vol': 1.0,
-    'mss_vol': 1.0,
-    'displace': 2.0,
+    'ltf_lb': 2,             # was 4 — more sensitive LTF pivots
+    'sweep_vol': 0.3,        # was 1.0 — much weaker sweep vol confirmation
+    'mss_vol': 0.3,          # was 1.0 — much weaker MSS vol confirmation
+    'displace': 0.6,         # was 2.0 — small candles allowed
     'sl_buf_pct': 0.0003,
-    'approach_pct': 0.03,
-    'rr_min': 2.25,
-    'timeout_bars': 40,
+    'approach_pct': 0.08,    # was 0.03 — wider approach to HTF zone
+    'rr_min': 1.3,           # was 2.25 — accept tighter R:R
+    'timeout_bars': 80,      # was 40 — more patience (20h vs 10h on 15m)
 }
 
-# Coins with strict-negative outcomes in 52-day backtest (n>=2, 0 wins)
+# WHITELIST: only trade these coins. Validated 7-week split-window stable.
+WHITELIST = {'DYM', 'AVAX', 'XLM', 'BCH'}
+
+# Coins with strict-negative outcomes in 52-day backtest — kept for safety,
+# but WHITELIST already filters everything stricter than this.
 BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC', 'BLAST'}
 
-# Majors — handled by PreCog v8.28, not SMC v2
-EXCLUDED_MAJORS = {'BTC','ETH','BNB','SOL','BCH','LTC','XRP','ADA','DOGE','AVAX','DOT','TRX','TON'}
-
 # Sizing
-FIXED_NOTIONAL_USD = float(os.environ.get('SMCV2_NOTIONAL_USD', '25'))
-DEFAULT_LEVERAGE = int(os.environ.get('SMCV2_LEVERAGE', '10'))
-MAX_CONCURRENT = int(os.environ.get('SMCV2_MAX_CONCURRENT', '20'))
-COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCV2_COIN_LOSS_THRESHOLD', '2'))
-COIN_COOLDOWN_HOURS = int(os.environ.get('SMCV2_COIN_COOLDOWN_HOURS', '24'))
-LIVE_TRADING = os.environ.get('SMCV2_LIVE', '0') == '1'
+FIXED_NOTIONAL_USD = float(os.environ.get('SMCLOOSE_NOTIONAL_USD', '25'))
+DEFAULT_LEVERAGE = int(os.environ.get('SMCLOOSE_LEVERAGE', '10'))
+MAX_CONCURRENT = int(os.environ.get('SMCLOOSE_MAX_CONCURRENT', '4'))   # only 4 coins
+COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCLOOSE_COIN_LOSS_THRESHOLD', '2'))
+COIN_COOLDOWN_HOURS = int(os.environ.get('SMCLOOSE_COIN_COOLDOWN_HOURS', '24'))
+LIVE_TRADING = os.environ.get('SMCLOOSE_LIVE', '0') == '1'
 
 # Timing
 TICK_SEC = 60                       # main loop cadence
 POSITION_CHECK_SEC = 30             # poll position state for TP1 fills
-MAX_HOLD_BARS_LTF = 40 * 4          # 40 bars × 15m = 10h; keep liberal time-stop
+MAX_HOLD_BARS_LTF = 80 * 4          # 80 bars × 15m = 20h (looser timeout_bars)
 MAX_HOLD_SEC = MAX_HOLD_BARS_LTF * 15 * 60
 
 # Storage
-STATE_PATH = os.environ.get('SMCV2_STATE_PATH', '/var/data/smc_v2_state.json')
+STATE_PATH = os.environ.get('SMCLOOSE_STATE_PATH', '/var/data/smc_loose_state.json')
 LOG_BUFFER = deque(maxlen=500)
 
 
@@ -460,6 +467,8 @@ def round_size(coin, sz):
 
 
 def get_universe():
+    """Return ONLY the whitelist coins that exist in the HL universe and
+    are not delisted. Backtest-validated; no external coins ever scanned."""
     try:
         m = info.meta()
         coins = []
@@ -467,12 +476,13 @@ def get_universe():
             n = u.get('name')
             if not n: continue
             if u.get('isDelisted'): continue
-            # 2026-05-05: majors RE-INCLUDED. Operator notes that BTC/ETH/etc.
-            # respect market-maker levels more cleanly than midcaps; SMC setups
-            # work well on them. EXCLUDED_MAJORS retained as a constant for
-            # other code paths but no longer filters here.
-            if n in BLACKLIST: continue
+            if n not in WHITELIST: continue
+            if n in BLACKLIST: continue   # safety — should never trigger given WHITELIST
             coins.append(n)
+        # Log any whitelist coin that isn't found on HL (e.g. delisted, name mismatch)
+        missing = WHITELIST - set(coins)
+        if missing:
+            log(f'WARN: whitelist coins not found in HL universe: {sorted(missing)}')
         return coins
     except Exception as e:
         log(f'universe fetch err: {e}')
@@ -787,9 +797,10 @@ def save_state(state):
 # ═══════════════════════════════════════════════════════
 def make_cloid(coin, suffix):
     """16-byte hex cloid via SHA-256. Uniquely encodes coin+timestamp+suffix
-    regardless of coin name length (was truncating suffix for coins >=5 chars).
+    regardless of coin name length. Prefix `smcloose_` distinguishes from
+    SMC v2 (`smcv2_`), multi-gate, and SMC v1 cloids on the shared wallet.
     """
-    raw = f'smcv2_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
+    raw = f'smcloose_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
     return '0x' + hashlib.sha256(raw).hexdigest()[:32]
 
 
@@ -2017,7 +2028,7 @@ def verify_agent_approval():
 
 def main():
     global LIVE_TRADING
-    log(f'SMC v2 service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
+    log(f'SMC-LOOSE service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
 
     # B160: verify agent approval before going live
     if LIVE_TRADING:
@@ -2038,6 +2049,7 @@ def main():
            f'leverage={DEFAULT_LEVERAGE}x max={MAX_CONCURRENT}',
            priority=0)
     log(f'PARAMS={PARAMS}')
+    log(f'WHITELIST={sorted(WHITELIST)} ({len(WHITELIST)} coins)')
     log(f'BLACKLIST={sorted(BLACKLIST)}')
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')

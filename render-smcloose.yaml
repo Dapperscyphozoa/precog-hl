@@ -1,0 +1,26 @@
+services:
+  - type: worker
+    name: smc-loose
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: smc-loose
+    disk:
+      name: smcloose-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: HL_ADDRESS
+        sync: false
+      - key: HL_PRIVATE_KEY
+        sync: false
+      - key: SMCLOOSE_LIVE
+        value: '1'
+      - key: SMCLOOSE_NOTIONAL_USD
+        value: '25'
+      - key: SMCLOOSE_LEVERAGE
+        value: '10'
+      - key: SMCLOOSE_MAX_CONCURRENT
+        value: '4'
+      - key: MANUAL_COINS
+        value: 'JUP,STABLE'
