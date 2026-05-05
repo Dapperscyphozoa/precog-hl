@@ -1999,6 +1999,10 @@ def reconcile_phantoms(state):
     if purged:
         log(f'reconcile_phantoms: purged {purged} phantom position(s)')
         save_state(state)
+    else:
+        log(f'reconcile_phantoms: scanned {len(state.get("positions",{}))} positions, '
+            f'hl_open={len(hl_open_coins)} hl_cloids={len(hl_open_cloids)}, '
+            f'no phantoms detected')
 
     return purged
 
@@ -2258,7 +2262,8 @@ def main():
     last_heartbeat = time.time()
     HEARTBEAT_INTERVAL_SEC = 30 * 60
     PHANTOM_CHECK_SEC = 5 * 60   # check for phantoms every 5 minutes
-    last_phantom_check = 0
+    # First cycle runs ~30s after boot (not waiting for full 5min interval).
+    last_phantom_check = time.time() - (PHANTOM_CHECK_SEC - 30)
 
     while True:
         try:
