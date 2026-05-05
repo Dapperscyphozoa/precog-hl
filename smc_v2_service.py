@@ -1964,11 +1964,12 @@ def reconcile_phantoms(state):
         # Coin-based check: if HL has zero activity (no position, no orders)
         # for this coin, it's definitively phantom regardless of phase or cloids.
         if coin not in hl_active_coins:
-            # Special case: positions with partial fills are real on-chain even
-            # if HL has no orders left. Skip.
-            if pos.get('entry_filled_sz', 0) > 0 and pos.get('phase') == 'pending_fill':
+            # Partial-fill is real ONLY if HL still shows a position.
+            if (pos.get('entry_filled_sz', 0) > 0
+                    and pos.get('phase') == 'pending_fill'
+                    and coin in hl_open_coins):
                 log(f'  skip {coin}: partial-fill ({pos.get("entry_filled_sz")} of '
-                    f'{pos.get("sz_total","?")})')
+                    f'{pos.get("sz_total","?")}) and HL still has position')
                 continue
             is_phantom = True
             phase_str = pos.get('phase', 'unknown')
