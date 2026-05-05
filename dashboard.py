@@ -245,6 +245,18 @@ def api_risk_check():
         return jsonify({'err': str(e), 'can_fire': True,  # fail-open by default
                         'block_reason': 'check_failed'})
 
+@app.route('/api/attribution')
+def api_attribution():
+    """Cross-reference HL fills against engine cloid registries.
+    Returns real per-engine PnL + collision detection."""
+    try:
+        from attribution import compute_attribution
+        with _lock:
+            engines_snapshot = dict(_engine_states)
+        return jsonify(compute_attribution(engines_snapshot))
+    except Exception as e:
+        return jsonify({'err': str(e), 'fills_total': 0, 'attributed': 0, 'by_engine': {}})
+
 @app.route('/')
 def index():
     return Response(_HTML, mimetype='text/html')
