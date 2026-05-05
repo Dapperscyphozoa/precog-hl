@@ -1937,38 +1937,39 @@ def reconcile_phantoms(state):
 
     purged = 0
     to_remove = []
+    # Build a set of coins with ANY HL activity (open position OR any order)
+    hl_active_coins = set(hl_open_coins)
+    for o in oo or []:
+        coin = o.get('coin')
+        if coin: hl_active_coins.add(coin)
+
     for coin, pos in list(state['positions'].items()):
         if pos.get('phase') == 'done':
             continue
 
         # Only check positions older than 60s — avoid race with fresh fires
-        fired_t_ms = pos.get('fired_t', 0)
+        fired_t_ms = pos.get('fired_t', 0) or pos.get('opened_t', 0)
         if fired_t_ms and (time.time()*1000 - fired_t_ms) < 60_000:
             continue
 
         is_phantom = False
         reason = ''
 
-        if pos.get('phase') == 'pending_fill':
-            # Should have an entry cloid resting on HL open orders
-            entry_cloid = pos.get('cloid_entry')
-            if entry_cloid and entry_cloid not in hl_open_cloids:
-                # Entry order isn't on HL anymore. Check if any partial fill happened
-                if pos.get('entry_filled_sz', 0) > 0:
-                    # Partial fill: there's a real on-chain position. Don't phantom-cleanup.
-                    continue
-                # No partial, no resting order = phantom
-                is_phantom = True
-                reason = 'phantom_pending'
+        # Coin-based check: if HL has zero activity (no position, no orders)
+        # for this coin, it's definitively phantom regardless of phase or cloids.
+        if coin not in hl_active_coins:
+            # Special case: positions with partial fills are real on-chain even
+            # if HL has no orders left. Skip.
+            if pos.get('entry_filled_sz', 0) > 0 and pos.get('phase') == 'pending_fill':
+                continue
+            is_phantom = True
+            phase_str = pos.get('phase', 'unknown')
+            reason = f'phantom_{phase_str}'
 
-        elif pos.get('phase') in ('live', 'tp1_filled'):
-            # Should have a non-zero HL position on this coin
-            if coin not in hl_open_coins:
-                # Engine thinks we're in a live trade but HL shows nothing.
-                # We missed a close fill (will reappear in fill history later if so).
-                # Mark phantom_closed so it doesn't blockbreak risk gates / scan.
-                is_phantom = True
-                reason = 'phantom_closed'
+        # Live position with HL position == zero (HL closed it externally)
+        elif pos.get('phase') in ('live', 'tp1_filled') and coin not in hl_open_coins:
+            is_phantom = True
+            reason = 'phantom_closed'
 
         if is_phantom:
             log(f'  phantom detected: {coin} phase={pos.get("phase")} → {reason}')
@@ -2000,7 +2001,6 @@ def reconcile_phantoms(state):
         save_state(state)
 
     return purged
-
 
 # ═══════════════════════════════════════════════════════
 # SCAN LOOP
