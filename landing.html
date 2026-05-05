@@ -664,50 +664,7 @@ body::after {
     </div>
 </div>
 
-<!-- SECONDARY GRID -->
-<div class="grid">
-    <!-- SIGNAL FEED -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">Signal Feed · Live</div>
-            <div class="panel-meta" id="sig-meta">—</div>
-        </div>
-        <div id="signals" style="max-height: 320px; overflow-y: auto;"></div>
-    </div>
-
-    <!-- WHALE TICKER -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">Whale Prints · >$100k</div>
-            <div class="panel-meta" id="whale-meta">—</div>
-        </div>
-        <div id="whales" style="max-height: 320px; overflow-y: auto;"></div>
-    </div>
-
-    <!-- MARKET DATA -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">Aggregation · 6 Venues</div>
-            <div class="panel-meta">Bybit·Bin·OKX·CB·Bitget·Kraken</div>
-        </div>
-        <div id="aggregation" style="font-size: 11px; line-height: 2;"></div>
-    </div>
-</div>
-
-<!-- COIN WR HEATMAP -->
-<div class="panel" style="margin-bottom: 32px;">
-    <div class="panel-head">
-        <div class="panel-title">BTC Orderbook Heatmap · 6 Venues Aggregated</div>
-        <div class="panel-meta" id="ob-meta">—</div>
-    </div>
-    <div id="ob-heatmap" style="height: 520px; position: relative;"></div>
-</div>
-
-<!-- MACRO STATE STRIP -->
-<div class="panel" style="margin-bottom: 16px; padding: 8px 14px;">
-    <div id="macro-strip" style="font-size: 11px; letter-spacing: 0.05em; opacity: 0.85;">// macro: loading…</div>
-</div>
-
+<!-- ═══ SYSTEMS A–F · MOVED UP ═══ -->
 <!-- SYSTEMS A–F — UNIFORM PANELS -->
 <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
 
@@ -816,6 +773,51 @@ body::after {
 @media (max-width: 1400px) { #systems-grid { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 900px)  { #systems-grid { grid-template-columns: 1fr; } }
 </style>
+
+<!-- SECONDARY GRID -->
+<div class="grid">
+    <!-- SIGNAL FEED -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Signal Feed · Live</div>
+            <div class="panel-meta" id="sig-meta">—</div>
+        </div>
+        <div id="signals" style="max-height: 320px; overflow-y: auto;"></div>
+    </div>
+
+    <!-- WHALE TICKER -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Whale Prints · >$100k</div>
+            <div class="panel-meta" id="whale-meta">—</div>
+        </div>
+        <div id="whales" style="max-height: 320px; overflow-y: auto;"></div>
+    </div>
+
+    <!-- MARKET DATA -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">Aggregation · 6 Venues</div>
+            <div class="panel-meta">Bybit·Bin·OKX·CB·Bitget·Kraken</div>
+        </div>
+        <div id="aggregation" style="font-size: 11px; line-height: 2;"></div>
+    </div>
+</div>
+
+<!-- COIN WR HEATMAP -->
+<div class="panel" style="margin-bottom: 32px;">
+    <div class="panel-head">
+        <div class="panel-title">BTC Orderbook Heatmap · 6 Venues Aggregated</div>
+        <div class="panel-meta" id="ob-meta">—</div>
+    </div>
+    <div id="ob-heatmap" style="height: 520px; position: relative;"></div>
+</div>
+
+<!-- MACRO STATE STRIP -->
+<div class="panel" style="margin-bottom: 16px; padding: 8px 14px;">
+    <div id="macro-strip" style="font-size: 11px; letter-spacing: 0.05em; opacity: 0.85;">// macro: loading…</div>
+</div>
+
 
 <!-- COIN WR HEATMAP -->
 <div class="panel" style="margin-bottom: 32px;">
