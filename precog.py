@@ -2759,14 +2759,19 @@ def all_systems():
             except Exception:
                 snap_pos = {}
             try:
-                _eq = float(execution_state.equity) if hasattr(globals().get('execution_state', None), 'equity') else None
+                _eq = float(get_balance())
             except Exception:
                 _eq = None
+            try:
+                _commit_self = (os.environ.get('RENDER_GIT_COMMIT')
+                                or os.environ.get('GIT_COMMIT') or '')[:8]
+            except Exception:
+                _commit_self = ''
             entry.update({
                 'live': True,
                 'equity': _eq,
                 'positions': len(snap_pos),
-                'commit': os.environ.get('COMMIT_SHA', '')[:8] or 'live',
+                'commit': _commit_self or 'live',
                 'engines_active': 6,  # PIVOT/PULLBACK/WALL_BNC/WALL_EXH/CVD_DIV/LIQ_CSCD
             })
         elif sys_def['kind'] == 'remote' and sys_def['url']:
