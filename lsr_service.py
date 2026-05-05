@@ -202,6 +202,11 @@ def run_lsr(c15, params, return_armed_only=False):
                         else:
                             entry = pool
                             sl = bar_h * (1 + params['sl_buf_pct'])
+                            # Fix 1: floor SL distance at MIN_SL_PCT to prevent BE-flushes
+                            # on noise. Cluster-sweep path can produce SLs as tight as
+                            # 0.02% from entry which fire on tick noise.
+                            _MIN_SL_PCT = float(os.environ.get('LSR_MIN_SL_PCT', '0.005'))
+                            sl = max(sl, entry * (1 + _MIN_SL_PCT))
                             risk = sl - entry
                             if risk > 0:
                                 tp1 = entry - risk * 1.5
@@ -233,6 +238,9 @@ def run_lsr(c15, params, return_armed_only=False):
                         else:
                             entry = pool
                             sl = bar_l * (1 - params['sl_buf_pct'])
+                            # Fix 1: floor SL distance at MIN_SL_PCT to prevent BE-flushes
+                            _MIN_SL_PCT = float(os.environ.get('LSR_MIN_SL_PCT', '0.005'))
+                            sl = min(sl, entry * (1 - _MIN_SL_PCT))
                             risk = entry - sl
                             if risk > 0:
                                 tp1 = entry + risk * 1.5
