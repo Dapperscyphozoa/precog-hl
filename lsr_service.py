@@ -2131,7 +2131,11 @@ def reconcile_phantoms(state):
         if coin: hl_active_coins.add(coin)
 
     for coin, pos in list(state['positions'].items()):
+        # Cleanup orphan: phase='done' entry stuck in positions dict (should be
+        # in history only). Old reconcile flow set phase=done but never del'd.
         if pos.get('phase') == 'done':
+            log(f'  orphan cleanup: {coin} phase=done in positions dict → del')
+            to_remove.append(coin)
             continue
 
         # Only check positions older than 60s — avoid race with fresh fires
