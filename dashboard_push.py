@@ -87,7 +87,7 @@ def _compute_stats_12h(history_list):
 
 
 def _serialize_open(positions_dict):
-    """Compact summary of each open position."""
+    """Compact summary of each open position. Includes cloids for fill attribution."""
     out = []
     if not positions_dict: return out
     for coin, p in positions_dict.items():
@@ -100,7 +100,6 @@ def _serialize_open(positions_dict):
             sz    = p.get('size')  or p.get('sz')       or p.get('sz_total') or 0
             is_long = p.get('is_long')
             if is_long is None:
-                # infer from SL position
                 is_long = (sl < entry) if (sl and entry) else None
             out.append({
                 'coin':     coin,
@@ -112,6 +111,13 @@ def _serialize_open(positions_dict):
                 'size':     sz,
                 'opened_t': p.get('fired_t') or p.get('opened_t') or 0,
                 'unreal_pnl': float(p.get('unrealized_pnl') or 0),
+                'cloids': {
+                    'entry': p.get('cloid_entry'),
+                    'sl':    p.get('cloid_sl'),
+                    'tp1':   p.get('cloid_tp1'),
+                    'tp2':   p.get('cloid_tp2'),
+                    'close': p.get('cloid_close'),
+                },
             })
         except Exception:
             continue
@@ -162,6 +168,13 @@ def _serialize_history_recent(history_list, limit=30):
             'pnl':     pnl,
             'outcome': outcome,
             'close_t': ts,
+            'cloids': {
+                'entry': h.get('cloid_entry'),
+                'sl':    h.get('cloid_sl'),
+                'tp1':   h.get('cloid_tp1'),
+                'tp2':   h.get('cloid_tp2'),
+                'close': h.get('cloid_close'),
+            },
         })
     out.sort(key=lambda x: -(x['close_t'] or 0))
     return out[:limit]
