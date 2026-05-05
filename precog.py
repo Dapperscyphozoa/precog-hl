@@ -2727,84 +2727,122 @@ def engines_status():
 
 @app.route('/all_systems', methods=['GET'])
 def all_systems():
-    """Aggregate live state of all 3 trading engines on this wallet.
-    Multi-gate (this service), SMC v1 (precog-sa), SMC v2 (smc-v2 worker).
-    Server-side fetch sidesteps CORS so the landing page can show all 3.
+    """Aggregate live state of all 5 trading engines on this wallet.
+    Source of truth: the unified dashboard service (which receives push-state
+    from each engine on every save_state). This endpoint queries the dashboard
+    server-side to sidestep CORS, then maps the response to the legacy shape
+    the landing page expects, plus a rich `engines` array with full per-engine
+    stats and a `totals` aggregate for top-of-page metrics.
     """
     import urllib.request as _ur, urllib.error as _ue, json as _json, time as _t
-    SYSTEMS = [
-        {'name': 'MULTI-GATE',  'url': None,                                  'kind': 'self',
-         'branch': 'main', 'direction': 'L+S', 'universe': 80,
-         'desc': 'PIVOT/PULLBACK/WALL/CVD/LIQ + 9 guards'},
-        {'name': 'SMC v1',      'url': 'https://precog-sa.onrender.com',     'kind': 'remote',
-         'branch': 'smc-v1', 'direction': 'LONG', 'universe': '~190',
-         'desc': 'Native SMC engine, long-only'},
-        {'name': 'SMC v2',      'url': None,                                  'kind': 'worker',
-         'branch': 'smc-v2', 'direction': 'L+S', 'universe': 168,
-         'desc': 'R3 backtest-validated SMC, both directions'},
-    ]
+
+    DASH_URL = os.environ.get('DASH_URL', 'https://dashboard-8b7i.onrender.com').rstrip('/')
+
+    # System metadata (display labels + universe info — not in dash payload)
+    SYSTEMS_META = {
+        'multi-gate': {'label': 'MULTI-GATE',  'branch': 'main',         'direction': 'L+S',
+                       'universe': 80,    'desc': 'PIVOT/PULLBACK/WALL/CVD/LIQ + 9 guards',
+                       'url': 'https://precog-i8c3.onrender.com'},
+        'smc-v1':     {'label': 'SMC v1',      'branch': 'smc-v1',       'direction': 'LONG',
+                       'universe': '~190', 'desc': 'Native SMC engine, long-only',
+                       'url': 'https://precog-sa.onrender.com'},
+        'smc-v2':     {'label': 'SMC v2',      'branch': 'smc-v2',       'direction': 'L+S',
+                       'universe': 181,   'desc': 'R3 backtest-validated SMC, both directions',
+                       'url': ''},
+        'smc-loose':  {'label': 'SMC-LOOSE',   'branch': 'smc-loose',    'direction': 'L+S',
+                       'universe': 181,   'desc': 'R-1_max loose params, full universe',
+                       'url': ''},
+        'lsr':        {'label': 'LSR',         'branch': 'lsr-engine',   'direction': 'L+S',
+                       'universe': 181,   'desc': 'Liquidity sweep reversal — sweep+reject',
+                       'url': ''},
+    }
+    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr']
+
+    # Pull dash state (single round-trip)
+    dash_state = None
+    dash_error = None
+    try:
+        req = _ur.Request(f'{DASH_URL}/api/state', headers={'User-Agent':'multi-gate-aggregator'})
+        with _ur.urlopen(req, timeout=5) as r:
+            dash_state = _json.loads(r.read())
+    except _ue.HTTPError as e:
+        dash_error = f'dash HTTP {e.code}'
+    except Exception as e:
+        dash_error = f'dash err: {str(e)[:80]}'
+
+    by_name = {}
+    if dash_state:
+        for e in (dash_state.get('engines') or []):
+            by_name[e.get('engine')] = e
+
+    # Self-equity (HL clearinghouse via local cache — avoid extra round-trip)
+    try:
+        _eq = float(get_balance())
+    except Exception:
+        _eq = None
+
     out = []
-    for sys_def in SYSTEMS:
+    for name in ORDER:
+        meta = SYSTEMS_META[name]
+        d = by_name.get(name) or {}
+        present = bool(d.get('present'))
+        is_live = d.get('live') is True
         entry = {
-            'name': sys_def['name'], 'branch': sys_def['branch'],
-            'direction': sys_def['direction'], 'universe': sys_def['universe'],
-            'desc': sys_def['desc'], 'url': sys_def['url'] or '',
-            'live': False, 'equity': None, 'positions': None, 'commit': None,
-            'engines_active': None, 'error': None,
+            # Legacy fields (so old landing.html keeps working)
+            'name':            meta['label'],
+            'branch':          meta['branch'],
+            'direction':       meta['direction'],
+            'universe':        meta['universe'],
+            'desc':            meta['desc'],
+            'url':             meta['url'],
+            'live':            is_live and present and not d.get('stale', True),
+            'equity':          _eq if name == 'multi-gate' else None,
+            'positions':       d.get('open_count', 0) if present else None,
+            'commit':          (dash_state or {}).get('commit', '')[:8] if dash_state else '',
+            'engines_active':  None,
+            'error':           None if present else (dash_error or 'no_signal'),
+            # Rich fields from dashboard
+            'engine_key':      name,
+            'present':         present,
+            'stale':           d.get('stale', True),
+            'age_sec':         d.get('age_sec'),
+            'sizing_mode':     d.get('sizing_mode'),
+            'notional_usd':    d.get('notional_usd'),
+            'max_concurrent':  d.get('max_concurrent'),
+            'pnl_total':       d.get('pnl_total', 0) or 0,
+            'wins':            d.get('wins', 0) or 0,
+            'losses':          d.get('losses', 0) or 0,
+            'breakevens':      d.get('breakevens', 0) or 0,
+            'wr':              d.get('wr'),
+            'avg_win':         d.get('avg_win', 0) or 0,
+            'avg_loss':        d.get('avg_loss', 0) or 0,
+            'rr_blended':      d.get('rr'),
+            'open_positions':  d.get('open_positions', []) or [],
         }
-        if sys_def['kind'] == 'self':
-            try:
-                # Inline self-state — avoid HTTP loopback
-                snap_pos = atomic_reconciler.get_snapshot().get('positions', {}) if hasattr(globals().get('atomic_reconciler', None), 'get_snapshot') else {}
-            except Exception:
-                snap_pos = {}
-            try:
-                _eq = float(get_balance())
-            except Exception:
-                _eq = None
-            try:
-                _commit_self = (os.environ.get('RENDER_GIT_COMMIT')
-                                or os.environ.get('GIT_COMMIT') or '')[:8]
-            except Exception:
-                _commit_self = ''
-            entry.update({
-                'live': True,
-                'equity': _eq,
-                'positions': len(snap_pos),
-                'commit': _commit_self or 'live',
-                'engines_active': 6,  # PIVOT/PULLBACK/WALL_BNC/WALL_EXH/CVD_DIV/LIQ_CSCD
-            })
-        elif sys_def['kind'] == 'remote' and sys_def['url']:
-            try:
-                req = _ur.Request(f"{sys_def['url']}/health", headers={'User-Agent': 'multi-gate-aggregator'})
-                with _ur.urlopen(req, timeout=5) as r:
-                    data = _json.loads(r.read())
-                ok = bool(data.get('ok', False))
-                entry.update({
-                    'live': ok,
-                    'equity': data.get('equity'),
-                    'commit': (data.get('commit_live') or '')[:8],
-                    'engines_active': sum(1 for v in (data.get('signal_engines') or {}).values() if v) or None,
-                })
-                # SMC v1 doesn't expose position count via /health; try /dash
-                try:
-                    req2 = _ur.Request(f"{sys_def['url']}/dash", headers={'User-Agent': 'multi-gate-aggregator'})
-                    with _ur.urlopen(req2, timeout=3) as r2:
-                        d2 = _json.loads(r2.read())
-                    entry['positions'] = len(d2.get('positions', d2.get('open', [])) or [])
-                except Exception:
-                    pass
-            except _ue.HTTPError as e:
-                entry['error'] = f'HTTP {e.code}'
-            except Exception as e:
-                entry['error'] = str(e)[:80]
-        else:  # 'worker' — no HTTP endpoint
-            entry.update({
-                'live': True,  # assume live; no health endpoint to verify
-                'commit': '(no http)',
-            })
         out.append(entry)
-    return jsonify({'systems': out, 'fetched_at': int(_t.time())})
+
+    # Aggregate totals (drives the top-of-page summary)
+    agg = (dash_state or {}).get('aggregate', {}) or {}
+    totals = {
+        'pnl_total':       agg.get('pnl_total', 0) or 0,
+        'closes':          agg.get('closes', 0) or 0,
+        'open':            agg.get('open', 0) or 0,
+        'wins':            agg.get('wins', 0) or 0,
+        'losses':          agg.get('losses', 0) or 0,
+        'wr':              agg.get('wr'),
+        'engines_live':    sum(1 for s in out if s['live']),
+        'engines_total':   len(out),
+        'equity':          _eq,
+        'commit':          (dash_state or {}).get('commit', '')[:8] if dash_state else '',
+        'dash_url':        DASH_URL,
+        'dash_error':      dash_error,
+    }
+    return jsonify({
+        'systems':    out,
+        'totals':     totals,
+        'fetched_at': int(_t.time()),
+        'source':     'dashboard',
+    })
 
 @app.route('/orderbook/<coin>', methods=['GET'])
 def orderbook_depth(coin):
@@ -13351,6 +13389,92 @@ if __name__ == '__main__':
     # Run precog signal loop in background thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
+
+    # Dashboard pusher (non-blocking, errors swallowed).
+    # Pushes multi-gate's open positions + recent closes to the unified
+    # dashboard service every 30s. Uses position_ledger for live state and
+    # trade_ledger for closed history.
+    def _dashboard_push_loop():
+        import time as _t
+        # Wait 60s after boot so position state is loaded
+        _t.sleep(60)
+        try:
+            from dashboard_push import push_state as _dash_push
+        except ImportError:
+            log('[dashboard] dashboard_push module not present; skipping')
+            return
+        log('[dashboard] pusher started (30s interval)')
+        while True:
+            try:
+                # Open positions from position_ledger.all_rows()
+                positions_dict = {}
+                try:
+                    rows = position_ledger.all_rows() or {}
+                    for coin, row in rows.items():
+                        if not row: continue
+                        sz = float(row.get('size') or 0)
+                        if abs(sz) < 1e-12: continue
+                        is_long = row.get('is_long')
+                        if is_long is None:
+                            is_long = sz > 0
+                        positions_dict[coin] = {
+                            'is_long': bool(is_long),
+                            'entry':   float(row.get('entry_px') or 0),
+                            'sl':      float(row.get('sl_px') or 0),
+                            'tp1':     float(row.get('tp_px') or 0),
+                            'tp2':     0,
+                            'size':    abs(sz),
+                            'fired_t': int((row.get('opened_t') or 0)),
+                        }
+                except Exception as e:
+                    log(f'[dashboard] read positions err: {e}')
+                # Closed history from trade_ledger CSV (last 12h)
+                history = []
+                try:
+                    if _LEDGER_OK and _ledger:
+                        rows = _ledger._read_all()
+                        cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+                        for r in rows:
+                            if r.get('event_type') != 'CLOSE': continue
+                            ts_iso = r.get('ts') or r.get('timestamp') or ''
+                            if not ts_iso or ts_iso < cutoff_iso: continue
+                            try:
+                                pnl = float(r.get('pnl') or 0)
+                            except (TypeError, ValueError):
+                                pnl = 0
+                            # Convert iso timestamp to epoch ms
+                            try:
+                                ts_ms = int(datetime.fromisoformat(ts_iso.replace('Z', '+00:00')).timestamp()*1000)
+                            except Exception:
+                                ts_ms = 0
+                            history.append({
+                                'coin':     r.get('coin'),
+                                'is_long':  r.get('side', '').upper() in ('BUY','LONG'),
+                                'entry':    float(r.get('entry_price') or 0) if r.get('entry_price') else 0,
+                                'exit_px':  float(r.get('exit_price') or 0) if r.get('exit_price') else 0,
+                                'realized_pnl': pnl,
+                                'outcome':  r.get('close_reason') or 'CLOSE',
+                                'close_t':  ts_ms,
+                            })
+                except Exception as e:
+                    log(f'[dashboard] read history err: {e}')
+                # Push
+                _dash_push(
+                    engine_name='multi-gate',
+                    live=os.environ.get('LIVE_TRADING', '0') == '1',
+                    sizing_mode='fixed',
+                    notional_usd=float(os.environ.get('NOTIONAL_USD', '25')),
+                    max_concurrent=int(os.environ.get('MAX_CONCURRENT', '20')),
+                    positions_dict=positions_dict,
+                    history_list=history,
+                    scan_count=0,
+                    last_scan_ts=int(_t.time()*1000),
+                )
+            except Exception as e:
+                log(f'[dashboard] push iteration err: {e}')
+            _t.sleep(30)
+
+    threading.Thread(target=_dashboard_push_loop, daemon=True, name='dashboard_push').start()
 
     # 2026-04-30: periodic naked-position protection sweep.
     # Belt-and-braces guard for entries where SL placement raced the
