@@ -1324,7 +1324,37 @@ def fire_setup(coin, setup, state):
 
     close_dir = not is_long  # close direction (sell to close long, buy to close short)
 
-    orders = [
+    # Exit policy — set via env LSR_EXIT_POLICY. Default 'tp1_full' (BT winner).
+    #   'tp1_full': 100% size exits at TP1 (1.5R). No TP2, no BE-stop. PF 1.61 net.
+    #   'split_be': 50/50 split, BE-stop after TP1. Legacy. PF 0.68 net.
+    # Re-BT 50 coins / 90d / 420 fills found tp1_full +65R vs split_be -74R net.
+    EXIT_POLICY = os.environ.get('LSR_EXIT_POLICY', 'tp1_full').lower()
+
+    if EXIT_POLICY == 'tp1_full':
+        # Single-exit policy: 100% at TP1. No TP2 leg, no BE-stop.
+        orders = [
+            {
+                'coin': coin, 'is_buy': is_long, 'sz': sz_total, 'limit_px': entry,
+                'order_type': {'limit': {'tif': 'Gtc'}},
+                'reduce_only': False,
+                'cloid': _wrap_cloid(cloid_entry),
+            },
+            {
+                'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': sl,
+                'order_type': {'trigger': {'triggerPx': sl, 'isMarket': True, 'tpsl': 'sl'}},
+                'reduce_only': True,
+                'cloid': _wrap_cloid(cloid_sl),
+            },
+            {
+                'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': tp1,
+                'order_type': {'trigger': {'triggerPx': tp1, 'isMarket': True, 'tpsl': 'tp'}},
+                'reduce_only': True,
+                'cloid': _wrap_cloid(cloid_tp1),
+            },
+        ]
+    else:
+        # Legacy 50/50 split with BE-stop (kept for A/B fallback).
+        orders = [
         # 1. ENTRY: GTC limit in trade direction (matches backtest "wait for retest")
         {
             'coin': coin, 'is_buy': is_long, 'sz': sz_total, 'limit_px': entry,
@@ -1616,6 +1646,23 @@ def reconcile_positions(state):
 
         # TP1 leg → move SL to BE
         elif leg == 'tp1' and pos['phase'] in ('live', 'pending_fill'):
+            # Under tp1_full policy: TP1 closes 100% of size. No remainder, no BE move.
+            EXIT_POLICY = os.environ.get('LSR_EXIT_POLICY', 'tp1_full').lower()
+            if EXIT_POLICY == 'tp1_full':
+                log(f'  {coin} TP1 hit at {fill_px} — full close (tp1_full policy)')
+                pos['phase'] = 'done'
+                pos['close_reason'] = 'tp1'
+                pos['close_px'] = fill_px
+                pos['closed_t'] = fill.get('time', int(time.time()*1000))
+                pos['tp1_fill_px'] = fill_px
+                pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
+                append_history(state, pos)
+                del state['positions'][coin]
+                cancel_orphan_legs(coin, pos, 'tp1')  # cancel SL leg
+                notify(f'TP1 {coin}', f'closed @ {fill_px} (+1.5R full size)', priority=0)
+                state.get('coin_consec_losses', {}).pop(coin, None)
+                continue
+
             log(f'  {coin} TP1 hit at {fill_px} — moving SL to BE @ {pos["entry"]}')
             # B96: place new BE-stop FIRST, verify it rests on book, THEN cancel
             # the old SL. If we cancel first and the place fails, the runner
