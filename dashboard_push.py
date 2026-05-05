@@ -47,8 +47,30 @@ def _compute_stats_12h(history_list):
                 'avg_win': 0.0, 'avg_loss': 0.0, 'wr': None, 'rr_blended': None}
     wins=[]; losses=[]; bes=[]; pnl_total=0.0
     for h in recent:
+        # PNL fallback chain: explicit fields first, then derive from price+size
         pnl = float(h.get('realized_pnl') or h.get('pnl_usd') or h.get('pnl') or 0)
+        if pnl == 0:
+            entry    = float(h.get('entry') or h.get('entry_px') or 0)
+            close_px = float(h.get('close_px') or h.get('exit_px') or h.get('exit') or 0)
+            sz       = float(h.get('sz_total') or h.get('sz') or h.get('size') or 0)
+            is_long  = h.get('is_long')
+            if is_long is None:
+                side = (h.get('side') or '').upper()
+                is_long = side == 'LONG'
+            if entry > 0 and close_px > 0 and sz > 0:
+                sign = 1 if is_long else -1
+                pnl = round(sign * (close_px - entry) * sz, 4)
+
+        # OUTCOME fallback chain: explicit field, then close_reason, then sign of pnl
         outcome = (h.get('outcome') or '').upper()
+        if not outcome:
+            cr = (h.get('close_reason') or '').lower()
+            if cr.startswith('tp2'):                               outcome = 'TP2'
+            elif cr == 'tp1' or cr == 'be_stop':                   outcome = 'TP1_BE'
+            elif cr == 'sl':                                        outcome = 'SL'
+            elif any(x in cr for x in ('time','pending','zombie')): outcome = 'TIMEOUT'
+            elif cr:                                                outcome = cr.upper()
+
         pnl_total += pnl
         if outcome.startswith('TP') or pnl > 0.001: wins.append(pnl)
         elif outcome.startswith('SL') or pnl < -0.001: losses.append(pnl)
@@ -104,13 +126,41 @@ def _serialize_history_recent(history_list, limit=30):
     for h in history_list:
         ts = h.get('close_t') or h.get('exit_t') or h.get('closed_t') or h.get('ts') or 0
         if not ts or ts < cutoff: continue
+
+        entry    = h.get('entry') or h.get('entry_px') or 0
+        close_px = h.get('exit_px') or h.get('close_px') or 0
+        sz       = float(h.get('sz_total') or h.get('sz') or h.get('size') or 0)
+        is_long  = h.get('is_long')
+        if is_long is None:
+            side_str = (h.get('side') or '').upper()
+            is_long = side_str == 'LONG' if side_str else None
+
+        # PNL fallback: explicit field, else compute from price+size
+        pnl = float(h.get('realized_pnl') or h.get('pnl_usd') or h.get('pnl') or 0)
+        if pnl == 0 and entry and close_px and sz and is_long is not None:
+            sign = 1 if is_long else -1
+            pnl = round(sign * (float(close_px) - float(entry)) * sz, 4)
+
+        # OUTCOME fallback: explicit, then close_reason, then sign of pnl
+        outcome = h.get('outcome')
+        if not outcome:
+            cr = (h.get('close_reason') or '').lower()
+            if cr.startswith('tp2'):                               outcome = 'TP2'
+            elif cr == 'tp1' or cr == 'be_stop':                   outcome = 'TP1_BE'
+            elif cr == 'sl':                                        outcome = 'SL'
+            elif any(x in cr for x in ('time','pending','zombie')): outcome = 'TIMEOUT'
+            elif cr:                                                outcome = cr.upper()
+            elif pnl > 0.001:                                       outcome = 'WIN'
+            elif pnl < -0.001:                                      outcome = 'LOSS'
+            else:                                                   outcome = 'BE'
+
         out.append({
             'coin':    h.get('coin'),
-            'side':    'LONG' if h.get('is_long') else 'SHORT',
-            'entry':   h.get('entry') or h.get('entry_px'),
-            'exit':    h.get('exit_px') or h.get('close_px'),
-            'pnl':     float(h.get('realized_pnl') or h.get('pnl_usd') or h.get('pnl') or 0),
-            'outcome': h.get('outcome'),
+            'side':    'LONG' if is_long else 'SHORT',
+            'entry':   entry,
+            'exit':    close_px,
+            'pnl':     pnl,
+            'outcome': outcome,
             'close_t': ts,
         })
     out.sort(key=lambda x: -(x['close_t'] or 0))
