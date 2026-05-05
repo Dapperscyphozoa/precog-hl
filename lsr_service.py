@@ -1234,6 +1234,36 @@ def fire_setup(coin, setup, state):
     log(f'FIRE {coin} {"LONG" if is_long else "SHORT"} entry={entry} sl={sl} '
         f'tp1={tp1} tp2={tp2} sz={sz_total} (half={sz_half}+{sz_half2})')
 
+    # ──────────────────────────────────────────────────────────
+    # ACCOUNT-LEVEL RISK GATE — query dashboard before firing.
+    # Single source of truth for cross-engine cumulative exposure.
+    # Fail-open: if dashboard unreachable, allow fire (engines never
+    # block on infrastructure failure — alerting catches the issue).
+    # ──────────────────────────────────────────────────────────
+    try:
+        import urllib.request as _ur, urllib.parse as _up
+        _ntl = sz_total * entry
+        _sl_pct = abs(entry - sl) / entry if entry else 0.005
+        _q = _up.urlencode({
+            'coin':     coin,
+            'side':     'LONG' if is_long else 'SHORT',
+            'notional': f'{_ntl:.4f}',
+            'sl_pct':   f'{_sl_pct:.6f}',
+        })
+        _dash_url = os.environ.get('DASH_URL', 'https://dashboard-8b7i.onrender.com').rstrip('/')
+        _req = _ur.Request(f'{_dash_url}/api/risk_check?{_q}',
+                           headers={'User-Agent': 'lsr-engine-risk-gate'})
+        with _ur.urlopen(_req, timeout=3) as _r:
+            _rc = json.loads(_r.read())
+        if not _rc.get('can_fire', True):
+            log(f'  {coin} skip: risk gate blocked — reason={_rc.get("block_reason")} '
+                f'projected_total=${_rc.get("projected",{}).get("total_notional",0):.2f} '
+                f'limit=${_rc.get("limits",{}).get("max_total_notional",0):.2f}')
+            return False
+    except Exception as _e:
+        log(f'  {coin} risk gate query err (failing-open): {_e}')
+        # Continue — fail-open
+
     # B10: pre-flight margin check. Avoid cascade-rejection when wallet
     # free margin can't cover this entry. Read live account value and used
     # margin from HL (same call PreCog uses).
