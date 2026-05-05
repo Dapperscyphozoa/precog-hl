@@ -752,6 +752,20 @@ body::after {
         <div class="sys-footer" id="sf-footer"></div>
     </div>
 
+    <!-- SYSTEM G · BRK -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System G · BRK</div>
+            <div class="panel-meta" id="sg-status">—</div>
+        </div>
+        <div class="sys-stats" id="sg-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sg-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="sg-engines"></div>
+        <div class="sys-footer" id="sg-footer"></div>
+    </div>
+
 </div>
 
 <style>
@@ -1476,7 +1490,7 @@ async function loadSystems() {
         renderSystemB(sbData, HRS),
     ]);
 
-    /* Render the 4 dash-fed panels */
+    /* Render the 5 dash-fed panels */
     const sysByKey = {};
     for (const e of (allSysResp.systems || [])) sysByKey[e.engine_key] = e;
     await Promise.all([
@@ -1484,6 +1498,7 @@ async function loadSystems() {
         renderEngineFromDash('sd', 'smc-v2',    sysByKey['smc-v2'],    HRS),
         renderEngineFromDash('se', 'smc-loose', sysByKey['smc-loose'], HRS),
         renderEngineFromDash('sf', 'lsr',       sysByKey['lsr'],       HRS),
+        renderEngineFromDash('sg', 'brk',       sysByKey['brk'],       HRS),
     ]);
 }
 

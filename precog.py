@@ -2747,16 +2747,19 @@ def all_systems():
                        'universe': '~190', 'desc': 'Native SMC engine, long-only',
                        'url': 'https://precog-sa.onrender.com'},
         'smc-v2':     {'label': 'SMC v2',      'branch': 'smc-v2',       'direction': 'L+S',
-                       'universe': 181,   'desc': 'R3 backtest-validated SMC, both directions',
+                       'universe': 173,   'desc': 'R3 backtest-validated SMC, both directions',
                        'url': ''},
         'smc-loose':  {'label': 'SMC-LOOSE',   'branch': 'smc-loose',    'direction': 'L+S',
-                       'universe': 181,   'desc': 'R-1_max loose params, full universe',
+                       'universe': 173,   'desc': 'R-1_max loose params, full universe',
                        'url': ''},
         'lsr':        {'label': 'LSR',         'branch': 'lsr-engine',   'direction': 'L+S',
-                       'universe': 181,   'desc': 'Liquidity sweep reversal — sweep+reject',
+                       'universe': 173,   'desc': 'Liquidity sweep reversal — sweep+reject',
+                       'url': ''},
+        'brk':        {'label': 'BRK',         'branch': 'brk-engine',   'direction': 'L+S',
+                       'universe': 173,   'desc': 'OB break+retest continuation — BT 60% WR PF 2.13',
                        'url': ''},
     }
-    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr']
+    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr', 'brk']
 
     # Pull dash state (single round-trip)
     dash_state = None
