@@ -870,6 +870,33 @@ def cancel_order(coin, cloid):
         return None
 
 
+def cancel_orphan_legs(coin, pos, fired_leg):
+    """B188: when a position closes (SL/TP1+TP2/TP2/time-stop), cancel any
+    sibling protective legs still resting on the order book. Without this,
+    the orphan reduce_only orders linger forever (HL only rejects them when
+    they trigger and find no position to reduce — could be hours/days/never).
+    Pollutes the order book and bloats frontendOpenOrders responses.
+
+    fired_leg: which leg just filled ('sl', 'tp1', 'tp2', 'close') — skipped
+    in the cancel sweep since it's already consumed.
+
+    Best-effort: cancel failures are logged but don't propagate. The orders
+    stay reduce_only and can't open new exposure.
+    """
+    leg_to_cloid = {
+        'sl':  pos.get('cloid_sl'),
+        'tp1': pos.get('cloid_tp1'),
+        'tp2': pos.get('cloid_tp2'),
+    }
+    for leg, cloid in leg_to_cloid.items():
+        if leg == fired_leg or not cloid:
+            continue
+        try:
+            cancel_order(coin, cloid)
+        except Exception as e:
+            log(f'  {coin} orphan-cancel {leg} err: {e}')
+
+
 def market_close(coin, is_long_pos, sz, slippage=0.005, cloid=None):
     """Close exactly `sz` of position via reduce_only IOC limit at mid±slippage.
     Uses our own tracked cloid (returned for caller to record).
@@ -1357,6 +1384,7 @@ def reconcile_positions(state):
                     pos['tp1_fill_t'] = fill.get('time', int(time.time()*1000))
                     append_history(state, pos)
                     del state['positions'][coin]
+                    cancel_orphan_legs(coin, pos, 'sl')  # B188: tp2 still resting
                     notify(f'BE {coin}', f'TP1 @ {fill_px}, runner closed at BE '
                            f'(immediate fill on placement)', priority=0)
                     # BE-stop is not a loss — reset counter
@@ -1393,6 +1421,7 @@ def reconcile_positions(state):
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
             append_history(state, pos)
             del state['positions'][coin]
+            cancel_orphan_legs(coin, pos, 'tp2')  # B188: SL still resting
             notify(f'TP2 {coin}', f'WIN — runner closed @ {fill_px} (entry={pos["entry"]})', priority=0)
             # B15: TP2 win clears the consec-loss counter for this coin
             state.get('coin_consec_losses', {}).pop(coin, None)
@@ -1407,6 +1436,7 @@ def reconcile_positions(state):
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
             append_history(state, pos)
             del state['positions'][coin]
+            cancel_orphan_legs(coin, pos, 'sl')  # B188: tp1+tp2 (or just tp2 if tp1 already filled) still resting
             outcome = 'BE' if label == 'be_stop' else 'LOSS'
             notify(f'{outcome} {coin}', f'{label.upper()} @ {fill_px} (entry={pos["entry"]})',
                    priority=1 if label == 'sl' else 0)
@@ -1435,6 +1465,7 @@ def reconcile_positions(state):
             pos['closed_t'] = fill.get('time', int(time.time()*1000))
             append_history(state, pos)
             del state['positions'][coin]
+            cancel_orphan_legs(coin, pos, 'close')  # B188: sl+tp1+tp2 still resting
             notify(f'TIME-STOP {coin}', f'closed @ {fill_px} (entry={pos["entry"]})', priority=0)
 
     # Time-stop check (independent of fills)
@@ -1526,6 +1557,7 @@ def reconcile_positions(state):
                     pos['closed_t'] = int(time.time()*1000)
                     append_history(state, pos)
                     del state['positions'][coin]
+                    cancel_orphan_legs(coin, pos, 'close')  # B188: sl+tp1+tp2 may still be resting
                     continue
 
                 # Position still open; retry with wider slippage
@@ -1588,6 +1620,7 @@ def reconcile_positions(state):
                     pos.pop('tp1_filled_pending_be', None)
                     append_history(state, pos)
                     del state['positions'][coin]
+                    cancel_orphan_legs(coin, pos, 'sl')  # B188: tp2 still resting
                     notify(f'BE recovered {coin}',
                            f'TP1 already booked, runner closed at BE on retry',
                            priority=0)
