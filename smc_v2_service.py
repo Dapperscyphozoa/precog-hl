@@ -2073,6 +2073,26 @@ def main():
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')
 
+    # Dashboard heartbeat — pushes state snapshot every 60s regardless of scan
+    # activity, so the dashboard's 5-min staleness threshold isn't tripped on
+    # slow scans.
+    try:
+        from dashboard_push import start_heartbeat as _start_hb
+        _start_hb(
+            engine_name='smc-loose',
+            state_getter=lambda: state,
+            config_getter=lambda: {
+                'live': LIVE_TRADING,
+                'sizing_mode': 'fixed',
+                'notional_usd': FIXED_NOTIONAL_USD,
+                'max_concurrent': MAX_CONCURRENT,
+            },
+            interval_sec=60,
+            log_fn=log,
+        )
+    except Exception as e:
+        log(f'dashboard heartbeat init failed: {e}')
+
     last_scan = state.get('last_scan_ts', 0) / 1000.0
     last_reconcile = 0
     # B103: liveness heartbeat — push to ntfy every 30 min so a silent freeze
