@@ -1819,8 +1819,20 @@ def scan_for_setups(state, reconcile_fn=None):
     last_reconcile_in_scan = time.time()
     RECONCILE_DURING_SCAN_SEC = 30  # call reconcile_fn every 30s during scan
 
+    # Diagnostic counters — surface why fires happen (or don't)
+    n_skip_held = 0          # already in state
+    n_skip_cooldown = 0      # in cooldown
+    n_skip_data = 0          # candle fetch failed / not enough bars
+    n_no_htf = 0             # no HTF zones detected
+    n_no_setup = 0           # no LTF ARMED setup
+    n_dedup = 0              # ARMED but already fired (mss_t match)
+    n_stale = 0              # ARMED but past 75% of timeout budget
+    n_armed = 0              # ARMED + fresh + not deduped
+    n_fired_ok = 0           # fire_setup returned True
+
     for ix, coin in enumerate(coins):
         if coin in state['positions']:
+            n_skip_held += 1
             continue
         if len(state['positions']) >= MAX_CONCURRENT:
             log(f'  max concurrent reached ({MAX_CONCURRENT}); stopping scan')
@@ -1829,6 +1841,7 @@ def scan_for_setups(state, reconcile_fn=None):
         # B15: skip coin if in cooldown after consecutive losses
         cd_until = state.get('coin_cooldown_until', {}).get(coin, 0)
         if cd_until > int(time.time()*1000):
+            n_skip_cooldown += 1
             continue
         # Cooldown expired — reset counter and clear cooldown
         if cd_until and cd_until <= int(time.time()*1000):
@@ -1855,8 +1868,10 @@ def scan_for_setups(state, reconcile_fn=None):
                 c1 = fetch_candles(coin, '1h', 90)
                 c15 = fetch_candles(coin, '15m', 52)
                 if not (c4 and c1 and c15):
+                    n_skip_data += 1
                     continue
                 if len(c4) < 30 or len(c1) < 100 or len(c15) < 500:
+                    n_skip_data += 1
                     continue
                 cache = {'4h': c4, '1h': c1, '15m': c15, 'fetched': now_s}
                 _coin_data_cache[coin] = cache
@@ -1876,17 +1891,22 @@ def scan_for_setups(state, reconcile_fn=None):
             c1 = _drop_unclosed(c1, 3600*1000)
             c15 = _drop_unclosed(c15, 15*60*1000)
             if len(c4) < 30 or len(c1) < 100 or len(c15) < 500:
+                n_skip_data += 1
                 continue
 
             # Run engine in LIVE mode: returns current ARMED setup (if any)
             # rather than past FILL transitions. We place a GTC limit at entry
             # NOW and let HL match naturally when price retests.
             htfs = htf_bias_and_zones(c4, PARAMS['htf_lb'], PARAMS['htf_displace'], PARAMS['htf_max_age'])
-            if not htfs: continue
+            if not htfs:
+                n_no_htf += 1
+                continue
             mtf_phs, mtf_pls = precompute_mtf_pivots(c1, lb=PARAMS['ltf_lb'])
             setups = run_ltf(c15, htfs, c1, mtf_phs, mtf_pls, PARAMS,
                              return_armed_setup=True)
-            if not setups: continue
+            if not setups:
+                n_no_setup += 1
+                continue
 
             # At most one ARMED setup per coin from run_ltf in live mode
             s = setups[0]
@@ -1898,6 +1918,7 @@ def scan_for_setups(state, reconcile_fn=None):
             mss_t = s.get('mss_t', 0)
             already = last_fired.get(coin, 0)
             if mss_t and mss_t <= already:
+                n_dedup += 1
                 continue
 
             # B41: refuse to fire if MSS is already too old. Engine's
@@ -1916,19 +1937,24 @@ def scan_for_setups(state, reconcile_fn=None):
                         f'{age_since_mss_sec/3600:.1f}h since MSS, '
                         f'only {budget_remaining_sec/60:.0f}m of budget left — '
                         f'skipping (would diverge from backtest)')
-                    # Mark as fired to suppress further attempts on this MSS
                     last_fired[coin] = mss_t
+                    n_stale += 1
                     continue
 
+            n_armed += 1
             log(f'  ARMED {coin}: {"LONG" if s["is_long"] else "SHORT"} entry={s["entry"]:.5f} mss_t={mss_t}')
             if fire_setup(coin, s, state):
                 last_fired[coin] = mss_t
+                n_fired_ok += 1
                 fired += 1
         except Exception as e:
             log(f'  scan err {coin}: {e}')
             traceback.print_exc()
 
-    log(f'scan complete: {fired} new setups fired')
+    log(f'scan complete: {fired} new setups fired '
+        f'| held={n_skip_held} cooldown={n_skip_cooldown} '
+        f'no_data={n_skip_data} no_htf={n_no_htf} no_setup={n_no_setup} '
+        f'dedup={n_dedup} stale={n_stale} armed={n_armed} fired_ok={n_fired_ok}')
     state['last_scan_ts'] = int(time.time()*1000)
     save_state(state)
 
