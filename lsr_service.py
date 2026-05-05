@@ -933,6 +933,22 @@ def save_state(state):
         os.replace(tmp, STATE_PATH)
     except Exception as e:
         log(f'state save err: {e}')
+    # Push to dashboard (non-blocking, errors swallowed)
+    try:
+        from dashboard_push import push_state as _dash_push
+        _dash_push(
+            engine_name='lsr',
+            live=LIVE_TRADING,
+            sizing_mode=SIZING_MODE,
+            notional_usd=FIXED_NOTIONAL_USD,
+            max_concurrent=MAX_CONCURRENT,
+            positions_dict=state.get('positions', {}),
+            history_list=state.get('history', []),
+            scan_count=state.get('scan_count', 0),
+            last_scan_ts=state.get('last_scan_ts', 0),
+        )
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════
