@@ -881,7 +881,8 @@ def append_history(state, pos):
     if 'outcome' not in pos:
         cr = (pos.get('close_reason') or '').lower()
         if cr.startswith('tp2'):                 pos['outcome'] = 'TP2'
-        elif cr == 'tp1' or cr == 'be_stop':     pos['outcome'] = 'TP1_BE'
+        elif cr == 'tp1':                         pos['outcome'] = 'TP1'   # full close at +1.5R
+        elif cr == 'be_stop':                     pos['outcome'] = 'BE'    # failed runner
         elif cr == 'sl':                          pos['outcome'] = 'SL'
         elif any(x in cr for x in ('time','pending','zombie')): pos['outcome'] = 'TIMEOUT'
         elif cr:                                  pos['outcome'] = cr.upper()
