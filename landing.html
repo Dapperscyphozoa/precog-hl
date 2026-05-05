@@ -622,6 +622,50 @@ body::after {
     <div class="metric-cell"><div class="metric-val" id="m-risk">4%</div><div class="metric-lbl">Risk Tier</div></div>
 </div>
 
+<!-- ═══ TRADING SYSTEMS — 3 ENGINES ON SHARED WALLET ═══ -->
+<style>
+.sys-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+.sys-card {
+    border: 1px solid var(--line); padding: 18px 20px; position: relative;
+    background: linear-gradient(135deg, rgba(13,14,17,0.6), rgba(7,8,10,0.4));
+    transition: border-color 0.2s ease;
+}
+.sys-card.live { border-color: rgba(184,255,47,0.4); }
+.sys-card.live::before {
+    content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%;
+    background: var(--acid); box-shadow: 0 0 12px var(--glow);
+}
+.sys-card.dead { opacity: 0.4; }
+.sys-card.dead::before {
+    content: ''; position: absolute; top: 0; left: 0; width: 3px; height: 100%;
+    background: var(--blood);
+}
+.sys-card.error { border-color: rgba(193,39,45,0.4); }
+.sys-name { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; letter-spacing: 0.05em; color: var(--bone); margin-bottom: 4px; }
+.sys-desc { font-size: 10px; color: var(--chrome); opacity: 0.7; margin-bottom: 14px; line-height: 1.4; min-height: 28px; }
+.sys-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; font-size: 10px; }
+.sys-meta-lbl { color: var(--chrome); opacity: 0.5; letter-spacing: 0.15em; text-transform: uppercase; }
+.sys-meta-val { color: var(--bone); font-weight: 600; text-align: right; font-family: 'JetBrains Mono', monospace; }
+.sys-meta-val.acid { color: var(--acid); }
+.sys-meta-val.blood { color: var(--blood); }
+.sys-status-pill {
+    display: inline-block; padding: 2px 8px; font-size: 9px; letter-spacing: 0.2em;
+    border: 1px solid; border-radius: 0; margin-left: 8px;
+}
+.sys-status-pill.live { color: var(--acid); border-color: var(--acid); background: rgba(184,255,47,0.1); }
+.sys-status-pill.dead { color: var(--blood); border-color: var(--blood); }
+.sys-link { display: block; margin-top: 12px; font-size: 9px; letter-spacing: 0.2em; color: var(--cyan); text-decoration: none; opacity: 0.6; transition: opacity 0.15s ease; }
+.sys-link:hover { opacity: 1; }
+@media (max-width: 900px) { .sys-row { grid-template-columns: 1fr; } }
+</style>
+<div class="panel" style="margin-bottom: 24px;">
+    <div class="panel-head">
+        <div class="panel-title">Trading Systems · 3 Engines · Shared Wallet</div>
+        <div class="panel-meta" id="sys-meta">—</div>
+    </div>
+    <div class="sys-row" id="sys-row"></div>
+</div>
+
 <!-- GRID -->
 <div class="grid">
     <!-- POSITIONS -->
@@ -645,8 +689,8 @@ body::after {
     <!-- ENGINES -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Engine Stack</div>
-            <div class="panel-meta">5 signal · 9 guard · 6 venue · 1 sizing</div>
+            <div class="panel-title">Multi-Gate · Engine Stack</div>
+            <div class="panel-meta">8 signal · 9 guard · 6 venue · 1 sizing</div>
         </div>
 
         <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// SIGNAL ENGINES</div>
@@ -1057,6 +1101,56 @@ async function loadEngines() {
 
 loadEngines();
 setInterval(loadEngines, 5000);
+
+// ─── ALL SYSTEMS PANEL ──────────────────────────────────────────────
+async function loadSystems() {
+    try {
+        const r = await fetch('/all_systems');
+        const d = await r.json();
+        const fmtEq = v => v == null ? '—' : '$' + Number(v).toFixed(2);
+        const fmtPos = v => v == null ? '—' : String(v);
+        const liveCount = (d.systems || []).filter(s => s.live).length;
+        document.getElementById('sys-meta').textContent =
+            `${liveCount}/${(d.systems||[]).length} live · same wallet · same agent`;
+        document.getElementById('sys-row').innerHTML = (d.systems || []).map(s => {
+            let cls = 'sys-card';
+            let pill = `<span class="sys-status-pill ${s.live ? 'live' : 'dead'}">${s.live ? 'LIVE' : 'OFF'}</span>`;
+            if (s.error) { cls += ' error'; pill = `<span class="sys-status-pill dead">${s.error}</span>`; }
+            else if (s.live) cls += ' live';
+            else cls += ' dead';
+            const link = s.url ? `<a class="sys-link" href="${s.url}" target="_blank">${s.url.replace('https://','')} →</a>` : `<div class="sys-link" style="cursor:default">background worker · no url</div>`;
+            return `<div class="${cls}">
+                <div style="display:flex;justify-content:space-between;align-items:start">
+                    <div class="sys-name">${s.name}</div>
+                    <div>${pill}</div>
+                </div>
+                <div class="sys-desc">${s.desc || ''}</div>
+                <div class="sys-meta-grid">
+                    <div class="sys-meta-lbl">Branch</div>
+                    <div class="sys-meta-val">${s.branch || '—'}</div>
+                    <div class="sys-meta-lbl">Direction</div>
+                    <div class="sys-meta-val ${s.direction === 'LONG' ? 'acid' : ''}">${s.direction || '—'}</div>
+                    <div class="sys-meta-lbl">Universe</div>
+                    <div class="sys-meta-val">${s.universe ?? '—'} coins</div>
+                    <div class="sys-meta-lbl">Equity</div>
+                    <div class="sys-meta-val acid">${fmtEq(s.equity)}</div>
+                    <div class="sys-meta-lbl">Positions</div>
+                    <div class="sys-meta-val">${fmtPos(s.positions)}</div>
+                    <div class="sys-meta-lbl">Engines</div>
+                    <div class="sys-meta-val">${s.engines_active ?? '—'}</div>
+                    <div class="sys-meta-lbl">Commit</div>
+                    <div class="sys-meta-val" style="font-size:9px">${s.commit || '—'}</div>
+                </div>
+                ${link}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        console.error('systems', e);
+        document.getElementById('sys-row').innerHTML = `<div style="opacity:0.5;padding:20px;grid-column:1/-1">// systems data unavailable: ${e.message || e}</div>`;
+    }
+}
+loadSystems();
+setInterval(loadSystems, 10000);
 
 // ─── UNIFIED SYSTEMS PANELS (SA + SB) ───────────────────────────────
 // Shared rendering pipeline so both systems show identical layout.

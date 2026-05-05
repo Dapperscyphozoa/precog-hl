@@ -2725,6 +2725,82 @@ def engines_status():
         'venue_ages': venues,
     })
 
+@app.route('/all_systems', methods=['GET'])
+def all_systems():
+    """Aggregate live state of all 3 trading engines on this wallet.
+    Multi-gate (this service), SMC v1 (precog-sa), SMC v2 (smc-v2 worker).
+    Server-side fetch sidesteps CORS so the landing page can show all 3.
+    """
+    import urllib.request as _ur, urllib.error as _ue, json as _json, time as _t
+    SYSTEMS = [
+        {'name': 'MULTI-GATE',  'url': None,                                  'kind': 'self',
+         'branch': 'main', 'direction': 'L+S', 'universe': 80,
+         'desc': 'PIVOT/PULLBACK/WALL/CVD/LIQ + 9 guards'},
+        {'name': 'SMC v1',      'url': 'https://precog-sa.onrender.com',     'kind': 'remote',
+         'branch': 'smc-v1', 'direction': 'LONG', 'universe': '~190',
+         'desc': 'Native SMC engine, long-only'},
+        {'name': 'SMC v2',      'url': None,                                  'kind': 'worker',
+         'branch': 'smc-v2', 'direction': 'L+S', 'universe': 168,
+         'desc': 'R3 backtest-validated SMC, both directions'},
+    ]
+    out = []
+    for sys_def in SYSTEMS:
+        entry = {
+            'name': sys_def['name'], 'branch': sys_def['branch'],
+            'direction': sys_def['direction'], 'universe': sys_def['universe'],
+            'desc': sys_def['desc'], 'url': sys_def['url'] or '',
+            'live': False, 'equity': None, 'positions': None, 'commit': None,
+            'engines_active': None, 'error': None,
+        }
+        if sys_def['kind'] == 'self':
+            try:
+                # Inline self-state — avoid HTTP loopback
+                snap_pos = atomic_reconciler.get_snapshot().get('positions', {}) if hasattr(globals().get('atomic_reconciler', None), 'get_snapshot') else {}
+            except Exception:
+                snap_pos = {}
+            try:
+                _eq = float(execution_state.equity) if hasattr(globals().get('execution_state', None), 'equity') else None
+            except Exception:
+                _eq = None
+            entry.update({
+                'live': True,
+                'equity': _eq,
+                'positions': len(snap_pos),
+                'commit': os.environ.get('COMMIT_SHA', '')[:8] or 'live',
+                'engines_active': 6,  # PIVOT/PULLBACK/WALL_BNC/WALL_EXH/CVD_DIV/LIQ_CSCD
+            })
+        elif sys_def['kind'] == 'remote' and sys_def['url']:
+            try:
+                req = _ur.Request(f"{sys_def['url']}/health", headers={'User-Agent': 'multi-gate-aggregator'})
+                with _ur.urlopen(req, timeout=5) as r:
+                    data = _json.loads(r.read())
+                ok = bool(data.get('ok', False))
+                entry.update({
+                    'live': ok,
+                    'equity': data.get('equity'),
+                    'commit': (data.get('commit_live') or '')[:8],
+                    'engines_active': sum(1 for v in (data.get('signal_engines') or {}).values() if v) or None,
+                })
+                # SMC v1 doesn't expose position count via /health; try /dash
+                try:
+                    req2 = _ur.Request(f"{sys_def['url']}/dash", headers={'User-Agent': 'multi-gate-aggregator'})
+                    with _ur.urlopen(req2, timeout=3) as r2:
+                        d2 = _json.loads(r2.read())
+                    entry['positions'] = len(d2.get('positions', d2.get('open', [])) or [])
+                except Exception:
+                    pass
+            except _ue.HTTPError as e:
+                entry['error'] = f'HTTP {e.code}'
+            except Exception as e:
+                entry['error'] = str(e)[:80]
+        else:  # 'worker' — no HTTP endpoint
+            entry.update({
+                'live': True,  # assume live; no health endpoint to verify
+                'commit': '(no http)',
+            })
+        out.append(entry)
+    return jsonify({'systems': out, 'fetched_at': int(_t.time())})
+
 @app.route('/orderbook/<coin>', methods=['GET'])
 def orderbook_depth(coin):
     try:
