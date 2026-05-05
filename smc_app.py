@@ -166,10 +166,10 @@ def _boot():
                         }
                     _dash_push(
                         engine_name='smc-v1',
-                        live=(os.environ.get('SMC_LIVE', '0') == '1'),
+                        live=bool(int(os.environ.get('LIVE_TRADING', '0'))),
                         sizing_mode='fixed',
-                        notional_usd=float(os.environ.get('SMC_NOTIONAL_USD', '25')),
-                        max_concurrent=int(os.environ.get('SMC_MAX_CONCURRENT', '20')),
+                        notional_usd=float(SMC_CONFIG.get('force_notional_usd', 25)),
+                        max_concurrent=int(SMC_CONFIG.get('max_concurrent_positions', 20)),
                         positions_dict=positions_for_push,
                         history_list=[],   # smc-v1 doesn't track history in state
                         scan_count=0,
