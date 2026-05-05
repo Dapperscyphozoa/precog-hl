@@ -127,6 +127,39 @@ def submit_smc_trade(payload: dict, ctx: dict):
     trade_id = f"smc-{payload['alert_id']}"
     submit_ms = int(time.time() * 1000)
 
+    # ─────────────────────────────────────────────────────────
+    # ACCOUNT-LEVEL RISK GATE — query dashboard before firing.
+    # Single source of truth for cross-engine cumulative exposure.
+    # Fail-open: if dashboard unreachable, allow fire.
+    # ─────────────────────────────────────────────────────────
+    try:
+        import urllib.request as _ur, urllib.parse as _up, json as _json, os as _os
+        _ntl = float(size) * float(ob_top)
+        _sl_pct_calc = abs(float(ob_top) - float(sl_px)) / float(ob_top) if (ob_top and sl_px) else 0.005
+        _q = _up.urlencode({
+            'coin':     coin,
+            'side':     'LONG',  # smc-v1 is long-only
+            'notional': f'{_ntl:.4f}',
+            'sl_pct':   f'{_sl_pct_calc:.6f}',
+        })
+        _dash_url = _os.environ.get('DASH_URL', 'https://dashboard-8b7i.onrender.com').rstrip('/')
+        _req = _ur.Request(f'{_dash_url}/api/risk_check?{_q}',
+                           headers={'User-Agent': 'smc-v1-risk-gate'})
+        with _ur.urlopen(_req, timeout=3) as _r:
+            _rc = _json.loads(_r.read())
+        if not _rc.get('can_fire', True):
+            log.warning(
+                f"{coin} smc-v1 skipped: risk gate blocked — reason={_rc.get('block_reason')} "
+                f"projected_total=${_rc.get('projected',{}).get('total_notional',0):.2f} "
+                f"limit=${_rc.get('limits',{}).get('max_total_notional',0):.2f}"
+            )
+            return {'status': 'risk_gate_blocked',
+                    'reason': _rc.get('block_reason'),
+                    'request': _rc.get('request')}, 200
+    except Exception as _e:
+        log.warning(f"{coin} risk gate query err (failing-open): {_e}")
+        # Continue — fail-open
+
     # flight_guard.acquire is a BLOCKING call (not context manager)
     flight_guard.acquire(coin)
     result = atomic_entry.submit_atomic(
