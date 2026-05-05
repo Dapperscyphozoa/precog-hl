@@ -334,6 +334,9 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
                 if setup['is_long']:
                     entry = max(opens[i], sweep_wick) if opens[i] < closes[i] else lows[i]
                     sl = sweep_wick * (1 - sl_buf_pct)
+                    # Fix 1: floor SL distance at MIN_SL_PCT to prevent BE-flushes
+                    MIN_SL_PCT = float(os.environ.get('SMCV2_MIN_SL_PCT', '0.005'))
+                    sl = min(sl, entry * (1 - MIN_SL_PCT))
                     risk = entry - sl
                     if risk <= 0:
                         state = 'IDLE'; continue
@@ -342,6 +345,9 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
                 else:
                     entry = min(opens[i], sweep_wick) if opens[i] > closes[i] else highs[i]
                     sl = sweep_wick * (1 + sl_buf_pct)
+                    # Fix 1: floor SL distance at MIN_SL_PCT
+                    MIN_SL_PCT = float(os.environ.get('SMCV2_MIN_SL_PCT', '0.005'))
+                    sl = max(sl, entry * (1 + MIN_SL_PCT))
                     risk = sl - entry
                     if risk <= 0:
                         state = 'IDLE'; continue
