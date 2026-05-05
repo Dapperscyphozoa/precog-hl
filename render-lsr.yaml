@@ -1,0 +1,30 @@
+services:
+  - type: worker
+    name: lsr
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: lsr-engine
+    disk:
+      name: lsr-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: HL_ADDRESS
+        sync: false
+      - key: HL_PRIVATE_KEY
+        sync: false
+      - key: LSR_LIVE
+        value: '1'
+      - key: LSR_SIZING_MODE
+        value: 'fixed'
+      - key: LSR_NOTIONAL_USD
+        value: '25'
+      - key: LSR_RISK_USD
+        value: '5'
+      - key: LSR_LEVERAGE
+        value: '10'
+      - key: LSR_MAX_CONCURRENT
+        value: '8'
+      - key: MANUAL_COINS
+        value: 'JUP,STABLE'
