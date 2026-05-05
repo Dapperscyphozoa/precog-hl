@@ -1095,16 +1095,25 @@ def fire_setup(coin, setup, state):
         return True
 
     try:
-        # B21: grouping='positionTpsl' makes the TP/SL triggers only activate
-        # when a position exists. Without this, if the price is already past
-        # a TP trigger at placement time (common for SMC retests where price
-        # has moved AWAY from entry to confirm MSS), the TP fires immediately,
-        # gets reduceOnlyRejected (no position to reduce), and is killed.
-        # Verified live on LDO (2026-05-04): TP1 0.3704 and TP2 0.36926
-        # placed when mark was 0.367 — both rejected at placement, position
-        # filled 3h later with no profit protection, ran +2.81% past TP2
-        # then reversed to SL for -$0.16.
-        res = exchange.bulk_orders(orders, grouping='positionTpsl')
+        # B21 ORIGINAL INTENT: grouping='positionTpsl' makes TP/SL triggers
+        # only activate when a position exists. Without this, if the price
+        # has moved past a TP trigger at placement, the TP fires immediately
+        # and gets reduceOnlyRejected. Verified live on LDO (2026-05-04):
+        # TP1 0.3704 and TP2 0.36926 placed when mark was 0.367 — both
+        # rejected at placement, position filled 3h later with no profit
+        # protection, ran +2.81% past TP2 then reversed to SL for -$0.16.
+        #
+        # 2026-05-05: The pinned SDK (hyperliquid-python-sdk==0.10.0) does
+        # not accept the `grouping` kwarg — it was added in 0.21.0.
+        # First fire after re-including majors hit:
+        #   "Exchange.bulk_orders() got an unexpected keyword argument 'grouping'"
+        # GRASS SHORT setup at 03:13:56 was missed.
+        # Removed the kwarg as the urgent fix. Edge case re-opens: if entry
+        # doesn't fill before price reaches TP, TP fires immediately and gets
+        # reduceOnlyRejected. For SMC retests this is rare since entry +
+        # protective legs land in one bulk_orders request — if we see reject
+        # patterns the fix is to bump SDK to 0.21.0+ and restore the kwarg.
+        res = exchange.bulk_orders(orders)
     except Exception as e:
         log(f'  {coin} bulk_orders exception: {e}')
         return False
