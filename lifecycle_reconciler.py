@@ -235,9 +235,24 @@ def _compute_drift(snap, ledger_stats):
 
     2026-04-26: also returns abs_diff so callers can apply a small-N guard.
     With ~25 open positions, off-by-one is 4% — falsely tripping the halt.
+
+    2026-05-05: exclude MANUAL_COINS from both exchange and ledger counts.
+    The orphan handler (line ~519) and missing-close detector (line ~591)
+    already exclude them, but the drift compute did not — so a wallet with
+    operator-managed positions outside the bot would permanently show drift
+    >= 1/N (which crosses the 5% unsafe threshold at small N) and lock the
+    halt flag on. After this fix, manual coins are invisible to drift.
     """
     try:
-        exch = len(snap.get('positions', {}))
+        exch_positions = snap.get('positions', {}) or {}
+        # Filter MANUAL_COINS out of the exchange view
+        import os as _os_drift
+        _manual_raw = _os_drift.environ.get('MANUAL_COINS', '').strip().upper()
+        if _manual_raw:
+            _manual_set = {c.strip() for c in _manual_raw.split(',') if c.strip()}
+            exch_positions = {k: v for k, v in exch_positions.items()
+                              if str(k).upper() not in _manual_set}
+        exch = len(exch_positions)
         led = ledger_stats.get('open_trades_count', 0)
         abs_diff = abs(exch - led)
         denom = max(exch, 1)
