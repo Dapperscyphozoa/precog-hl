@@ -862,6 +862,32 @@ def archive_position(pos):
 
 
 def append_history(state, pos):
+    # Enrich pos with fields needed for dashboard charts before archiving.
+    # Original pos didn't include 'coin' (was only the parent dict key),
+    # 'outcome' (had close_reason only), or 'realized_pnl' (had close_px/entry/sz only).
+    if 'coin' not in pos:
+        for k, v in state.get('positions', {}).items():
+            if v is pos:
+                pos['coin'] = k
+                break
+    if 'outcome' not in pos:
+        cr = (pos.get('close_reason') or '').lower()
+        if cr.startswith('tp2'):                 pos['outcome'] = 'TP2'
+        elif cr == 'tp1' or cr == 'be_stop':     pos['outcome'] = 'TP1_BE'
+        elif cr == 'sl':                          pos['outcome'] = 'SL'
+        elif any(x in cr for x in ('time','pending','zombie')): pos['outcome'] = 'TIMEOUT'
+        elif cr:                                  pos['outcome'] = cr.upper()
+        else:                                     pos['outcome'] = 'UNKNOWN'
+    if 'realized_pnl' not in pos:
+        entry    = float(pos.get('entry') or 0)
+        close_px = float(pos.get('close_px') or 0)
+        sz       = float(pos.get('sz_total') or pos.get('sz') or pos.get('size') or 0)
+        is_long  = pos.get('is_long', True)
+        if entry > 0 and close_px > 0 and sz > 0:
+            sign = 1 if is_long else -1
+            pos['realized_pnl'] = round(sign * (close_px - entry) * sz, 4)
+        else:
+            pos['realized_pnl'] = 0.0
     archive_position(pos)
     state['history'].append(pos)
     # Cap in-memory list
