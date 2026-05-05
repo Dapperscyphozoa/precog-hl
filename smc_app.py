@@ -144,6 +144,48 @@ def _boot():
 
     log.info("SMC v1.0 boot complete")
 
+    # 6. Background dashboard pusher (non-blocking, errors swallowed)
+    try:
+        import threading, time as _t
+        from dashboard_push import push_state as _dash_push
+
+        def _dash_loop():
+            while True:
+                try:
+                    positions_for_push = {}
+                    for coin, p in (smc_state.state.positions or {}).items():
+                        is_long = (p.get('side') == 'BUY' or p.get('side') == 'LONG')
+                        positions_for_push[coin] = {
+                            'is_long': is_long,
+                            'entry':   p.get('fill_price') or p.get('ob_top') or 0,
+                            'sl':      p.get('sl_current') or p.get('sl_orig') or p.get('sl_price') or 0,
+                            'tp1':     p.get('tp1') or 0,
+                            'tp2':     p.get('tp2') or 0,
+                            'size':    p.get('fill_size') or p.get('size') or 0,
+                            'fired_t': p.get('opened_t') or 0,
+                        }
+                    _dash_push(
+                        engine_name='smc-v1',
+                        live=(os.environ.get('SMC_LIVE', '0') == '1'),
+                        sizing_mode='fixed',
+                        notional_usd=float(os.environ.get('SMC_NOTIONAL_USD', '25')),
+                        max_concurrent=int(os.environ.get('SMC_MAX_CONCURRENT', '20')),
+                        positions_dict=positions_for_push,
+                        history_list=[],   # smc-v1 doesn't track history in state
+                        scan_count=0,
+                        last_scan_ts=int(_t.time()*1000),
+                    )
+                except Exception as e:
+                    log.warning(f'dashboard push err: {e}')
+                _t.sleep(30)
+
+        threading.Thread(target=_dash_loop, daemon=True, name='dashboard_push').start()
+        log.info('dashboard pusher started (30s interval)')
+    except ImportError:
+        log.warning('dashboard_push module not present; skipping dashboard integration')
+    except Exception as e:
+        log.exception(f'dashboard pusher init failed: {e}')
+
 
 @app.before_request
 def _before():
