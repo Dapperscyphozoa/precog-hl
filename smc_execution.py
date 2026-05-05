@@ -110,6 +110,17 @@ def submit_smc_trade(payload: dict, ctx: dict):
     sl_px = round_price(coin, float(payload['sl_price']))
     tp_px = round_price(coin, float(payload['tp2']))
 
+    # Fix 1: floor SL distance at MIN_SL_PCT (default 0.5%). Webhook
+    # signals occasionally arrive with sl_price within 0.1-0.3% of ob_top
+    # which causes BE-flushes on noise. Widen to floor when too tight.
+    _MIN_SL_PCT = float(os.environ.get('SMCV1_MIN_SL_PCT', '0.005'))
+    _gap = abs(ob_top - sl_px) / ob_top if ob_top else 0
+    if _gap < _MIN_SL_PCT:
+        is_buy_for_floor = sl_px < ob_top  # SMC-v1 is long-only, but be defensive
+        new_sl = ob_top * (1 - _MIN_SL_PCT) if is_buy_for_floor else ob_top * (1 + _MIN_SL_PCT)
+        log.info(f"{coin} smc-v1 SL floored: webhook sl={sl_px} (gap={_gap*100:.3f}%) → {new_sl:.8f} ({_MIN_SL_PCT*100:.1f}%)")
+        sl_px = round_price(coin, new_sl)
+
     raw_size = notional / ob_top
     size = round_size(coin, raw_size)
 
