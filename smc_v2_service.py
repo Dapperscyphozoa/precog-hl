@@ -1907,6 +1907,117 @@ def reconcile_positions(state):
     save_state(state)
 
 
+
+def reconcile_phantoms(state):
+    """Detect & purge phantom positions: state thinks we have a trade open
+    but HL has no matching position OR pending order.
+
+    Causes:
+      - External cancellation of pending limit (e.g. operator cleanup)
+      - Engine missed the close fill (network glitch during reconcile)
+      - HL liquidation (should be rare, but possible)
+      - State file resurrected from before bulk_cancel
+
+    Action:
+      - For pending_fill phase with no entry-cloid in HL open orders → mark done as 'phantom_pending'
+      - For live phase with no actual HL position → mark done as 'phantom_closed'
+        (we missed the close; PnL unknown, mark zero realized)
+      - Cancel any orphaned reduce-only triggers we own for the phantom
+
+    Runs less frequently than reconcile_positions (every PHANTOM_CHECK_SEC).
+    """
+    if not state.get('positions'):
+        return 0
+
+    try:
+        us = info.user_state(WALLET)
+        oo = info.frontend_open_orders(WALLET)
+    except Exception as e:
+        log(f'reconcile_phantoms: HL fetch err: {e}')
+        return 0
+
+    # Build sets of what HL actually shows
+    hl_open_coins = set()
+    for ap in (us or {}).get('assetPositions', []):
+        pos = ap.get('position', {})
+        if abs(float(pos.get('szi', 0) or 0)) > 0:
+            hl_open_coins.add(pos.get('coin'))
+
+    hl_open_cloids = set()
+    hl_orders_by_coin = {}
+    for o in oo or []:
+        cl = o.get('cloid')
+        if cl:
+            hl_open_cloids.add(cl)
+        hl_orders_by_coin.setdefault(o.get('coin'), []).append(o)
+
+    purged = 0
+    to_remove = []
+    for coin, pos in list(state['positions'].items()):
+        if pos.get('phase') == 'done':
+            continue
+
+        # Only check positions older than 60s — avoid race with fresh fires
+        fired_t_ms = pos.get('fired_t', 0)
+        if fired_t_ms and (time.time()*1000 - fired_t_ms) < 60_000:
+            continue
+
+        is_phantom = False
+        reason = ''
+
+        if pos.get('phase') == 'pending_fill':
+            # Should have an entry cloid resting on HL open orders
+            entry_cloid = pos.get('cloid_entry')
+            if entry_cloid and entry_cloid not in hl_open_cloids:
+                # Entry order isn't on HL anymore. Check if any partial fill happened
+                if pos.get('entry_filled_sz', 0) > 0:
+                    # Partial fill: there's a real on-chain position. Don't phantom-cleanup.
+                    continue
+                # No partial, no resting order = phantom
+                is_phantom = True
+                reason = 'phantom_pending'
+
+        elif pos.get('phase') in ('live', 'tp1_filled'):
+            # Should have a non-zero HL position on this coin
+            if coin not in hl_open_coins:
+                # Engine thinks we're in a live trade but HL shows nothing.
+                # We missed a close fill (will reappear in fill history later if so).
+                # Mark phantom_closed so it doesn't blockbreak risk gates / scan.
+                is_phantom = True
+                reason = 'phantom_closed'
+
+        if is_phantom:
+            log(f'  phantom detected: {coin} phase={pos.get("phase")} → {reason}')
+            # Cancel any orphaned reduce-only triggers we own for this coin
+            for o in hl_orders_by_coin.get(coin, []):
+                cl = o.get('cloid')
+                if cl and cl in (pos.get('cloid_sl'), pos.get('cloid_tp1'),
+                                 pos.get('cloid_tp2'), pos.get('cloid_close'),
+                                 pos.get('cloid_entry')):
+                    try:
+                        cancel_order(coin, cl)
+                        log(f'    cancelled orphaned trigger {cl[:16]}')
+                    except Exception as _e:
+                        log(f'    cancel orphaned err: {_e}')
+
+            pos['phase'] = 'done'
+            pos['close_reason'] = reason
+            pos['closed_t'] = int(time.time() * 1000)
+            pos['close_px'] = pos.get('actual_entry_px') or pos.get('entry') or 0
+            append_history(state, pos)
+            to_remove.append(coin)
+            purged += 1
+
+    for coin in to_remove:
+        del state['positions'][coin]
+
+    if purged:
+        log(f'reconcile_phantoms: purged {purged} phantom position(s)')
+        save_state(state)
+
+    return purged
+
+
 # ═══════════════════════════════════════════════════════
 # SCAN LOOP
 # ═══════════════════════════════════════════════════════
@@ -2163,6 +2274,8 @@ def main():
     # (hung network call, deadlock, infinite loop) is visible to operator.
     last_heartbeat = time.time()
     HEARTBEAT_INTERVAL_SEC = 30 * 60
+    PHANTOM_CHECK_SEC = 5 * 60   # check for phantoms every 5 minutes
+    last_phantom_check = 0
 
     while True:
         try:
@@ -2171,6 +2284,14 @@ def main():
             if now - last_reconcile >= POSITION_CHECK_SEC:
                 reconcile_positions(state)
                 last_reconcile = now
+
+            # Phantom cleanup every PHANTOM_CHECK_SEC (less frequent — HL roundtrip)
+            if now - last_phantom_check >= PHANTOM_CHECK_SEC:
+                try:
+                    reconcile_phantoms(state)
+                except Exception as _pe:
+                    log(f"reconcile_phantoms err: {_pe}")
+                last_phantom_check = now
 
             # Scan once per 15m bar close, in a 90s window after each boundary.
             # Wider window than before (60s) to survive main-loop drift after
