@@ -167,3 +167,43 @@ def push_state(engine_name, live, sizing_mode, notional_usd, max_concurrent,
     except Exception:
         # No-op on any internal serialization error
         pass
+
+
+def start_heartbeat(engine_name, state_getter, config_getter, interval_sec=60,
+                    log_fn=None):
+    """Start a daemon thread that pushes a fresh state snapshot every N seconds.
+
+    Use this in worker engines whose save_state() fires only on scan cycles
+    (which can take 10-20 min on slow scans), so the dashboard 5-min staleness
+    threshold isn't tripped.
+
+    Args:
+        engine_name:    'multi-gate' / 'smc-v1' / 'smc-v2' / 'smc-loose' / 'lsr'
+        state_getter:   callable() -> the engine's state dict (with 'positions' and 'history')
+        config_getter:  callable() -> dict with keys: live, sizing_mode, notional_usd, max_concurrent
+        interval_sec:   how often to push (default 60s)
+        log_fn:         optional callable(msg) for log output
+    """
+    def _heartbeat_loop():
+        if log_fn: log_fn(f'[dashboard heartbeat] started (interval={interval_sec}s)')
+        while True:
+            try:
+                state = state_getter() or {}
+                cfg = config_getter() or {}
+                push_state(
+                    engine_name=engine_name,
+                    live=cfg.get('live', False),
+                    sizing_mode=cfg.get('sizing_mode'),
+                    notional_usd=cfg.get('notional_usd'),
+                    max_concurrent=cfg.get('max_concurrent'),
+                    positions_dict=state.get('positions', {}),
+                    history_list=state.get('history', []),
+                    scan_count=state.get('scan_count', 0),
+                    last_scan_ts=state.get('last_scan_ts', 0),
+                )
+            except Exception as e:
+                if log_fn: log_fn(f'[dashboard heartbeat] err: {e}')
+            time.sleep(interval_sec)
+    t = threading.Thread(target=_heartbeat_loop, daemon=True, name=f'dash_hb_{engine_name}')
+    t.start()
+    return t
