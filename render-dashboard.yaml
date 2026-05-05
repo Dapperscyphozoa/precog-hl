@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: dashboard
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: dashboard-svc
+    dockerCommand: python3 dashboard.py
+    healthCheckPath: /healthz
+    disk:
+      name: dashboard-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: HL_ADDRESS
+        value: '0x3eDaD0649Db466E6E7B9a0Caa3E5d6ddc71B5ffE'
+      - key: DASH_PUSH_SECRET
+        sync: false
