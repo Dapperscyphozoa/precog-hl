@@ -1495,15 +1495,66 @@ def reconcile_positions(state):
                 reason_label = 'PENDING TIMEOUT (fire-based)'
 
             if age_from_mss_sec > deadline:
-                log(f'  {coin} {reason_label} ({age_for_log/3600:.1f}h since MSS) — cancelling 4 legs')
-                for cloid_field in ('cloid_entry', 'cloid_sl', 'cloid_tp1', 'cloid_tp2'):
-                    c = pos.get(cloid_field)
+                log(f'  {coin} {reason_label} ({age_for_log/3600:.1f}h since MSS)')
+                # B199: if entry partially filled (below 95% threshold), the
+                # partial position is real and on-chain. Cancelling SL/TP
+                # without closing leaves it unprotected and untracked.
+                #
+                # Strategy: cancel rest of entry (stop more fills), cancel
+                # SL/TP (sizes don't match actual partial), submit IOC close
+                # for the partial size, transition phase='live' with updated
+                # sz so the existing time-stop retry path (180s escalating
+                # slippage, 4 attempts) takes over recovery if the IOC
+                # doesn't fill cleanly. Close-leg fill handler then marks
+                # done.
+                cancel_order(coin, pos.get('cloid_entry'))
+                partial_sz = pos.get('entry_filled_sz', 0.0)
+
+                if partial_sz <= 0:
+                    # No partial — straightforward cancel + done
+                    for cf in ('cloid_sl', 'cloid_tp1', 'cloid_tp2'):
+                        c = pos.get(cf)
+                        if c: cancel_order(coin, c)
+                    pos['phase'] = 'done'
+                    pos['close_reason'] = 'pending_timeout'
+                    pos['closed_t'] = int(time.time()*1000)
+                    append_history(state, pos)
+                    del state['positions'][coin]
+                    continue
+
+                # Partial fill exists. Cancel SL/TP and convert position to
+                # 'live' phase with updated sz so time-stop logic handles it.
+                log(f'  {coin} pending-timeout with partial fill (sz={partial_sz} '
+                    f'of {pos["sz_total"]}); cancelling SL/TP, closing partial via IOC')
+                for cf in ('cloid_sl', 'cloid_tp1', 'cloid_tp2'):
+                    c = pos.get(cf)
                     if c: cancel_order(coin, c)
-                pos['phase'] = 'done'
-                pos['close_reason'] = 'pending_timeout'
-                pos['closed_t'] = int(time.time()*1000)
-                append_history(state, pos)
-                del state['positions'][coin]
+                pos['cloid_sl'] = None
+                pos['cloid_tp1'] = None
+                pos['cloid_tp2'] = None
+                pos['sz_total'] = partial_sz
+                pos['sz_half'] = partial_sz
+                pos['sz_half2'] = 0
+                pos['phase'] = 'live'
+                pos['actual_entry_px'] = pos.get('entry')
+
+                close_cloid = make_cloid(coin, 'mc')
+                res = market_close(coin, pos['is_long'], partial_sz, cloid=close_cloid)
+                if res is None:
+                    log(f'  {coin} pending-timeout close FAILED — partial position '
+                        f'UNPROTECTED on HL. Time-stop retry will re-attempt.')
+                    notify(f'TIMEOUT-FAIL {coin}',
+                           f'Partial position ({partial_sz}) close failed '
+                           f'(no mid). UNPROTECTED on HL. Will retry.',
+                           priority=2)
+                else:
+                    pos['cloid_close'] = close_cloid
+                    pos['time_stop_sent_t'] = int(time.time()*1000)
+                    log(f'  {coin} pending-timeout partial close submitted '
+                        f'(cloid={close_cloid[:14]}...)')
+                    notify(f'TIMEOUT {coin}',
+                           f'Partial entry ({partial_sz}) close IOC submitted',
+                           priority=1)
                 continue
 
         if pos.get('phase') in ('live', 'tp1_filled'):
