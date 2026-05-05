@@ -1995,7 +1995,12 @@ def main():
                        priority=-2)  # B135: ntfy 'min' = truly silent (no vibration)
                 last_heartbeat = now
 
-            time.sleep(TICK_SEC)
+            # B189: sleep for the shorter of TICK_SEC and POSITION_CHECK_SEC.
+            # Without this, TICK_SEC=60 dominates and reconcile fires every 60s
+            # despite POSITION_CHECK_SEC=30 — TP1 fills can sit undetected for
+            # up to 60s, delaying BE-stop placement and exposing the runner to
+            # the original -1R SL during that gap.
+            time.sleep(min(TICK_SEC, POSITION_CHECK_SEC))
         except KeyboardInterrupt:
             log('SIGINT received — exiting cleanly')
             save_state(state)
