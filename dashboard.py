@@ -204,6 +204,14 @@ def api_account():
     with _account_lock:
         return jsonify(_account_cache)
 
+@app.route('/api/alerts')
+def api_alerts():
+    try:
+        from alerts import get_alert_status
+        return jsonify(get_alert_status())
+    except Exception as e:
+        return jsonify({'err': str(e), 'active_count': 0, 'active': []})
+
 @app.route('/')
 def index():
     return Response(_HTML, mimetype='text/html')
@@ -447,6 +455,20 @@ def main():
     lg(f'dashboard starting | port={PORT} | wallet={WALLET[:10]}... | commit={COMMIT}')
     _load_persisted()
     threading.Thread(target=_refresh_account_loop, daemon=True).start()
+    # Alerts daemon — monitors engine staleness, dry mode, equity drops, no-fills
+    try:
+        from alerts import alert_loop
+        def _get_engines():
+            with _lock:
+                return dict(_engine_states)
+        def _get_account():
+            with _account_lock:
+                return dict(_account_cache.get('data') or {})
+        threading.Thread(target=alert_loop, args=(_get_engines, _get_account),
+                         daemon=True, name='alerts').start()
+        lg('alerts daemon thread started')
+    except Exception as e:
+        lg(f'alerts daemon failed to start: {e}')
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 if __name__ == '__main__':
