@@ -57,7 +57,7 @@ BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC',
 # Sizing
 FIXED_NOTIONAL_USD = float(os.environ.get('SMCLOOSE_NOTIONAL_USD', '25'))
 DEFAULT_LEVERAGE = int(os.environ.get('SMCLOOSE_LEVERAGE', '10'))
-MAX_CONCURRENT = int(os.environ.get('SMCLOOSE_MAX_CONCURRENT', '4'))   # only 4 coins
+MAX_CONCURRENT = int(os.environ.get('SMCLOOSE_MAX_CONCURRENT', '15'))   # only 4 coins
 COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCLOOSE_COIN_LOSS_THRESHOLD', '2'))
 COIN_COOLDOWN_HOURS = int(os.environ.get('SMCLOOSE_COIN_COOLDOWN_HOURS', '24'))
 LIVE_TRADING = os.environ.get('SMCLOOSE_LIVE', '0') == '1'
@@ -467,8 +467,16 @@ def round_size(coin, sz):
 
 
 def get_universe():
-    """Return ONLY the whitelist coins that exist in the HL universe and
-    are not delisted. Backtest-validated; no external coins ever scanned."""
+    """Scan full HL perp universe (minus delisted + blacklist).
+
+    2026-05-05: WHITELIST gate REMOVED at operator request. SMC-LOOSE now
+    scans all coins with R-1_max params. The original 4-coin curated set
+    (DYM/AVAX/XLM/BCH) was based on 7-week backtest stable-edge filtering;
+    full universe now lets the engine surface real-time opportunities and
+    we filter post-hoc from live results. Note: backtest universe-wide
+    showed -0.25R total over 30 coins / 7w with R-1_max — track per-coin
+    P&L closely and re-whitelist if edge isn't there live.
+    """
     try:
         m = info.meta()
         coins = []
@@ -476,13 +484,8 @@ def get_universe():
             n = u.get('name')
             if not n: continue
             if u.get('isDelisted'): continue
-            if n not in WHITELIST: continue
-            if n in BLACKLIST: continue   # safety — should never trigger given WHITELIST
+            if n in BLACKLIST: continue
             coins.append(n)
-        # Log any whitelist coin that isn't found on HL (e.g. delisted, name mismatch)
-        missing = WHITELIST - set(coins)
-        if missing:
-            log(f'WARN: whitelist coins not found in HL universe: {sorted(missing)}')
         return coins
     except Exception as e:
         log(f'universe fetch err: {e}')
