@@ -212,6 +212,39 @@ def api_alerts():
     except Exception as e:
         return jsonify({'err': str(e), 'active_count': 0, 'active': []})
 
+@app.route('/api/risk_check', methods=['GET', 'POST'])
+def api_risk_check():
+    """Engine-facing risk gate. Engines query this BEFORE firing a setup.
+
+    GET /api/risk_check?coin=BTC&side=LONG&notional=50&sl_pct=0.005
+    POST /api/risk_check  body: {"coin":"BTC","side":"LONG","notional":50,"sl_pct":0.005}
+
+    Returns: {can_fire: bool, block_reason: str|null, equity, limits, current, projected}
+    """
+    try:
+        from risk_cap import evaluate as risk_eval
+        if request.method == 'POST':
+            body = request.get_json(silent=True) or {}
+        else:
+            body = request.args
+        with _lock:
+            engines_snapshot = dict(_engine_states)
+        with _account_lock:
+            account = dict(_account_cache.get('data') or {})
+        equity = account.get('equity', 0)
+        result = risk_eval(
+            equity=equity,
+            engine_states=engines_snapshot,
+            requested_coin=body.get('coin'),
+            requested_side=body.get('side'),
+            requested_notional=float(body.get('notional') or 0),
+            requested_sl_pct=float(body.get('sl_pct')) if body.get('sl_pct') else None,
+        )
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'err': str(e), 'can_fire': True,  # fail-open by default
+                        'block_reason': 'check_failed'})
+
 @app.route('/')
 def index():
     return Response(_HTML, mimetype='text/html')
