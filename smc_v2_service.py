@@ -467,7 +467,10 @@ def get_universe():
             n = u.get('name')
             if not n: continue
             if u.get('isDelisted'): continue
-            if n in EXCLUDED_MAJORS: continue
+            # 2026-05-05: majors RE-INCLUDED. Operator notes that BTC/ETH/etc.
+            # respect market-maker levels more cleanly than midcaps; SMC setups
+            # work well on them. EXCLUDED_MAJORS retained as a constant for
+            # other code paths but no longer filters here.
             if n in BLACKLIST: continue
             coins.append(n)
         return coins
