@@ -13431,9 +13431,10 @@ if __name__ == '__main__':
                 # Closed history from trade_ledger CSV (last 12h)
                 history = []
                 try:
+                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
                     if _LEDGER_OK and _ledger:
                         rows = _ledger._read_all()
-                        cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat()
+                        cutoff_iso = (_dt.now(_tz.utc) - _td(hours=12)).isoformat()
                         for r in rows:
                             if r.get('event_type') != 'CLOSE': continue
                             ts_iso = r.get('ts') or r.get('timestamp') or ''
@@ -13444,7 +13445,7 @@ if __name__ == '__main__':
                                 pnl = 0
                             # Convert iso timestamp to epoch ms
                             try:
-                                ts_ms = int(datetime.fromisoformat(ts_iso.replace('Z', '+00:00')).timestamp()*1000)
+                                ts_ms = int(_dt.fromisoformat(ts_iso.replace('Z', '+00:00')).timestamp()*1000)
                             except Exception:
                                 ts_ms = 0
                             history.append({
