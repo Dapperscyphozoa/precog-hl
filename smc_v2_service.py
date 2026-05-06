@@ -2104,20 +2104,17 @@ def sweep_stale_orders(state):
             continue
         if coin in hl_open_coins or coin in our_active_coins:
             continue
-        is_reduce_only = bool(o.get('reduceOnly') or o.get('reduce_only'))
+        # ONLY cancel orders whose cloid we explicitly placed.
         cloid = o.get('cloid')
-        is_known = cloid in known_cloids if cloid else False
-        if not (is_reduce_only or is_known):
+        if not cloid or cloid not in known_cloids:
             continue
 
         oid = o.get('oid')
+        is_reduce_only = bool(o.get('reduceOnly') or o.get('reduce_only'))
         try:
-            if cloid:
-                cancel_order(coin, cloid)
-            elif oid:
-                exchange.cancel(coin, oid)
+            cancel_order(coin, cloid)
             cancelled += 1
-            log(f'  sweep_stale: cancelled orphan on {coin} oid={oid} cloid={(cloid or "")[:16]} '
+            log(f'  sweep_stale: cancelled orphan on {coin} oid={oid} cloid={cloid[:16]} '
                 f'side={o.get("side")} reduce_only={is_reduce_only}')
         except Exception as e:
             log(f'  sweep_stale {coin} cancel err: {e}')
