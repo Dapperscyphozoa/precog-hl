@@ -622,6 +622,7 @@ body::after {
     <div class="metric-cell"><div class="metric-val" id="m-risk">4%</div><div class="metric-lbl">Risk Tier</div></div>
 </div>
 
+
 <!-- GRID -->
 <div class="grid">
     <!-- POSITIONS -->
@@ -645,8 +646,8 @@ body::after {
     <!-- ENGINES -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Engine Stack</div>
-            <div class="panel-meta">5 signal · 9 guard · 6 venue · 1 sizing</div>
+            <div class="panel-title">Multi-Gate · Engine Stack</div>
+            <div class="panel-meta">8 signal · 9 guard · 6 venue · 1 sizing</div>
         </div>
 
         <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:4px 0 8px">// SIGNAL ENGINES</div>
@@ -662,6 +663,116 @@ body::after {
         <div class="engine-grid" id="eng-sizing"></div>
     </div>
 </div>
+
+<!-- ═══ SYSTEMS A–F · MOVED UP ═══ -->
+<!-- SYSTEMS A–F — UNIFORM PANELS -->
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
+
+    <!-- SYSTEM A · PRECOG (multi-gate) -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System A · Precog</div>
+            <div class="panel-meta" id="sa-status">—</div>
+        </div>
+        <div class="sys-stats" id="sa-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sa-positions"></div>
+        <div class="sys-section-label">Engine Breakdown</div>
+        <div class="sys-engines" id="sa-engines"></div>
+        <div class="sys-footer" id="sa-footer"></div>
+    </div>
+
+    <!-- SYSTEM C · SMC v1 -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System C · SMC v1</div>
+            <div class="panel-meta" id="sc-status">—</div>
+        </div>
+        <div class="sys-stats" id="sc-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sc-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="sc-engines"></div>
+        <div class="sys-footer" id="sc-footer"></div>
+    </div>
+
+    <!-- SYSTEM D · SMC v2 -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System D · SMC v2</div>
+            <div class="panel-meta" id="sd-status">—</div>
+        </div>
+        <div class="sys-stats" id="sd-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sd-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="sd-engines"></div>
+        <div class="sys-footer" id="sd-footer"></div>
+    </div>
+
+    <!-- SYSTEM E · SMC-LOOSE -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System E · SMC-Loose</div>
+            <div class="panel-meta" id="se-status">—</div>
+        </div>
+        <div class="sys-stats" id="se-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="se-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="se-engines"></div>
+        <div class="sys-footer" id="se-footer"></div>
+    </div>
+
+    <!-- SYSTEM F · LSR -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System F · LSR</div>
+            <div class="panel-meta" id="sf-status">—</div>
+        </div>
+        <div class="sys-stats" id="sf-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sf-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="sf-engines"></div>
+        <div class="sys-footer" id="sf-footer"></div>
+    </div>
+
+    <!-- SYSTEM G · BRK -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System G · BRK</div>
+            <div class="panel-meta" id="sg-status">—</div>
+        </div>
+        <div class="sys-stats" id="sg-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sg-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="sg-engines"></div>
+        <div class="sys-footer" id="sg-footer"></div>
+    </div>
+
+</div>
+
+<style>
+.sys-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 14px; }
+.sys-section-label { font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--blood); opacity: 0.85; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(193, 39, 45, 0.3); }
+.sys-positions { font-size: 11px; max-height: 280px; overflow-y: auto; }
+.sys-engines { font-size: 11px; max-height: 240px; overflow-y: auto; }
+.sys-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10px; opacity: 0.7; letter-spacing: 0.05em; line-height: 1.6; }
+.sys-tbl-head { display: grid; gap: 6px; padding: 5px 0; font-weight: 600; color: var(--blood); border-bottom: 1px solid var(--blood); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
+.sys-tbl-row { display: grid; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,0,0,0.06); font-size: 11px; }
+.sys-tbl-pos { grid-template-columns: 70px 30px 70px 1fr 50px 50px 55px 55px 40px; }
+.sys-tbl-eng { grid-template-columns: 1fr 35px 60px 50px 70px; }
+.sys-empty { opacity: 0.4; font-style: italic; padding: 10px 0; font-size: 11px; }
+.badge-live { color: var(--acid); font-weight: 600; }
+.badge-dry { color: var(--oxide); font-weight: 600; }
+.badge-disabled { color: var(--blood); font-weight: 600; }
+.badge-stale { color: #888; font-weight: 600; }
+.badge-paused { color: var(--blood); font-size: 9px; padding: 1px 5px; border: 1px solid var(--blood); margin-left: 6px; }
+@media (max-width: 1400px) { #systems-grid { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 900px)  { #systems-grid { grid-template-columns: 1fr; } }
+</style>
 
 <!-- SECONDARY GRID -->
 <div class="grid">
@@ -707,56 +818,6 @@ body::after {
     <div id="macro-strip" style="font-size: 11px; letter-spacing: 0.05em; opacity: 0.85;">// macro: loading…</div>
 </div>
 
-<!-- SYSTEMS A + B — UNIFORM PANELS -->
-<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 32px;" id="systems-grid">
-
-    <!-- SYSTEM A · PRECOG -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System A · Precog</div>
-            <div class="panel-meta" id="sa-status">—</div>
-        </div>
-        <div class="sys-stats" id="sa-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sa-positions"></div>
-        <div class="sys-section-label">Engine Breakdown</div>
-        <div class="sys-engines" id="sa-engines"></div>
-        <div class="sys-footer" id="sa-footer"></div>
-    </div>
-
-    <!-- SYSTEM B · CONFLUENCE -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System B · Confluence</div>
-            <div class="panel-meta" id="sb-status">—</div>
-        </div>
-        <div class="sys-stats" id="sb-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sb-positions"></div>
-        <div class="sys-section-label">Engine Breakdown</div>
-        <div class="sys-engines" id="sb-engines"></div>
-        <div class="sys-footer" id="sb-footer"></div>
-    </div>
-
-</div>
-
-<style>
-.sys-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 14px; }
-.sys-section-label { font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--blood); opacity: 0.85; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(193, 39, 45, 0.3); }
-.sys-positions { font-size: 11px; max-height: 280px; overflow-y: auto; }
-.sys-engines { font-size: 11px; max-height: 240px; overflow-y: auto; }
-.sys-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10px; opacity: 0.7; letter-spacing: 0.05em; line-height: 1.6; }
-.sys-tbl-head { display: grid; gap: 6px; padding: 5px 0; font-weight: 600; color: var(--blood); border-bottom: 1px solid var(--blood); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
-.sys-tbl-row { display: grid; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,0,0,0.06); font-size: 11px; }
-.sys-tbl-pos { grid-template-columns: 70px 30px 70px 1fr 50px 50px 55px 55px 40px; }
-.sys-tbl-eng { grid-template-columns: 1fr 35px 60px 50px 70px; }
-.sys-empty { opacity: 0.4; font-style: italic; padding: 10px 0; font-size: 11px; }
-.badge-live { color: var(--acid); font-weight: 600; }
-.badge-dry { color: var(--oxide); font-weight: 600; }
-.badge-disabled { color: var(--blood); font-weight: 600; }
-.badge-paused { color: var(--blood); font-size: 9px; padding: 1px 5px; border: 1px solid var(--blood); margin-left: 6px; }
-@media (max-width: 980px) { #systems-grid { grid-template-columns: 1fr; } }
-</style>
 
 <!-- COIN WR HEATMAP -->
 <div class="panel" style="margin-bottom: 32px;">
@@ -1243,73 +1304,6 @@ async function renderSystemA(d, used) {
     }
 }
 
-async function renderSystemB(d, used) {
-    try {
-        if (!d || d.err) {
-            document.getElementById('sb-status').innerHTML = `<span class="badge-disabled">ERROR</span> ${d?.err||''}`;
-            return;
-        }
-
-        const dryBadge = d.dry_run ? '<span class="badge-dry">DRY-RUN</span>' : '<span class="badge-live">LIVE</span>';
-        const disBadge = d.enabled === false ? ' <span class="badge-disabled">OFF</span>' : '';
-        const open = Object.keys(d.open_positions||{}).length;
-        const cap = d.max_positions || 0;
-        document.getElementById('sb-status').innerHTML = `${dryBadge}${disBadge} · ${used}h window · open ${open}/${cap}`;
-
-        renderStatsGrid('sb-stats', [
-            ...buildStatsFromAggregate(d, true),
-            { val: `${open}/${cap}`, lbl: 'Open' },
-        ]);
-
-        const positions = d.open_positions || {};
-        const sbPositions = Object.keys(positions).sort().map(k => {
-            const p = positions[k] || {};
-            return {
-                coin: k, side: p.side, entry: p.entry,
-                engine: 'CONFLUENCE_' + (p.systems||[]).join('+'),
-                tp_pct: p.tp_pct, sl_pct: p.sl_pct, sl_at_be: p.sl_at_be,
-                mfe_pct: p.mfe_pct, mae_pct: p.mae_pct, ts: p.ts,
-            };
-        });
-        renderPositions('sb-positions', sbPositions);
-
-        const byEng = d.by_engine || {};
-        const engKeys = Object.keys(byEng).sort();
-        const engines = engKeys.map(k => {
-            const v = byEng[k] || {};
-            return {
-                name: k, n: v.n || 0, w: v.w || 0, l: v.l || 0, b: v.b || 0,
-                wr_pct: v.wr_pct, pnl_usd: v.pnl_usd || 0,
-                paused: false,
-            };
-        });
-        renderEngines('sb-engines', engines, {});
-
-        const fires = d.total_fires || 0;
-        const pa = d.place_attempts || 0;
-        const pf = d.place_filled || 0;
-        const pn = d.place_no_fill || 0;
-        const pe = d.place_error || 0;
-        const sigsScan = d.engine_stats?.signals_yielded || 0;
-        const lastSig = d.last_scan_signals || 0;
-        const lastFire = d.last_scan_fires || 0;
-        const killed = (d.killed_coins||[]).length;
-        const rl = d.rejects_last_scan || {};
-        const rejectsList = Object.entries(rl).filter(([,v])=>v>0).map(([k,v])=>`${k}=${v}`);
-        const rejStr = rejectsList.length ? rejectsList.join(' ') : 'none';
-        const ftrLines = [
-            `// fires(cum) ${fires} · filled ${pf}/${pa} · no_fill ${pn} · err ${pe} · sigs/scan ${sigsScan}`,
-            `// last scan: sig ${lastSig} → fire ${lastFire} · rejects: ${rejStr}`,
-        ];
-        if (killed > 0) ftrLines.push(`// <span style="color:#f88">${killed} coins killed</span>`);
-        document.getElementById('sb-footer').innerHTML = ftrLines.join('<br>');
-
-    } catch(e) {
-        console.error('SB render err', e);
-        document.getElementById('sb-status').innerHTML = '<span class="badge-disabled">RENDER FAILED</span>';
-    }
-}
-
 // Coordinated loader: both panels use the SAME window so SA vs SB are
 // comparable apples-to-apples. Pick the smallest window that gives BOTH
 // systems at least one closed trade — fall back through 12h, 24h, 72h, 168h.
@@ -1321,16 +1315,107 @@ async function _probeWindow(endpoint, hrs) {
     } catch (_) { return null; }
 }
 
+async function renderEngineFromDash(panelPrefix, engineKey, dashEntry, used) {
+    /* Render one of the SMC v1 / v2 / loose / LSR panels using dash data,
+       through the same shared pipeline (renderStatsGrid / renderPositions /
+       renderEngines) the SA + SB panels use. */
+    const statusEl = document.getElementById(`${panelPrefix}-status`);
+    if (!dashEntry || !dashEntry.present) {
+        const why = dashEntry && dashEntry.error ? dashEntry.error : 'no_signal';
+        statusEl.innerHTML = `<span class="badge-stale">${why}</span> · ${used}h window`;
+        renderStatsGrid(`${panelPrefix}-stats`, []);
+        renderPositions(`${panelPrefix}-positions`, []);
+        renderEngines(`${panelPrefix}-engines`, []);
+        document.getElementById(`${panelPrefix}-footer`).innerHTML = '';
+        return;
+    }
+
+    const liveBadge = dashEntry.live
+        ? '<span class="badge-live">LIVE</span>'
+        : (dashEntry.stale ? '<span class="badge-stale">STALE</span>' : '<span class="badge-dry">DRY-RUN</span>');
+    const ageStr = dashEntry.age_sec != null
+        ? ` · age ${dashEntry.age_sec < 60 ? dashEntry.age_sec + 's' : Math.floor(dashEntry.age_sec/60) + 'm'}`
+        : '';
+    const openCap = dashEntry.max_concurrent ? ` · open ${dashEntry.positions ?? 0}/${dashEntry.max_concurrent}` : '';
+    statusEl.innerHTML = `${liveBadge} · ${used}h window${ageStr}${openCap}`;
+
+    /* Adapt dash → buildStatsFromAggregate's expected key shape */
+    const adapted = {
+        total_pnl_usd:      dashEntry.pnl_total,
+        wr_pct_window:      dashEntry.wr,
+        wins_window:        dashEntry.wins,
+        losses_window:      dashEntry.losses,
+        breakevens_window:  dashEntry.breakevens,
+        avg_win_usd:        dashEntry.avg_win,
+        avg_loss_usd:       dashEntry.avg_loss,
+        closed_count:       dashEntry.wins + dashEntry.losses + dashEntry.breakevens,
+    };
+    const openCount = (dashEntry.open_positions || []).length;
+    renderStatsGrid(`${panelPrefix}-stats`, [
+        ...buildStatsFromAggregate(adapted, false),
+        { val: openCount, lbl: 'Open' },
+    ]);
+
+    /* Map dash open_positions → renderPositions shape */
+    const positions = (dashEntry.open_positions || []).map(p => {
+        const entry = Number(p.entry || 0);
+        const sl    = Number(p.sl || 0);
+        const tp1   = Number(p.tp1 || 0);
+        const isLong = (p.side || '').toUpperCase() === 'LONG';
+        const tp_pct = (entry > 0 && tp1 > 0)
+            ? (isLong ? (tp1 - entry) / entry : (entry - tp1) / entry) : null;
+        const sl_pct = (entry > 0 && sl > 0)
+            ? (isLong ? (entry - sl) / entry : (sl - entry) / entry) : null;
+        return {
+            coin:    p.coin,
+            side:    p.side,
+            entry:   entry,
+            engine:  engineKey.toUpperCase(),
+            tp_pct:  tp_pct,
+            sl_pct:  sl_pct,
+            mfe_pct: null, mae_pct: null,
+            ts:      p.opened_t ? Math.floor(p.opened_t / 1000) : null,
+            upnl_pct: null,
+        };
+    });
+    renderPositions(`${panelPrefix}-positions`, positions);
+
+    /* "Engine Config" replacement for the engine breakdown table —
+       these single-engine panels don't have sub-engines, so show the
+       engine's own config + telemetry as a compact info block. */
+    const cfgEl = document.getElementById(`${panelPrefix}-engines`);
+    const tele = dashEntry.telemetry || {};
+    cfgEl.innerHTML = `
+        <div style="font-size:11px; line-height:1.7; opacity:0.85;">
+            <div>// sizing: ${dashEntry.sizing_mode || '—'} · $${dashEntry.notional_usd ?? '—'} notional · max ${dashEntry.max_concurrent ?? '—'}</div>
+            <div>// branch: ${dashEntry.branch || engineKey} · direction: ${dashEntry.direction || '—'} · universe: ${dashEntry.universe ?? '—'}</div>
+            <div style="opacity:0.6">// fires ${tele.fires_total ?? 0} · scans ${tele.scan_count ?? 0} · errors ${tele.errors ?? 0}</div>
+        </div>`;
+
+    document.getElementById(`${panelPrefix}-footer`).innerHTML =
+        `// commit ${dashEntry.commit || '—'}`;
+}
+
 async function loadSystems() {
     // Locked 12h window — surfaces post-fix behaviour, excludes pre-fix bug noise.
     const HRS = 12;
-    const [saData, sbData] = await Promise.all([
+    const [saData, allSysResp] = await Promise.all([
         _probeWindow('/precog_status', HRS),
-        _probeWindow('/confluence', HRS),
+        fetch('/all_systems').then(r => r.json()).catch(e => ({err: String(e)})),
     ]);
     await Promise.all([
         renderSystemA(saData, HRS),
-        renderSystemB(sbData, HRS),
+    ]);
+
+    /* Render the 5 dash-fed panels */
+    const sysByKey = {};
+    for (const e of (allSysResp.systems || [])) sysByKey[e.engine_key] = e;
+    await Promise.all([
+        renderEngineFromDash('sc', 'smc-v1',    sysByKey['smc-v1'],    HRS),
+        renderEngineFromDash('sd', 'smc-v2',    sysByKey['smc-v2'],    HRS),
+        renderEngineFromDash('se', 'smc-loose', sysByKey['smc-loose'], HRS),
+        renderEngineFromDash('sf', 'lsr',       sysByKey['lsr'],       HRS),
+        renderEngineFromDash('sg', 'brk',       sysByKey['brk'],       HRS),
     ]);
 }
 
