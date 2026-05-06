@@ -1225,7 +1225,7 @@ function renderEngines(elId, engines, autoPause) {
         return;
     }
     const header = `<div class="sys-tbl-head sys-tbl-eng">
-        <div>ENGINE</div><div>n</div><div>W/L/B</div><div>WR</div><div>$ PnL</div>
+        <div>ENGINE</div><div>n</div><div>W/L</div><div>WR</div><div>$ PnL</div>
     </div>`;
     const rows = engines.map(e => {
         const pnlColor = (e.pnl_usd >= 0) ? 'color:var(--acid)' : 'color:#f88';
@@ -1236,7 +1236,7 @@ function renderEngines(elId, engines, autoPause) {
         return `<div class="sys-tbl-row sys-tbl-eng">
             <div><strong>${shortName}</strong>${pausedFlag}</div>
             <div>${e.n}</div>
-            <div>${e.w||0}/${e.l||0}/${e.b||0}</div>
+            <div>${e.w||0}/${e.l||0}</div>
             <div>${wrStr}</div>
             <div style="${pnlColor}">${pnlStr}</div>
         </div>`;
@@ -1249,7 +1249,6 @@ function buildStatsFromAggregate(d, includeOps) {
     const wrWin = (d.wr_pct_window != null) ? `${d.wr_pct_window.toFixed(1)}%` : '—';
     const wWin = d.wins_window || 0;
     const lWin = d.losses_window || 0;
-    const bWin = d.breakevens_window || 0;
     const closed = d.closed_count || 0;
     const avgW = (d.avg_win_usd != null) ? `+$${Number(d.avg_win_usd).toFixed(3)}` : '—';
     const avgL = (d.avg_loss_usd != null) ? `$${Number(d.avg_loss_usd).toFixed(3)}` : '—';
@@ -1261,7 +1260,7 @@ function buildStatsFromAggregate(d, includeOps) {
     const stats = [
         { val: usdStr, lbl: '$ PnL', color: moneyColor(usdPnl) },
         { val: wrWin, lbl: 'Win Rate' },
-        { val: `${wWin}/${lWin}/${bWin}`, lbl: 'W/L/B' },
+        { val: `${wWin}/${lWin}`, lbl: 'W/L' },
         { val: avgW, lbl: 'Avg Win', color: 'color:var(--acid)' },
         { val: avgL, lbl: 'Avg Loss', color: 'color:#f88' },
         { val: rr, lbl: 'R:R', color: rrColor },
@@ -1373,10 +1372,9 @@ async function renderEngineFromDash(panelPrefix, engineKey, dashEntry, used) {
         wr_pct_window:      dashEntry.wr,
         wins_window:        dashEntry.wins,
         losses_window:      dashEntry.losses,
-        breakevens_window:  dashEntry.breakevens,
         avg_win_usd:        dashEntry.avg_win,
         avg_loss_usd:       dashEntry.avg_loss,
-        closed_count:       dashEntry.wins + dashEntry.losses + dashEntry.breakevens,
+        closed_count:       dashEntry.wins + dashEntry.losses,
     };
     const openCount = (dashEntry.open_positions || []).length;
     renderStatsGrid(`${panelPrefix}-stats`, [
