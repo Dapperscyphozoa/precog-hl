@@ -73,14 +73,28 @@ def _compute_stats_12h(history_list):
             elif cr:                                                outcome = cr.upper()
 
         pnl_total += pnl
-        if outcome.startswith('TP') or pnl > 0.001: wins.append(pnl)
-        elif outcome.startswith('SL') or pnl < -0.001: losses.append(pnl)
-        else: bes.append(pnl)
+        # Classification rule (no breakeven category):
+        #   - TP1/TP2 hits = WIN
+        #   - BE stop = WIN (TP1 already paid 50%, runner exited at entry — net positive)
+        #   - SL = LOSS
+        #   - TIMEOUT / PHANTOM_LIVE / pnl≈0 = NOT A TRADE (entry never filled or reconciled away)
+        #     These are excluded from W/L counts entirely.
+        if outcome.startswith('TP') or outcome == 'BE':
+            wins.append(pnl)
+        elif outcome.startswith('SL'):
+            losses.append(pnl)
+        elif outcome in ('TIMEOUT', 'PHANTOM_LIVE'):
+            pass  # not a real trade — exclude from counts
+        elif pnl > 0.001:
+            wins.append(pnl)
+        elif pnl < -0.001:
+            losses.append(pnl)
+        # else: pnl≈0 with no clear outcome label → excluded
     wr = (len(wins) / max(1, len(wins)+len(losses))) * 100 if (wins or losses) else None
     avg_win = (sum(wins)/len(wins)) if wins else 0.0
     avg_loss = (sum(losses)/len(losses)) if losses else 0.0
     rr_blended = (avg_win / abs(avg_loss)) if (avg_win > 0 and avg_loss < 0) else None
-    return {'wins': len(wins), 'losses': len(losses), 'breakevens': len(bes),
+    return {'wins': len(wins), 'losses': len(losses), 'breakevens': 0,
             'pnl_total': round(pnl_total, 4),
             'avg_win': round(avg_win, 4), 'avg_loss': round(avg_loss, 4),
             'wr': round(wr, 2) if wr is not None else None,
