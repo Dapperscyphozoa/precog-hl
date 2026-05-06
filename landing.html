@@ -682,20 +682,6 @@ body::after {
         <div class="sys-footer" id="sa-footer"></div>
     </div>
 
-    <!-- SYSTEM B · CONFLUENCE -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System B · Confluence</div>
-            <div class="panel-meta" id="sb-status">—</div>
-        </div>
-        <div class="sys-stats" id="sb-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sb-positions"></div>
-        <div class="sys-section-label">Engine Breakdown</div>
-        <div class="sys-engines" id="sb-engines"></div>
-        <div class="sys-footer" id="sb-footer"></div>
-    </div>
-
     <!-- SYSTEM C · SMC v1 -->
     <div class="panel">
         <div class="panel-head">
@@ -1318,73 +1304,6 @@ async function renderSystemA(d, used) {
     }
 }
 
-async function renderSystemB(d, used) {
-    try {
-        if (!d || d.err) {
-            document.getElementById('sb-status').innerHTML = `<span class="badge-disabled">ERROR</span> ${d?.err||''}`;
-            return;
-        }
-
-        const dryBadge = d.dry_run ? '<span class="badge-dry">DRY-RUN</span>' : '<span class="badge-live">LIVE</span>';
-        const disBadge = d.enabled === false ? ' <span class="badge-disabled">OFF</span>' : '';
-        const open = Object.keys(d.open_positions||{}).length;
-        const cap = d.max_positions || 0;
-        document.getElementById('sb-status').innerHTML = `${dryBadge}${disBadge} · ${used}h window · open ${open}/${cap}`;
-
-        renderStatsGrid('sb-stats', [
-            ...buildStatsFromAggregate(d, true),
-            { val: `${open}/${cap}`, lbl: 'Open' },
-        ]);
-
-        const positions = d.open_positions || {};
-        const sbPositions = Object.keys(positions).sort().map(k => {
-            const p = positions[k] || {};
-            return {
-                coin: k, side: p.side, entry: p.entry,
-                engine: 'CONFLUENCE_' + (p.systems||[]).join('+'),
-                tp_pct: p.tp_pct, sl_pct: p.sl_pct, sl_at_be: p.sl_at_be,
-                mfe_pct: p.mfe_pct, mae_pct: p.mae_pct, ts: p.ts,
-            };
-        });
-        renderPositions('sb-positions', sbPositions);
-
-        const byEng = d.by_engine || {};
-        const engKeys = Object.keys(byEng).sort();
-        const engines = engKeys.map(k => {
-            const v = byEng[k] || {};
-            return {
-                name: k, n: v.n || 0, w: v.w || 0, l: v.l || 0, b: v.b || 0,
-                wr_pct: v.wr_pct, pnl_usd: v.pnl_usd || 0,
-                paused: false,
-            };
-        });
-        renderEngines('sb-engines', engines, {});
-
-        const fires = d.total_fires || 0;
-        const pa = d.place_attempts || 0;
-        const pf = d.place_filled || 0;
-        const pn = d.place_no_fill || 0;
-        const pe = d.place_error || 0;
-        const sigsScan = d.engine_stats?.signals_yielded || 0;
-        const lastSig = d.last_scan_signals || 0;
-        const lastFire = d.last_scan_fires || 0;
-        const killed = (d.killed_coins||[]).length;
-        const rl = d.rejects_last_scan || {};
-        const rejectsList = Object.entries(rl).filter(([,v])=>v>0).map(([k,v])=>`${k}=${v}`);
-        const rejStr = rejectsList.length ? rejectsList.join(' ') : 'none';
-        const ftrLines = [
-            `// fires(cum) ${fires} · filled ${pf}/${pa} · no_fill ${pn} · err ${pe} · sigs/scan ${sigsScan}`,
-            `// last scan: sig ${lastSig} → fire ${lastFire} · rejects: ${rejStr}`,
-        ];
-        if (killed > 0) ftrLines.push(`// <span style="color:#f88">${killed} coins killed</span>`);
-        document.getElementById('sb-footer').innerHTML = ftrLines.join('<br>');
-
-    } catch(e) {
-        console.error('SB render err', e);
-        document.getElementById('sb-status').innerHTML = '<span class="badge-disabled">RENDER FAILED</span>';
-    }
-}
-
 // Coordinated loader: both panels use the SAME window so SA vs SB are
 // comparable apples-to-apples. Pick the smallest window that gives BOTH
 // systems at least one closed trade — fall back through 12h, 24h, 72h, 168h.
@@ -1480,14 +1399,12 @@ async function renderEngineFromDash(panelPrefix, engineKey, dashEntry, used) {
 async function loadSystems() {
     // Locked 12h window — surfaces post-fix behaviour, excludes pre-fix bug noise.
     const HRS = 12;
-    const [saData, sbData, allSysResp] = await Promise.all([
+    const [saData, allSysResp] = await Promise.all([
         _probeWindow('/precog_status', HRS),
-        _probeWindow('/confluence', HRS),
         fetch('/all_systems').then(r => r.json()).catch(e => ({err: String(e)})),
     ]);
     await Promise.all([
         renderSystemA(saData, HRS),
-        renderSystemB(sbData, HRS),
     ]);
 
     /* Render the 5 dash-fed panels */
