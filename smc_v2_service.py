@@ -1144,15 +1144,15 @@ def fire_setup(coin, setup, state):
 
     if EXIT_POLICY == 'tp1_full':
         orders = [
-            {{'coin': coin, 'is_buy': is_long, 'sz': sz_total, 'limit_px': entry,
-             'order_type': {{'limit': {{'tif': 'Gtc'}}}},
-             'reduce_only': False, 'cloid': _wrap_cloid(cloid_entry)}},
-            {{'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': sl,
-             'order_type': {{'trigger': {{'triggerPx': sl, 'isMarket': True, 'tpsl': 'sl'}}}},
-             'reduce_only': True, 'cloid': _wrap_cloid(cloid_sl)}},
-            {{'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': tp1,
-             'order_type': {{'trigger': {{'triggerPx': tp1, 'isMarket': True, 'tpsl': 'tp'}}}},
-             'reduce_only': True, 'cloid': _wrap_cloid(cloid_tp1)}},
+            {'coin': coin, 'is_buy': is_long, 'sz': sz_total, 'limit_px': entry,
+             'order_type': {'limit': {'tif': 'Gtc'}},
+             'reduce_only': False, 'cloid': _wrap_cloid(cloid_entry)},
+            {'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': sl,
+             'order_type': {'trigger': {'triggerPx': sl, 'isMarket': True, 'tpsl': 'sl'}},
+             'reduce_only': True, 'cloid': _wrap_cloid(cloid_sl)},
+            {'coin': coin, 'is_buy': close_dir, 'sz': sz_total, 'limit_px': tp1,
+             'order_type': {'trigger': {'triggerPx': tp1, 'isMarket': True, 'tpsl': 'tp'}},
+             'reduce_only': True, 'cloid': _wrap_cloid(cloid_tp1)},
         ]
     else:
         orders = [
@@ -2059,6 +2059,75 @@ def reconcile_phantoms(state):
 _coin_data_cache = {}  # {coin: {'4h': [...], '1h': [...], '15m': [...], 'fetched': ts}}
 
 
+def sweep_stale_orders(state):
+    """Cancel any reduce-only orders on HL for coins where we have no position
+    AND the order's cloid was placed by us. Catches the gap where:
+      - cancel_orphan_legs() failed silently (network blip during reconcile)
+      - phantom cleanup ran but didn't see the orphaned orders (cloid not in pos)
+      - position was archived to history but stale legs remained on HL
+
+    This is the safety net. Every reconcile cycle, walk all HL open orders.
+    For any reduce_only trigger on a coin where (a) state['positions'] has no
+    entry AND (b) HL shows zero position, cancel it by oid.
+
+    Returns count of cancelled orders.
+    """
+    try:
+        us = info.user_state(WALLET)
+        oo = info.frontend_open_orders(WALLET)
+    except Exception as e:
+        log(f'sweep_stale_orders: HL fetch err: {e}')
+        return 0
+
+    hl_open_coins = set()
+    for ap in (us or {}).get('assetPositions', []):
+        pos = ap.get('position', {})
+        if abs(float(pos.get('szi', 0) or 0)) > 0:
+            hl_open_coins.add(pos.get('coin'))
+
+    our_active_coins = set(state.get('positions', {}).keys())
+
+    known_cloids = set()
+    for pos in state.get('positions', {}).values():
+        for k in ('cloid_entry', 'cloid_sl', 'cloid_tp1', 'cloid_tp2', 'cloid_close'):
+            if pos.get(k):
+                known_cloids.add(pos[k])
+    for h in (state.get('history', []) or [])[-200:]:
+        for k in ('cloid_entry', 'cloid_sl', 'cloid_tp1', 'cloid_tp2', 'cloid_close'):
+            if h.get(k):
+                known_cloids.add(h[k])
+
+    cancelled = 0
+    for o in oo or []:
+        coin = o.get('coin')
+        if not coin:
+            continue
+        if coin in hl_open_coins or coin in our_active_coins:
+            continue
+        is_reduce_only = bool(o.get('reduceOnly') or o.get('reduce_only'))
+        cloid = o.get('cloid')
+        is_known = cloid in known_cloids if cloid else False
+        if not (is_reduce_only or is_known):
+            continue
+
+        oid = o.get('oid')
+        try:
+            if cloid:
+                cancel_order(coin, cloid)
+            elif oid:
+                exchange.cancel(coin, oid)
+            cancelled += 1
+            log(f'  sweep_stale: cancelled orphan on {coin} oid={oid} cloid={(cloid or "")[:16]} '
+                f'side={o.get("side")} reduce_only={is_reduce_only}')
+        except Exception as e:
+            log(f'  sweep_stale {coin} cancel err: {e}')
+
+    if cancelled:
+        log(f'sweep_stale_orders: cancelled {cancelled} orphan order(s)')
+    return cancelled
+
+
+
 def scan_for_setups(state, reconcile_fn=None):
     """Run engine across the universe; fire any new setups.
     If reconcile_fn provided, called every N coins to keep TP1/SL fills
@@ -2326,6 +2395,10 @@ def main():
                     reconcile_phantoms(state)
                 except Exception as _pe:
                     log(f"reconcile_phantoms err: {_pe}")
+                try:
+                    sweep_stale_orders(state)
+                except Exception as _se:
+                    log(f"sweep_stale_orders err: {_se}")
                 last_phantom_check = now
 
             # Scan once per 15m bar close, in a 90s window after each boundary.
