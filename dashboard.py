@@ -33,7 +33,7 @@ STATE_PATH    = os.environ.get('DASH_STATE_PATH', '/var/data/dashboard_state.jso
 COMMIT        = os.environ.get('RENDER_GIT_COMMIT', 'dev')[:7]
 
 # Engines we expect (defines panel order on the UI)
-ENGINES = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr', 'brk']
+ENGINES = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr', 'brk', 'pool-arch-rev', 'pool-arch-cont']
 
 # ────────────────────────────────────────────────────────────────
 # State cache (thread-safe)
@@ -369,7 +369,10 @@ const ENGINES_LABELS = {
   'smc-v1':     'SMC v1  ·  long-only',
   'smc-v2':     'SMC v2  ·  R3 strict',
   'smc-loose':  'SMC-LOOSE  ·  R-1_max',
-  'lsr':        'LSR  ·  liquidity sweep reversal'
+  'lsr':        'LSR  ·  liquidity sweep reversal',
+  'brk':        'BRK  ·  break+retest continuation',
+  'pool-arch-rev':  'POOL-ARCH (REV)  ·  UZT reversal leg',
+  'pool-arch-cont': 'POOL-ARCH (CONT) ·  UZT continuation leg'
 };
 
 function fmtUsd(n, opts={}) {
