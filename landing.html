@@ -752,6 +752,34 @@ body::after {
         <div class="sys-footer" id="sg-footer"></div>
     </div>
 
+    <!-- SYSTEM H · POOL-ARCHITECT REVERSAL -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System H · Pool-Arch (REV)</div>
+            <div class="panel-meta" id="sh-status">—</div>
+        </div>
+        <div class="sys-stats" id="sh-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="sh-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="sh-engines"></div>
+        <div class="sys-footer" id="sh-footer"></div>
+    </div>
+
+    <!-- SYSTEM I · POOL-ARCHITECT CONTINUATION -->
+    <div class="panel">
+        <div class="panel-head">
+            <div class="panel-title">System I · Pool-Arch (CONT)</div>
+            <div class="panel-meta" id="si-status">—</div>
+        </div>
+        <div class="sys-stats" id="si-stats"></div>
+        <div class="sys-section-label">Open Positions</div>
+        <div class="sys-positions" id="si-positions"></div>
+        <div class="sys-section-label">Engine Config</div>
+        <div class="sys-engines" id="si-engines"></div>
+        <div class="sys-footer" id="si-footer"></div>
+    </div>
+
 </div>
 
 <style>
@@ -1416,6 +1444,8 @@ async function loadSystems() {
         renderEngineFromDash('se', 'smc-loose', sysByKey['smc-loose'], HRS),
         renderEngineFromDash('sf', 'lsr',       sysByKey['lsr'],       HRS),
         renderEngineFromDash('sg', 'brk',       sysByKey['brk'],       HRS),
+        renderEngineFromDash('sh', 'pool-arch-rev',  sysByKey['pool-arch-rev'],  HRS),
+        renderEngineFromDash('si', 'pool-arch-cont', sysByKey['pool-arch-cont'], HRS),
     ]);
 }
 

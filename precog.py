@@ -2758,8 +2758,14 @@ def all_systems():
         'brk':        {'label': 'BRK',         'branch': 'brk-engine',   'direction': 'L+S',
                        'universe': 173,   'desc': 'OB break+retest continuation — BT 60% WR PF 2.13',
                        'url': ''},
+        'pool-arch-rev':  {'label': 'POOL-ARCH (REV)', 'branch': 'uzt-unified', 'direction': 'L+S',
+                       'universe': 173,   'desc': 'Pool Architect — REVERSAL leg. UZT bridge, htf_displace=0.8',
+                       'url': ''},
+        'pool-arch-cont': {'label': 'POOL-ARCH (CONT)', 'branch': 'uzt-unified', 'direction': 'L+S',
+                       'universe': 173,   'desc': 'Pool Architect — CONTINUATION leg. BT +1,328R / 156 coins / 50d',
+                       'url': ''},
     }
-    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr', 'brk']
+    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr', 'brk', 'pool-arch-rev', 'pool-arch-cont']
 
     # Pull dash state (single round-trip)
     dash_state = None
