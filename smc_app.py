@@ -790,15 +790,29 @@ def _aggregate_smc_window(hours: int = 12):
         try: return float(v)
         except (ValueError, TypeError): return dflt
 
-    wins = [c for c in closes if _f(c.get('pnl_r')) > 0]
-    losses = [c for c in closes if _f(c.get('pnl_r')) < 0]
-    breakevens = [c for c in closes if _f(c.get('pnl_r')) == 0]
+    # Classify: positive PnL = win. CLOSED_BE event with non-negative PnL = win
+    # (BE move only triggers after price moved in favor enough to lock breakeven —
+    # that's a positive trade outcome even when exit lands at exact entry).
+    # Negative PnL = loss. Only true zero-PnL non-BE events are real breakevens.
+    def _is_win(c):
+        pnl = _f(c.get('pnl_usd'))
+        if pnl > 0:
+            return True
+        if c.get('event') == 'CLOSED_BE' and pnl >= 0:
+            return True
+        return False
+    wins = [c for c in closes if _is_win(c)]
+    losses = [c for c in closes if not _is_win(c) and _f(c.get('pnl_usd')) < 0]
+    breakevens = [c for c in closes if not _is_win(c) and _f(c.get('pnl_usd')) == 0]
 
     total_pnl = sum(_f(c.get('pnl_usd')) for c in closes)
     avg_win = (sum(_f(c.get('pnl_usd')) for c in wins) / len(wins)) if wins else 0.0
     avg_loss = (sum(_f(c.get('pnl_usd')) for c in losses) / len(losses)) if losses else 0.0
     closed_count = len(closes)
-    wr_pct = (len(wins) / closed_count * 100) if closed_count else 0.0
+    # WR over decided trades only (W+L). True breakevens excluded entirely
+    # so they neither help nor hurt the rate.
+    decided = len(wins) + len(losses)
+    wr_pct = (len(wins) / decided * 100) if decided else 0.0
 
     # Per-engine breakdown — for SMC this is just one engine
     by_engine = {
