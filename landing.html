@@ -1327,15 +1327,21 @@ async function renderEngineFromDash(panelPrefix, engineKey, dashEntry, used) {
        through the same shared pipeline (renderStatsGrid / renderPositions /
        renderEngines) the SA + SB panels use. */
     const statusEl = document.getElementById(`${panelPrefix}-status`);
-    if (!dashEntry || !dashEntry.present) {
-        const why = dashEntry && dashEntry.error ? dashEntry.error : 'no_signal';
-        statusEl.innerHTML = `<span class="badge-stale">${why}</span> · ${used}h window`;
-        renderStatsGrid(`${panelPrefix}-stats`, []);
-        renderPositions(`${panelPrefix}-positions`, []);
-        renderEngines(`${panelPrefix}-engines`, []);
-        document.getElementById(`${panelPrefix}-footer`).innerHTML = '';
+    const panelEl = statusEl ? statusEl.closest('.panel') : null;
+
+    // Hide panel entirely when there is genuinely nothing to display:
+    //   - no dash entry / engine not present, OR
+    //   - present but zero open positions AND zero closes in window
+    const noPresence = !dashEntry || !dashEntry.present;
+    const noActivity = dashEntry && dashEntry.present
+        && ((dashEntry.open_positions || []).length === 0)
+        && ((dashEntry.wins || 0) + (dashEntry.losses || 0) === 0);
+    if (noPresence || noActivity) {
+        if (panelEl) panelEl.style.display = 'none';
         return;
     }
+    // Has data — make sure the panel is visible again
+    if (panelEl) panelEl.style.display = '';
 
     const liveBadge = dashEntry.live
         ? '<span class="badge-live">LIVE</span>'
