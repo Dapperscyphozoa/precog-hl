@@ -26,7 +26,8 @@ WALLET           = os.environ.get('HL_ADDRESS') or os.environ.get('HYPERLIQUID_A
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.005'))  # 0.5% risk per trade (conservative for v7)
 LEVERAGE         = int(os.environ.get('LEVERAGE', '5'))
 MAX_POSITIONS    = int(os.environ.get('MAX_POSITIONS', '8'))
-MAX_PENDING      = int(os.environ.get('MAX_PENDING_LIMITS', '16'))  # cap open limit orders
+MAX_PENDING      = int(os.environ.get('MAX_PENDING_LIMITS', '16'))
+MAX_NOTIONAL_PCT = float(os.environ.get('MAX_NOTIONAL_PCT', '0.20'))  # per-trade max notional as fraction of equity  # cap open limit orders
 TICK_INTERVAL_S  = int(os.environ.get('TICK_INTERVAL_S', '900'))
 STATE_FILE       = os.environ.get('STATE_FILE', '/var/data/pole_state_v7.json')
 DEFAULT_COINS    = ('BTC,ETH,SOL,BNB,XRP,ADA,AVAX,DOGE,LINK,DOT,ATOM,NEAR,APT,SUI,'
@@ -103,7 +104,7 @@ def calc_size(balance, risk_pct, entry, sl):
     sl_distance_pct = abs(entry - sl) / entry
     if sl_distance_pct <= 0: return 0, 0
     notional = risk_amount / sl_distance_pct
-    notional = min(notional, balance * LEVERAGE)
+    notional = min(notional, balance * LEVERAGE, balance * MAX_NOTIONAL_PCT * LEVERAGE)
     size = notional / entry
     return size, notional
 
@@ -154,7 +155,25 @@ def get_scanner(coin):
         _scanners[coin] = pole_engine_v7.PoleScannerV7()
     return _scanners[coin]
 
+def cancel_stale_pending(stale_age_s=1800):
+    """Cancel limits older than stale_age_s."""
+    now_ms = int(time.time()*1000)
+    stale = []
+    for pkey, p in list(state['pending'].items()):
+        age_s = (now_ms - p.get('placed_t', now_ms)) / 1000
+        if age_s > stale_age_s:
+            stale.append(pkey)
+    for k in stale:
+        p = state['pending'][k]
+        if p.get('entry_oid'): cancel_order(p['coin'], p['entry_oid'])
+        if p.get('sl_oid'):    cancel_order(p['coin'], p['sl_oid'])
+        if p.get('tp_oid'):    cancel_order(p['coin'], p['tp_oid'])
+        log(f"  STALE-CANCEL: {p['coin']} {p['side']} (age={age_s/60:.0f}min)")
+        del state['pending'][k]
+
+
 def tick():
+    cancel_stale_pending()
     state['tick_count'] += 1
     state['last_tick_t'] = int(time.time()*1000)
     log(f"━━━ TICK #{state['tick_count']} ━━━")
@@ -262,6 +281,7 @@ def main():
     log(f"  LEVERAGE:     {LEVERAGE}")
     log(f"  MAX_POS:      {MAX_POSITIONS}")
     log(f"  MAX_PENDING:  {MAX_PENDING}")
+    log(f"  MAX_NOT_PCT:  {MAX_NOTIONAL_PCT}")
     log(f"  TICK_S:       {TICK_INTERVAL_S}")
     log(f"  WALLET:       {WALLET}")
     load_state()
