@@ -84,16 +84,25 @@ def log(msg):
 
 
 # ─── HL API ────────────────────────────────────────────────────────
-def hl_post(body, timeout=20):
-    try:
-        req = urllib.request.Request(
-            HL_API, data=json.dumps(body).encode(),
-            headers={'Content-Type': 'application/json'},
-        )
-        return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
-    except Exception as e:
-        log(f"hl_post err: {e}")
-        return None
+def hl_post(body, timeout=20, retries=3):
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                HL_API, data=json.dumps(body).encode(),
+                headers={'Content-Type': 'application/json'},
+            )
+            return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < retries - 1:
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                time.sleep(wait)
+                continue
+            log(f"hl_post HTTP {e.code}: {e.reason}")
+            return None
+        except Exception as e:
+            log(f"hl_post err: {e}")
+            return None
+    return None
 
 
 def fetch_candles(coin, interval, days):
@@ -295,17 +304,17 @@ def tick():
 
     # Scan each coin
     candidates = []
-    for coin in COINS:
+    for coin_idx, coin in enumerate(COINS):
         if coin in state['positions']:
             continue
         if coin in ex_pos:
             # already on exchange but not tracked — skip (probably another engine)
             continue
         try:
-            b15 = fetch_candles(coin, '15m', 7)
-            b1h = fetch_candles(coin, '1h', 14)
-            b4h = fetch_candles(coin, '4h', 60)
-            time.sleep(0.05)
+            b15 = fetch_candles(coin, '15m', 3)   # 3 days = ~288 bars, single batch
+            b4h = fetch_candles(coin, '4h', 60)   # 60 days = ~360 bars, single batch
+            b1h = []  # not used (USE_1H_POLES=0 by default)
+            time.sleep(0.25)  # 250ms between coins to avoid rate limits
             if not b15 or len(b15) < 50 or not b4h or len(b4h) < 30:
                 continue
             sig = pole_engine.detect(coin, b15, b1h, b4h)
@@ -313,6 +322,7 @@ def tick():
                 candidates.append((coin, sig))
         except Exception as e:
             log(f"scan {coin} err: {e}")
+            time.sleep(1)
             continue
 
     log(f"Candidates: {len(candidates)} | Available slots: {available_slots} | Engine stats: fires={pole_engine.status()['fires']}")
