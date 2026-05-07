@@ -18,6 +18,7 @@ Isolation: HTTP polling only. No production touched.
 import json, os, sys, time, traceback, urllib.request
 from datetime import datetime, timezone
 from typing import Optional
+from coin_tiers import DepthBaseline, get_tier
 from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
                               cluster_walls, Wall, BounceSetup, BreakoutTrigger)
 
@@ -115,6 +116,7 @@ TRACKER = WallTracker(max_history=30)
 POLE = PoleEngineV9()
 SPOOF = SpoofBreakoutEngine()
 ATR_CACHE = {}
+DEPTH_BASE = DepthBaseline(window=20, multiplier=8.0)
 
 def get_atr(coin):
     c = ATR_CACHE.get(coin)
@@ -314,19 +316,34 @@ def tick():
             if not ob or not ob.get('mid'):
                 time.sleep(COIN_PACE_MS/1000.0); continue
             mid = ob['mid']
-            bid_walls = cluster_walls(ob.get('bids', []), mid, 'bid')
-            ask_walls = cluster_walls(ob.get('asks', []), mid, 'ask')
+            # Per-coin dynamic threshold: max(tier_floor, dynamic_baseline × multiplier)
+            tier_usd, tier_persistence = get_tier(coin)
+            min_usd, min_persistence = DEPTH_BASE.threshold(coin)
+
+            bid_res = cluster_walls(ob.get('bids', []), mid, 'bid', min_usd=min_usd, return_all_buckets=True)
+            ask_res = cluster_walls(ob.get('asks', []), mid, 'ask', min_usd=min_usd, return_all_buckets=True)
+            bid_walls, bid_bucket_usds = bid_res
+            ask_walls, ask_bucket_usds = ask_res
+            # Update depth baseline for this coin
+            DEPTH_BASE.record(coin, bid_bucket_usds + ask_bucket_usds)
+
             # Need last 5m candle for touch detection + trigger evaluation
             last_5m = get_5m_close(coin)
             last_low = last_5m['l'] if last_5m else mid
             last_high = last_5m['h'] if last_5m else mid
             tracked = TRACKER.update(coin, bid_walls + ask_walls, mid, now_ts, last_low, last_high)
 
-            verified_b = [w for w in tracked if w.side=='bid' and w.persistence_polls >= 5 and w.times_tested == 0]
-            verified_a = [w for w in tracked if w.side=='ask' and w.persistence_polls >= 5 and w.times_tested == 0]
+            verified_b = [w for w in tracked if w.side=='bid' and w.persistence_polls >= min_persistence and w.times_tested == 0]
+            verified_a = [w for w in tracked if w.side=='ask' and w.persistence_polls >= min_persistence and w.times_tested == 0]
             nb = min(verified_b, key=lambda w: w.distance_pct, default=None)
             na = min(verified_a, key=lambda w: w.distance_pct, default=None)
-            summary[coin] = {'mid': mid, 'vb': len(verified_b), 'va': len(verified_a), 'nb': nb, 'na': na}
+            summary[coin] = {
+                'mid': mid, 'vb': len(verified_b), 'va': len(verified_a), 'nb': nb, 'na': na,
+                'min_usd': min_usd, 'tier_usd': tier_usd,
+                'all_buckets': len(bid_bucket_usds) + len(ask_bucket_usds),
+                'near_miss_b': len([w for w in tracked if w.side=='bid' and w.persistence_polls >= max(1, min_persistence-1)]),
+                'near_miss_a': len([w for w in tracked if w.side=='ask' and w.persistence_polls >= max(1, min_persistence-1)]),
+            }
 
             atr_v = get_atr(coin)
             if atr_v <= 0:
@@ -335,8 +352,11 @@ def tick():
             # Check breakout triggers FIRST (before generating new ones)
             check_triggers(coin, last_5m)
 
-            # Generate new paired setups
-            bounces, breakouts = POLE.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts)
+            # Generate new paired setups — pass existing armed triggers for cluster dedup
+            existing_armed = [t for t in state['triggers'].values() if t.get('coin') == coin]
+            bounces, breakouts = POLE.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts,
+                                                  min_persistence_polls=min_persistence,
+                                                  existing_armed_triggers=existing_armed)
             for b in bounces: place_bounce(b)
             for bk in breakouts: arm_breakout(bk)
 
@@ -368,7 +388,12 @@ def tick():
     log(f"Wall map: {len(coins_with_zones)} coins with both fresh bid+ask verified walls")
     for c in coins_with_zones[:12]:
         d = summary[c]; nb = d['nb']; na = d['na']
-        log(f"  {c:6s} mid={d['mid']:>11.4f} | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
+        log(f"  {c:6s} mid={d['mid']:>11.4f} thr=${d['min_usd']/1000:.0f}k | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
+    # Near-miss coins: had at least one near-qualifying wall (1 poll short)
+    near_misses = [(c, d) for c, d in summary.items() if c not in coins_with_zones and (d.get('near_miss_b', 0) > 0 or d.get('near_miss_a', 0) > 0)]
+    if near_misses:
+        nm_log = ', '.join(f"{c}(b={d['near_miss_b']}/a={d['near_miss_a']},thr=${d['min_usd']/1000:.0f}k)" for c, d in near_misses[:8])
+        log(f"Near-miss: {nm_log}")
 
     save_state()
 

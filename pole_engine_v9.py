@@ -73,7 +73,10 @@ class BreakoutTrigger:
 def cluster_walls(orders: List[dict], mid: float, side: str,
                    bucket_pct: float = 0.0005,
                    min_usd: float = 500_000,
-                   max_dist_pct: float = 0.025) -> List[Wall]:
+                   max_dist_pct: float = 0.025,
+                   return_all_buckets: bool = False):
+    """If return_all_buckets=True, returns (walls, all_bucket_usd_list).
+    Otherwise returns walls list only."""
     if not orders or mid <= 0: return []
     buckets: Dict[float, dict] = {}
     for o in orders:
@@ -84,12 +87,16 @@ def cluster_walls(orders: List[dict], mid: float, side: str,
         info['low'] = min(info['low'], o['price'])
         info['high'] = max(info['high'], o['price'])
     walls = []
+    all_bucket_usd = []
     for info in buckets.values():
+        all_bucket_usd.append(info['usd'])
         if info['usd'] >= min_usd:
             mid_px = (info['low'] + info['high']) / 2
             dist = abs(mid_px - mid) / mid
             walls.append(Wall(coin='', side=side, price=mid_px, low=info['low'],
                                high=info['high'], usd=info['usd'], distance_pct=dist))
+    if return_all_buckets:
+        return walls, all_bucket_usd
     return walls
 
 
@@ -189,17 +196,33 @@ class PoleEngineV9:
         self.cooldown_s = cooldown_s
         self._fired: Dict[str, float] = {}  # wall_id → fired_t
 
+    def _too_close_to_armed(self, coin: str, side: str, trigger_price: float,
+                              existing_armed: Optional[List[dict]],
+                              dedup_pct: float = 0.005) -> bool:
+        if not existing_armed: return False
+        for t in existing_armed:
+            if t.get('coin') != coin: continue
+            if t.get('side') != side: continue
+            ex_price = t.get('trigger_price', 0)
+            if ex_price <= 0: continue
+            if abs(trigger_price - ex_price) / trigger_price <= dedup_pct:
+                return True
+        return False
+
     def evaluate(self, coin: str, walls: List[Wall], tracker: WallTracker,
                   mid: float, atr_v: float,
-                  now_ts: Optional[float] = None
+                  now_ts: Optional[float] = None,
+                  min_persistence_polls: Optional[int] = None,
+                  existing_armed_triggers: Optional[List[dict]] = None
                   ) -> Tuple[List[BounceSetup], List[BreakoutTrigger]]:
         if now_ts is None: now_ts = time.time()
         if not walls or mid <= 0 or atr_v <= 0: return [], []
 
         # Verified walls only — passed persistence + spoof defense + first-touch
+        min_p = min_persistence_polls if min_persistence_polls is not None else self.min_persistence
         verified = []
         for w in walls:
-            if w.persistence_polls < self.min_persistence: continue
+            if w.persistence_polls < min_p: continue
             if w.times_tested > 0: continue  # FIRST-TOUCH ONLY
             shrink = tracker.shrink_pct(coin, w.side, w.price, mid, window_s=90)
             if shrink is not None and shrink >= self.spoof_filter_shrink: continue
@@ -247,7 +270,8 @@ class PoleEngineV9:
                                         if further_bids else nearest_bid.low * 0.99)  # 1% extension fallback
                         breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
                         breakout_sl = nearest_bid.low * (1 + self.breakout_sl_inside_pct)
-                        if breakout_sl > breakout_trigger > breakout_tp:
+                        if breakout_sl > breakout_trigger > breakout_tp and \
+                           not self._too_close_to_armed(coin, 'SELL', breakout_trigger, existing_armed_triggers):
                             bo_risk = breakout_sl - breakout_trigger
                             bo_reward = breakout_trigger - breakout_tp
                             if bo_risk > 0:
@@ -294,7 +318,8 @@ class PoleEngineV9:
                                         if further_asks else nearest_ask.high * 1.01)
                         breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
                         breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
-                        if breakout_sl < breakout_trigger < breakout_tp:
+                        if breakout_sl < breakout_trigger < breakout_tp and \
+                           not self._too_close_to_armed(coin, 'BUY', breakout_trigger, existing_armed_triggers):
                             bo_risk = breakout_trigger - breakout_sl
                             bo_reward = breakout_tp - breakout_trigger
                             if bo_risk > 0:
@@ -338,6 +363,19 @@ class SpoofBreakoutEngine:
         self.atr_buffer_mult = atr_buffer_mult
         self.cooldown_s = cooldown_s
         self._fired: Dict = {}
+
+    def _too_close_to_armed(self, coin: str, side: str, trigger_price: float,
+                              existing_armed: Optional[List[dict]],
+                              dedup_pct: float = 0.005) -> bool:
+        if not existing_armed: return False
+        for t in existing_armed:
+            if t.get('coin') != coin: continue
+            if t.get('side') != side: continue
+            ex_price = t.get('trigger_price', 0)
+            if ex_price <= 0: continue
+            if abs(trigger_price - ex_price) / trigger_price <= dedup_pct:
+                return True
+        return False
 
     def evaluate(self, coin: str, walls: List[Wall], tracker: WallTracker,
                   mid: float, atr_v: float, now_ts: Optional[float] = None) -> List:
