@@ -73,9 +73,18 @@ def _compute_stats_12h(history_list):
             elif cr:                                                outcome = cr.upper()
 
         pnl_total += pnl
-        if outcome.startswith('TP') or pnl > 0.001: wins.append(pnl)
-        elif outcome.startswith('SL') or pnl < -0.001: losses.append(pnl)
-        else: bes.append(pnl)
+        # Classification: BE-stops only fire after price moved in favor far enough
+        # to lock breakeven — that's a positive trade outcome. Any non-negative
+        # pnl on a BE/TP/timeout exit counts as a win. Only true negative pnl
+        # without a TP tag is a loss; only exact-zero non-BE exits are bes.
+        if outcome.startswith('TP') or pnl > 0:
+            wins.append(pnl)
+        elif outcome == 'BE' and pnl >= 0:
+            wins.append(pnl)
+        elif outcome.startswith('SL') or pnl < 0:
+            losses.append(pnl)
+        else:
+            bes.append(pnl)
     wr = (len(wins) / max(1, len(wins)+len(losses))) * 100 if (wins or losses) else None
     avg_win = (sum(wins)/len(wins)) if wins else 0.0
     avg_loss = (sum(losses)/len(losses)) if losses else 0.0

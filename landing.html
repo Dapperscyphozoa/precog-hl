@@ -724,34 +724,6 @@ body::after {
         <div class="sys-footer" id="se-footer"></div>
     </div>
 
-    <!-- SYSTEM F · LSR -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System F · LSR</div>
-            <div class="panel-meta" id="sf-status">—</div>
-        </div>
-        <div class="sys-stats" id="sf-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sf-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="sf-engines"></div>
-        <div class="sys-footer" id="sf-footer"></div>
-    </div>
-
-    <!-- SYSTEM G · BRK -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System G · BRK</div>
-            <div class="panel-meta" id="sg-status">—</div>
-        </div>
-        <div class="sys-stats" id="sg-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sg-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="sg-engines"></div>
-        <div class="sys-footer" id="sg-footer"></div>
-    </div>
-
     <!-- SYSTEM H · POOL-ARCHITECT REVERSAL -->
     <div class="panel">
         <div class="panel-head">
@@ -876,6 +848,8 @@ async function loadDash() {
         const eq = d.equity || 0;
         // Cache for cross-panel reuse (e.g. confluence panel computes %PnL/equity)
         window.__equity = eq;
+        // Cache full /dash payload so renderSystemA can avoid duplicate fetch
+        window.__dashCache = { ts: Date.now(), data: d };
         const pos = d.positions || [];
         const upnl = pos.reduce((s,p)=>s+(p.upnl||0),0);
 
@@ -1144,8 +1118,7 @@ async function loadEngines() {
     } catch (e) { console.error('engines', e); }
 }
 
-loadEngines();
-setInterval(loadEngines, 5000);
+// loadEngines: scheduler-managed below
 
 // ─── UNIFIED SYSTEMS PANELS (SA + SB) ───────────────────────────────
 // Shared rendering pipeline so both systems show identical layout.
@@ -1284,8 +1257,15 @@ async function renderSystemA(d, used) {
 
         let saPositions = [];
         try {
-            const dr = await fetch('/dash');
-            const dj = await dr.json();
+            // Reuse loadDash cache if fresh (<8s) — avoids duplicate /dash hit per cycle
+            let dj;
+            const cache = window.__dashCache;
+            if (cache && (Date.now() - cache.ts) < 8000) {
+                dj = cache.data;
+            } else {
+                const dr = await fetch('/dash');
+                dj = await dr.json();
+            }
             const all = dj.positions || [];
             saPositions = all.filter(p => !((p.engine||'').startsWith('CONFLUENCE_')))
                              .map(p => ({
@@ -1440,15 +1420,12 @@ async function loadSystems() {
         renderEngineFromDash('sc', 'smc-v1',    sysByKey['smc-v1'],    HRS),
         renderEngineFromDash('sd', 'smc-v2',    sysByKey['smc-v2'],    HRS),
         renderEngineFromDash('se', 'smc-loose', sysByKey['smc-loose'], HRS),
-        renderEngineFromDash('sf', 'lsr',       sysByKey['lsr'],       HRS),
-        renderEngineFromDash('sg', 'brk',       sysByKey['brk'],       HRS),
         renderEngineFromDash('sh', 'pool-arch-rev',  sysByKey['pool-arch-rev'],  HRS),
         renderEngineFromDash('si', 'pool-arch-cont', sysByKey['pool-arch-cont'], HRS),
     ]);
 }
 
-loadSystems();
-setInterval(loadSystems, 10000);
+// loadSystems: scheduler-managed below
 
 async function loadMacroStrip() {
     try {
@@ -1487,17 +1464,47 @@ async function loadMacroStrip() {
     }
 }
 
-loadMacroStrip();
-setInterval(loadMacroStrip, 5000);
+// === COORDINATED POLLING SCHEDULER ===
+// Fixes lag from unstaggered intervals firing in lockstep.
+// - In-flight guard: skip new tick if previous fetch still running
+// - Visibility-aware: pauses fetches when tab hidden
+// - Staggered start offsets: spread load across each cycle
+const _polls = {};
+function poll(name, fn, intervalMs, offsetMs) {
+    _polls[name] = { running: false };
+    const tick = async () => {
+        if (document.hidden) return;
+        if (_polls[name].running) return;
+        _polls[name].running = true;
+        try { await fn(); } catch (e) { console.warn(name + ' err', e); }
+        _polls[name].running = false;
+    };
+    setTimeout(() => { tick(); setInterval(tick, intervalMs); }, offsetMs || 0);
+}
 
-loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); updateClock();
-setInterval(loadDash, 5000);
-setInterval(loadNews, 60000);
-setInterval(loadSignals, 5000);
-setInterval(loadWhales, 5000);
-setInterval(loadHeatmap, 30000);
-setInterval(loadOrderbook, 3000);
-setInterval(updateClock, 1000);
+// Initial paint — immediate but no setInterval bursts at t=0
+loadDash(); loadMacroStrip(); loadEngines();
+
+// Staggered offsets keep concurrent fetches small
+poll('clock',     updateClock,     1000,   0);
+poll('dash',      loadDash,        6000,   100);
+poll('signals',   loadSignals,     8000,   400);
+poll('whales',    loadWhales,      8000,   700);
+poll('orderbook', loadOrderbook,   6000,   1000);   // was 3s — too aggressive
+poll('heatmap',   loadHeatmap,     30000,  1300);
+poll('news',      loadNews,        60000,  1600);
+poll('macro',     loadMacroStrip,  6000,   1900);
+poll('engines',   loadEngines,     8000,   2200);
+poll('systems',   loadSystems,     12000,  2500);
+
+// Refresh immediately when tab becomes visible again
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+        Object.values(_polls).forEach(p => { p.running = false; });
+        loadDash(); loadSignals(); loadWhales();
+        loadMacroStrip(); loadSystems(); loadEngines();
+    }
+});
 </script>
 </body>
 </html>
