@@ -804,6 +804,8 @@ async function loadDash() {
         const eq = d.equity || 0;
         // Cache for cross-panel reuse (e.g. confluence panel computes %PnL/equity)
         window.__equity = eq;
+        // Cache full /dash payload so renderSystemA can avoid duplicate fetch
+        window.__dashCache = { ts: Date.now(), data: d };
         const pos = d.positions || [];
         const upnl = pos.reduce((s,p)=>s+(p.upnl||0),0);
 
@@ -1090,8 +1092,8 @@ async function loadEngines() {
     } catch (e) { console.error('engines', e); }
 }
 
-loadEngines();
-setInterval(loadEngines, 5000);
+// scheduler-managed below
+if (typeof poll === 'undefined') { loadEngines(); setInterval(loadEngines, 8000); }
 
 // ─── UNIFIED SYSTEMS PANELS (SA + SB) ───────────────────────────────
 // Shared rendering pipeline so both systems show identical layout.
@@ -1231,8 +1233,15 @@ async function renderSystemA(d, used) {
 
         let saPositions = [];
         try {
-            const dr = await fetch('/dash');
-            const dj = await dr.json();
+            // Reuse loadDash cache if fresh (<8s) — avoids duplicate /dash hit per cycle
+            let dj;
+            const cache = window.__dashCache;
+            if (cache && (Date.now() - cache.ts) < 8000) {
+                dj = cache.data;
+            } else {
+                const dr = await fetch('/dash');
+                dj = await dr.json();
+            }
             const all = dj.positions || [];
             saPositions = all.filter(p => !((p.engine||'').startsWith('CONFLUENCE_')))
                              .map(p => ({
@@ -1369,8 +1378,7 @@ async function loadSystems() {
     ]);
 }
 
-loadSystems();
-setInterval(loadSystems, 10000);
+loadSystems();   // scheduler-managed below
 
 async function loadMacroStrip() {
     try {
@@ -1409,8 +1417,7 @@ async function loadMacroStrip() {
     }
 }
 
-loadMacroStrip();
-setInterval(loadMacroStrip, 5000);
+loadMacroStrip(); // scheduler-managed below
 
 async function loadPending() {
     try {
@@ -1444,15 +1451,50 @@ async function loadPending() {
     }
 }
 
-loadDash(); loadNews(); loadSignals(); loadWhales(); loadHeatmap(); loadOrderbook(); loadPending(); updateClock();
-setInterval(loadDash, 5000);
-setInterval(loadNews, 60000);
-setInterval(loadSignals, 5000);
-setInterval(loadWhales, 5000);
-setInterval(loadHeatmap, 30000);
-setInterval(loadOrderbook, 3000);
-setInterval(loadPending, 5000);
-setInterval(updateClock, 1000);
+// === COORDINATED POLLING SCHEDULER ===
+// Fixes lag from 11 unstaggered intervals firing in lockstep.
+// - In-flight guard: skip new tick if previous fetch still running
+// - Visibility-aware: pauses fetches when tab hidden
+// - Staggered start offsets: spread initial load + interval drift
+// - AbortController: cancels stale fetches on new tick
+const _polls = {};
+function poll(name, fn, intervalMs, offsetMs) {
+    _polls[name] = { running: false, ctrl: null };
+    const tick = async () => {
+        if (document.hidden) return;
+        if (_polls[name].running) return;        // skip if previous still in-flight
+        _polls[name].running = true;
+        try { await fn(); } catch (e) { console.warn(name + ' err', e); }
+        _polls[name].running = false;
+    };
+    setTimeout(() => { tick(); setInterval(tick, intervalMs); }, offsetMs || 0);
+}
+
+// Initial load — staggered to avoid burst at t=0
+poll('clock',     updateClock,     1000,   0);
+poll('dash',      loadDash,        6000,   100);   // was 5s
+poll('signals',   loadSignals,     8000,   400);   // was 5s
+poll('whales',    loadWhales,      8000,   700);   // was 5s
+poll('pending',   loadPending,     6000,   1000);  // was 5s
+poll('orderbook', loadOrderbook,   6000,   1300);  // was 3s — too aggressive
+poll('heatmap',   loadHeatmap,     30000,  1600);
+poll('news',      loadNews,        60000,  1900);
+
+// Fire once when tab becomes visible again (don't wait for next tick)
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+        Object.values(_polls).forEach(p => { p.running = false; });
+        loadDash(); loadSignals(); loadWhales(); loadPending();
+        if (typeof loadSystems === 'function') loadSystems();
+        if (typeof loadMacroStrip === 'function') loadMacroStrip();
+        if (typeof loadEngines === 'function') loadEngines();
+    }
+});
+
+// Add scheduler entries for systems/macro/engines (defined earlier in script)
+if (typeof loadSystems === 'function')     poll('systems',  loadSystems,     12000, 2200);
+if (typeof loadMacroStrip === 'function')  poll('macro',    loadMacroStrip,  6000,  2500);
+if (typeof loadEngines === 'function')     poll('engines',  loadEngines,     8000,  2800);
 </script>
 </body>
 </html>
