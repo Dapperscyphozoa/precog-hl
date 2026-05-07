@@ -162,7 +162,8 @@ def tick():
     # Wall-engine summary
     venues = orderbook_ws.get_venue_status() if hasattr(orderbook_ws, 'get_venue_status') else {}
     walls_now = sum(len(orderbook_ws.get_walls(c)) for c in COINS)
-    log(f"━━━ TICK #{state['tick_count']} | bal=${state['balance']:.2f} | ex_pos={len(ex_pos)} | pending={len(state['pending'])} | walls_now={walls_now} | venues_alive={sum(1 for s in venues.values() if s.get('alive'))}")
+    venues_alive = sum(1 for sec in venues.values() if isinstance(sec, (int, float)) and sec < 30)
+    log(f"━━━ TICK #{state['tick_count']} | bal=${state['balance']:.2f} | ex_pos={len(ex_pos)} | pending={len(state['pending'])} | walls_now={walls_now} | venues_alive={venues_alive}/{len(venues)}")
 
     if walls_now == 0:
         log("  No walls verified yet (need WS warmup or no real walls present)")
