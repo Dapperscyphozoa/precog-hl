@@ -17,6 +17,7 @@ Isolation: HTTP polling only. No production touched.
 """
 import json, os, sys, time, traceback, urllib.request
 from datetime import datetime, timezone
+from typing import Optional
 from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
                               cluster_walls, Wall, BounceSetup, BreakoutTrigger)
 
@@ -370,12 +371,6 @@ def tick():
         log(f"  {c:6s} mid={d['mid']:>11.4f} | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
 
     save_state()
-
-# Optional import for type annotation
-try:
-    from typing import Optional
-except ImportError:
-    pass
 
 def main():
     log("=== POLE RUNNER V9 (BOUNCE + BREAKOUT) START ===")
