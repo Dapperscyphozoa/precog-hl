@@ -1,18 +1,39 @@
 #!/usr/bin/env python3
 """
-smc_v2_service.py — Standalone SMC v2 (R3) live trader.
+brk_service.py — BRK (Break + Retest Continuation) engine.
 
-Runs alongside PreCog v8.28 on the same HL account. Total isolation:
-  - Tags all orders with cloid prefix `pa_smc_` (Pool Architect SMC)
-  - Owns only positions it placed (tracked in /var/data/smc_v2_state.json)
-  - Does NOT touch precog.py, does NOT manage other engines' positions
-  - Does NOT read/modify PreCog's state file
+Runs alongside Multi-gate, SMC v1, SMC v2, SMC-LOOSE, LSR on the same HL account.
+Total isolation:
+  - Tags all orders with cloid prefix `pa_brk_` (Pool Architect BRK)
+  - Owns only positions it placed (tracked in /var/data/brk_state.json)
+  - Does NOT touch other engines' state, code, or open positions
 
-Strategy: SMC top-down (HTF=4H → MTF=1H → LTF=15m), Rank 3 config.
-Setup pipeline: IDLE → IN_ZONE → SWEPT → ARMED → FILL.
-Exits: 50% TP1 → SL→BE → 50% TP2 (or BE-stop, or time-stop).
+STRATEGY — pattern (validated by 7-week 50d BT on full 56-coin sample):
 
-Sizing: FIXED_NOTIONAL_USD per trade (default $25). Leverage: from leverage_map (default 10x).
+  1. Identify HTF zones on 4h chart (OB/FVG via htf_bias_and_zones).
+  2. Wait for zone to BREAK with displacement: a 15m candle closes beyond
+     the zone with body > 1.2 × ATR(14) — strong directional move.
+  3. Wait for RETEST from the broken side: price returns to the broken
+     edge within retest_tol_pct (0.5% default) — old supply becomes
+     support, old demand becomes resistance.
+  4. Limit entry at the broken zone edge (fills on retest).
+  5. SL on opposite zone edge with 0.3% buffer.
+  6. TP1 = 1.5R (close 50%, BE-stop), TP2 = 3R (close remaining).
+
+BT economics (no fee/slip applied — gross R):
+  BR_default (live params):  WR 60%, PF 2.13, +0.382R/trade, 1.93 fires/coin/wk
+  Universe coverage:         100% (all 56 BT coins fired at least once)
+  Stable coins (split-half):  30/34 qualifying = 88% stability rate
+
+This is a CONTINUATION engine — inverse of the SMC reversal engines
+(SMC v2 / SMC-LOOSE) and the LSR sweep-reversal. Where SMC fires when
+zones HOLD, BRK fires when zones BREAK.
+
+Universe: full HL perp list minus BLACKLIST.
+
+Sizing modes (env BRK_SIZING_MODE):
+  'fixed' (default):       BRK_NOTIONAL_USD per trade ($25 default)
+  'risk_normalized':       notional = BRK_RISK_USD / risk_pct (variable)
 """
 import os, sys, time, json, math, hashlib, traceback
 from datetime import datetime, timezone
@@ -42,44 +63,58 @@ except ImportError:
 
 _bl_last_tick = [0.0]
 # ═══════════════════════════════════════════════════════
-# CONFIG — R3 (locked from sweep results)
+# CONFIG — BRK_default (validated by 7w walk-forward BT)
+# Pattern: HTF zone breaks with displacement, fires entry on retest
+# from the other side (continuation). Inverse of LSR/SMC reversal.
 # ═══════════════════════════════════════════════════════
 PARAMS = {
-    'htf_lb': 5,
-    'htf_displace': 0.8,
-    'htf_max_age': 540,
-    'ltf_lb': 4,
-    'sweep_vol': 1.0,
-    'mss_vol': 1.0,
-    'displace': 2.0,
-    'sl_buf_pct': 0.0003,
-    'approach_pct': 0.03,
-    'rr_min': 2.25,
-    'timeout_bars': 40,
+    # HTF zone detection (4h chart)
+    'htf_lb': 5,                     # pivot lookback for HTF zones
+    'htf_displace': 0.8,             # HTF break-of-structure displacement (× ATR)
+    'htf_max_age': 540,              # max age of zones (in 4H bars; 540 = 90d)
+
+    # Break detection (15m chart)
+    'displace': 1.0,                 # break candle range > 1.2 × ATR(14)
+
+    # Retest detection
+    'retest_tol_pct': 0.005,         # 0.5% tolerance around broken zone edge
+
+    # Time gates
+    'timeout_break_bars': 400,       # 30h to break after zone formed
+    'timeout_retest_bars': 120,       # 20h to retest after break
+    'timeout_bars': 40,              # 10h post-fill time-stop
+
+    # Risk management
+    'sl_buf_pct': 0.003,             # 0.3% buffer past opposite zone edge
+    'rr_min': 3.0,                   # TP2 = 3R
+
+    # Live-only: stale-fire guard
+    'max_setup_age_bars': 3,         # only fire if retest bar within last 45 min
 }
 
-# Coins with strict-negative outcomes in 52-day backtest (n>=2, 0 wins)
+# Coins with structural problems on HL — avoid regardless of LSR signal
 BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC', 'BLAST'}
 
-# Majors — handled by PreCog v8.28, not SMC v2
-EXCLUDED_MAJORS = {'BTC','ETH','BNB','SOL','BCH','LTC','XRP','ADA','DOGE','AVAX','DOT','TRX','TON'}
-
+# ═══════════════════════════════════════════════════════
 # Sizing
-FIXED_NOTIONAL_USD = float(os.environ.get('SMCV2_NOTIONAL_USD', '25'))
-DEFAULT_LEVERAGE = int(os.environ.get('SMCV2_LEVERAGE', '10'))
-MAX_CONCURRENT = int(os.environ.get('SMCV2_MAX_CONCURRENT', '20'))
-COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCV2_COIN_LOSS_THRESHOLD', '2'))
-COIN_COOLDOWN_HOURS = int(os.environ.get('SMCV2_COIN_COOLDOWN_HOURS', '24'))
-LIVE_TRADING = os.environ.get('SMCV2_LIVE', '0') == '1'
+# ═══════════════════════════════════════════════════════
+SIZING_MODE = os.environ.get('BRK_SIZING_MODE', 'fixed').strip().lower()
+FIXED_NOTIONAL_USD = float(os.environ.get('BRK_NOTIONAL_USD', '25'))
+RISK_USD = float(os.environ.get('BRK_RISK_USD', '5'))           # used in risk_normalized
+DEFAULT_LEVERAGE = int(os.environ.get('BRK_LEVERAGE', '10'))
+MAX_CONCURRENT = int(os.environ.get('BRK_MAX_CONCURRENT', '8'))
+COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('BRK_COIN_LOSS_THRESHOLD', '2'))
+COIN_COOLDOWN_HOURS = int(os.environ.get('BRK_COIN_COOLDOWN_HOURS', '24'))
+LIVE_TRADING = os.environ.get('BRK_LIVE', '0') == '1'
 
 # Timing
 TICK_SEC = 60                       # main loop cadence
 POSITION_CHECK_SEC = 30             # poll position state for TP1 fills
-MAX_HOLD_BARS_LTF = 40 * 4          # 40 bars × 15m = 10h; keep liberal time-stop
+MAX_HOLD_BARS_LTF = 40 * 4
 MAX_HOLD_SEC = MAX_HOLD_BARS_LTF * 15 * 60
 
 # Storage
-STATE_PATH = os.environ.get('SMCV2_STATE_PATH', '/var/data/smc_v2_state.json')
+STATE_PATH = os.environ.get('BRK_STATE_PATH', '/var/data/brk_state.json')
 LOG_BUFFER = deque(maxlen=500)
 
 
@@ -116,6 +151,152 @@ def sma(values, period):
         if i >= period: s -= values[i-period]
         out.append(s / min(i+1, period))
     return out
+
+
+
+# ═══════════════════════════════════════════════════════
+# BRK ENGINE — Break + Retest Continuation pattern
+#
+# Pattern:
+#   1. Identify HTF zone (4h OB/FVG via htf_bias_and_zones)
+#   2. Wait for zone to BREAK with displacement (close beyond zone)
+#   3. Wait for RETEST from other side (price returns to broken edge)
+#   4. Fire entry: continuation in break direction
+#      LONG  if bear zone broken UP, retest from above
+#      SHORT if bull zone broken DOWN, retest from below
+#   5. SL: opposite zone edge with sl_buf_pct buffer
+#      TP1: 1.5R | TP2: rr_min * R (default 3R)
+#
+# Validated 7w BT (56 coins): 60% WR, PF 2.13, +0.382 R/trade, 1.93 fires/coin/wk
+# ═══════════════════════════════════════════════════════
+def run_brk(c15, c4, params, return_armed_only=False):
+    """Run BRK detection on a 15m candle series + 4h zone context.
+
+    Returns list of setup dicts:
+      {is_long, entry, sl, tp1, tp2, broken_idx, retest_idx, retest_t,
+       zone_top, zone_bot, risk_pct}
+
+    If return_armed_only=True (live mode): only returns the most recent
+    retest within max_setup_age_bars of the current bar so we don't fire
+    on stale retests that already moved.
+    """
+    if len(c15) < 100 or len(c4) < 30: return []
+
+    # Get HTF zones from 4h chart
+    htfs = htf_bias_and_zones(c4, params['htf_lb'], params['htf_displace'],
+                               params['htf_max_age'])
+    if not htfs: return []
+
+    times  = [b['t'] for b in c15]
+    opens  = [b['o'] for b in c15]
+    highs  = [b['h'] for b in c15]
+    lows   = [b['l'] for b in c15]
+    closes = [b['c'] for b in c15]
+    atr15 = atr_series(highs, lows, closes, 14)
+
+    # First-formation timestamp for each unique zone (by top/bot/is_bull)
+    seen = {}
+    for h in htfs:
+        for z in h.get('zones', []):
+            k = (round(z['top'], 8), round(z['bot'], 8), z['is_bull'])
+            if k not in seen:
+                seen[k] = (z, h['t'])
+
+    # Find LTF (15m) index for a 4h-close timestamp
+    def find_15m_idx(t_ms):
+        for i, t in enumerate(times):
+            if t >= t_ms: return i
+        return None
+
+    fills = []
+    displace_atr = params.get('displace', 1.2)
+    retest_tol = params.get('retest_tol_pct', 0.005)
+    timeout_break = params.get('timeout_break_bars', 120)
+    timeout_retest = params.get('timeout_retest_bars', 80)
+    rr_min = params.get('rr_min', 3.0)
+    sl_buf = params.get('sl_buf_pct', 0.003)
+
+    # Live mode: only consider zones whose retest could be in the recent window
+    age_limit = params.get('max_setup_age_bars', 3)
+    n = len(c15)
+    live_window_start_idx = n - 1 - age_limit if return_armed_only else None
+
+    for k, (zone, formed_t) in seen.items():
+        idx0 = find_15m_idx(formed_t)
+        if idx0 is None: continue
+
+        state = 'WAITING_BREAK'
+        broken_at = None
+        direction = None
+
+        for i in range(idx0+1, n):
+            if state == 'WAITING_BREAK':
+                if i - idx0 > timeout_break: break
+                bar_size = abs(closes[i] - opens[i])
+                if atr15[i] <= 0 or bar_size <= displace_atr * atr15[i]: continue
+                # Bear zone (supply) broken UP → LONG continuation setup
+                if (not zone['is_bull']) and closes[i] > zone['top']:
+                    state = 'BROKEN'; broken_at = i; direction = 'up'
+                # Bull zone (demand) broken DOWN → SHORT continuation setup
+                elif zone['is_bull'] and closes[i] < zone['bot']:
+                    state = 'BROKEN'; broken_at = i; direction = 'down'
+            elif state == 'BROKEN':
+                if i - broken_at > timeout_retest: break
+                if direction == 'up':
+                    retest_lvl = zone['top']
+                    if lows[i] <= retest_lvl * (1 + retest_tol):
+                        # LONG retest fired
+                        if return_armed_only and (live_window_start_idx is None or
+                                                   i < live_window_start_idx):
+                            break  # too old for live fire
+                        entry = retest_lvl
+                        sl = zone['bot'] * (1 - sl_buf)
+                        # Fix 1: floor SL distance at MIN_SL_PCT to prevent BE-flushes
+                        _MIN_SL_PCT = float(os.environ.get('BRK_MIN_SL_PCT', '0.005'))
+                        sl = min(sl, entry * (1 - _MIN_SL_PCT))
+                        risk = entry - sl
+                        if risk <= 0: break
+                        tp1 = entry + risk * 1.5
+                        tp2 = entry + risk * rr_min
+                        fills.append({
+                            'is_long': True, 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2,
+                            'broken_idx': broken_at, 'retest_idx': i,
+                            'retest_t': times[i], 'sweep_t': times[i],  # alias for dedup
+                            'zone_top': zone['top'], 'zone_bot': zone['bot'],
+                            'risk_pct': risk / entry,
+                        })
+                        break
+                else:  # 'down'
+                    retest_lvl = zone['bot']
+                    if highs[i] >= retest_lvl * (1 - retest_tol):
+                        if return_armed_only and (live_window_start_idx is None or
+                                                   i < live_window_start_idx):
+                            break
+                        entry = retest_lvl
+                        sl = zone['top'] * (1 + sl_buf)
+                        # Fix 1: floor SL distance at MIN_SL_PCT
+                        _MIN_SL_PCT = float(os.environ.get('BRK_MIN_SL_PCT', '0.005'))
+                        sl = max(sl, entry * (1 + _MIN_SL_PCT))
+                        risk = sl - entry
+                        if risk <= 0: break
+                        tp1 = entry - risk * 1.5
+                        tp2 = entry - risk * rr_min
+                        fills.append({
+                            'is_long': False, 'entry': entry, 'sl': sl,
+                            'tp1': tp1, 'tp2': tp2,
+                            'broken_idx': broken_at, 'retest_idx': i,
+                            'retest_t': times[i], 'sweep_t': times[i],
+                            'zone_top': zone['top'], 'zone_bot': zone['bot'],
+                            'risk_pct': risk / entry,
+                        })
+                        break
+
+    if return_armed_only and fills:
+        # Return freshest retest only (most recent retest_idx)
+        fills.sort(key=lambda f: -f['retest_idx'])
+        return [fills[0]]
+    return fills
 
 
 def htf_bias_and_zones(c4h, lb, displace_atr, max_age_bars):
@@ -238,191 +419,12 @@ def mtf_state_ok(c1h, mtf_phs, mtf_pls, ts, htf_bias):
     return False
 
 
-def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=False):
-    """Replay LTF state machine. Returns list of fired setups.
-
-    return_armed_setup=False (backtest): returns FILL setups (one per
-        ARMED→FILL transition) — used to compute backtest WR/PF.
-    return_armed_setup=True  (live):     returns at most one setup, the
-        current ARMED state at the end of the bar series. This is the
-        signal to place a limit + protective orders. HL handles natural
-        fill via the resting limit. No firing on past FILLs (which already
-        happened — price has moved past entry).
-    """
-    n = len(c15)
-    if n < 30: return []
-    LB = params['ltf_lb']
-    sweep_vol = params['sweep_vol']
-    mss_vol = params['mss_vol']
-    displace = params['displace']
-    sl_buf_pct = params['sl_buf_pct']
-    rr_min = params['rr_min']
-    timeout_bars = params['timeout_bars']
-    approach_pct = params['approach_pct']
-
-    highs = [b['h'] for b in c15]; lows = [b['l'] for b in c15]
-    closes = [b['c'] for b in c15]; opens = [b['o'] for b in c15]
-    vols = [b['v'] for b in c15]; times = [b['t'] for b in c15]
-    atr = atr_series(highs, lows, closes, 14)
-    vol_avg = sma(vols, 20)
-
-    pivots_h, pivots_l = [], []
-    state = 'IDLE'; state_bar = 0; setup = {}
-    setups_fired = []
-
-    for i in range(n):
-        if i < max(LB*2+1, 20):
-            continue
-        ci = i - LB
-        if ci >= LB:
-            ph = highs[ci]; pl = lows[ci]
-            is_ph = all(ph > highs[ci-k] and ph > highs[ci+k] for k in range(1,LB+1))
-            is_pl = all(pl < lows[ci-k] and pl < lows[ci+k] for k in range(1,LB+1))
-            if is_ph: pivots_h.append((ci, ph))
-            if is_pl: pivots_l.append((ci, pl))
-
-        htf = htf_state_at(htf_states, times[i])
-        if not htf or htf['bias'] == 'NONE' or not htf['zones']:
-            if state != 'IDLE': state = 'IDLE'
-            continue
-        if not mtf_state_ok(c1h, mtf_phs, mtf_pls, times[i], htf['bias']):
-            if state != 'IDLE': state = 'IDLE'
-            continue
-
-        bull_setup = (htf['bias'] == 'BULL')
-
-        # IDLE → IN_ZONE
-        if state == 'IDLE':
-            for z in htf['zones']:
-                # Match bias: BULL needs is_bull demand zone, BEAR needs supply
-                if bull_setup and not z['is_bull']: continue
-                if (not bull_setup) and z['is_bull']: continue
-                # Price near the zone (within approach_pct)
-                if bull_setup:
-                    # demand below; price approaching from above or inside
-                    if lows[i] <= z['top'] * (1 + approach_pct) and highs[i] >= z['bot']:
-                        state = 'IN_ZONE'; state_bar = i
-                        setup = {'htf_zone': z, 'is_long': True}
-                        break
-                else:
-                    if highs[i] >= z['bot'] * (1 - approach_pct) and lows[i] <= z['top']:
-                        state = 'IN_ZONE'; state_bar = i
-                        setup = {'htf_zone': z, 'is_long': False}
-                        break
-            continue
-
-        # IN_ZONE → SWEPT
-        if state == 'IN_ZONE':
-            v_ok = vols[i] >= vol_avg[i] * sweep_vol
-            last_pl_v = pivots_l[-1][1] if pivots_l else None
-            last_ph_v = pivots_h[-1][1] if pivots_h else None
-            if setup['is_long']:
-                if last_pl_v is not None and lows[i] < last_pl_v and closes[i] > last_pl_v and v_ok:
-                    setup.update({'sweep_wick': lows[i], 'sweep_idx': i, 'atr_at_sweep': atr[i]})
-                    state = 'SWEPT'; state_bar = i
-                    continue
-            else:
-                if last_ph_v is not None and highs[i] > last_ph_v and closes[i] < last_ph_v and v_ok:
-                    setup.update({'sweep_wick': highs[i], 'sweep_idx': i, 'atr_at_sweep': atr[i]})
-                    state = 'SWEPT'; state_bar = i
-                    continue
-            if (i - state_bar) > timeout_bars:
-                state = 'IDLE'
-            continue
-
-        # SWEPT → ARMED (MSS confirmation)
-        if state == 'SWEPT':
-            v_ok = vols[i] >= vol_avg[i] * mss_vol
-            disp_thresh = displace * atr[i]
-            body = abs(closes[i] - opens[i])
-            body_ok = body > disp_thresh * 0.4
-            last_pl_v = pivots_l[-1][1] if pivots_l else None
-            last_ph_v = pivots_h[-1][1] if pivots_h else None
-            mss = False
-            if setup['is_long']:
-                if last_ph_v is not None and closes[i] > last_ph_v and closes[i] > opens[i] and v_ok and body_ok:
-                    mss = True
-            else:
-                if last_pl_v is not None and closes[i] < last_pl_v and closes[i] < opens[i] and v_ok and body_ok:
-                    mss = True
-
-            if mss:
-                sweep_wick = setup['sweep_wick']
-                if setup['is_long']:
-                    entry = max(opens[i], sweep_wick) if opens[i] < closes[i] else lows[i]
-                    sl = sweep_wick * (1 - sl_buf_pct)
-                    # Fix 1: floor SL distance at MIN_SL_PCT to prevent BE-flushes
-                    MIN_SL_PCT = float(os.environ.get('SMCV2_MIN_SL_PCT', '0.005'))
-                    sl = min(sl, entry * (1 - MIN_SL_PCT))
-                    risk = entry - sl
-                    if risk <= 0:
-                        state = 'IDLE'; continue
-                    tp1 = last_ph_v if last_ph_v and last_ph_v > entry else entry + risk*1.5
-                    tp2 = entry + risk * 3.0
-                else:
-                    entry = min(opens[i], sweep_wick) if opens[i] > closes[i] else highs[i]
-                    sl = sweep_wick * (1 + sl_buf_pct)
-                    # Fix 1: floor SL distance at MIN_SL_PCT
-                    MIN_SL_PCT = float(os.environ.get('SMCV2_MIN_SL_PCT', '0.005'))
-                    sl = max(sl, entry * (1 + MIN_SL_PCT))
-                    risk = sl - entry
-                    if risk <= 0:
-                        state = 'IDLE'; continue
-                    tp1 = last_pl_v if last_pl_v and last_pl_v < entry else entry - risk*1.5
-                    tp2 = entry - risk * 3.0
-
-                rr_tp1 = abs(tp1 - entry) / risk
-                rr_tp2 = abs(tp2 - entry) / risk
-
-                # Ensure tp1 is the CLOSER target (first to fire on price-path).
-                # Engine assigns tp1 from last pivot and tp2 from 3R-fixed; the
-                # pivot can be further than 3R, inverting label vs distance. The
-                # downstream BE-move logic assumes tp1 fires first, so swap if
-                # tp2 is closer. Profit math is unchanged — both legs still rest
-                # at their respective triggers — but the leg labels now match
-                # chronological fill order under normal price paths.
-                if abs(tp2 - entry) < abs(tp1 - entry):
-                    tp1, tp2 = tp2, tp1
-                    rr_tp1, rr_tp2 = rr_tp2, rr_tp1
-
-                if rr_tp2 >= rr_min and rr_tp1 >= 1.0:
-                    setup.update({
-                        'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2,
-                        'rr_tp1': rr_tp1, 'rr_tp2': rr_tp2,
-                        'mss_idx': i, 'mss_t': times[i],
-                    })
-                    state = 'ARMED'; state_bar = i
-                else:
-                    state = 'IDLE'
-            elif (i - state_bar) > timeout_bars:
-                state = 'IDLE'
-            continue
-
-        # ARMED → FILL (price retests entry)
-        if state == 'ARMED':
-            entry = setup['entry']
-            hit = (lows[i] <= entry) if setup['is_long'] else (highs[i] >= entry)
-            if hit:
-                setup_fired = dict(setup)
-                setup_fired.update({'fill_idx': i, 'fill_t': times[i]})
-                setups_fired.append(setup_fired)
-                state = 'IDLE'; setup = {}
-            elif (i - state_bar) > timeout_bars:
-                state = 'IDLE'
-
-    # Live mode: return the current ARMED setup if state ends ARMED.
-    # This is the signal to place orders NOW; HL handles natural fill.
-    if return_armed_setup:
-        if state == 'ARMED' and setup:
-            current = dict(setup)
-            current['armed_t'] = current.get('mss_t')
-            current['fill_t'] = current.get('mss_t')  # keep field name for downstream
-            current['_state'] = 'ARMED'
-            return [current]
-        return []
-
-    return setups_fired
-
+# ═══════════════════════════════════════════════════════
+# B203: removed dead code: run_ltf() function (former lines 422-605)
+#       Was a duplicate of smc_v2_service.run_ltf — never called from
+#       inside brk_service.py. Live brk only uses run_brk(). Removed
+#       to prevent future confusion about which engine logic runs.
+# ═══════════════════════════════════════════════════════
 
 # ═══════════════════════════════════════════════════════
 # HL CLIENT
@@ -483,6 +485,11 @@ def round_size(coin, sz):
 
 
 def get_universe():
+    """Scan full HL perp universe (minus delisted + blacklist).
+
+    LSR runs on the full universe — per-coin curation was empirically shown
+    to add no edge above blacklist filtering (verified OOS in walk-forward).
+    """
     try:
         m = info.meta()
         coins = []
@@ -490,10 +497,6 @@ def get_universe():
             n = u.get('name')
             if not n: continue
             if u.get('isDelisted'): continue
-            # 2026-05-05: majors RE-INCLUDED. Operator notes that BTC/ETH/etc.
-            # respect market-maker levels more cleanly than midcaps; SMC setups
-            # work well on them. EXCLUDED_MAJORS retained as a constant for
-            # other code paths but no longer filters here.
             if n in BLACKLIST: continue
             coins.append(n)
         return coins
@@ -700,7 +703,7 @@ def notify(title, message, priority=0):
         log(f'  notify thread spawn err: {e}')
 
 
-HISTORY_FILE = os.environ.get('SMCV2_HISTORY_PATH', '/var/data/smc_v2_history.jsonl')
+HISTORY_FILE = os.environ.get('LSR_HISTORY_PATH', '/var/data/smc_v2_history.jsonl')
 HISTORY_IN_MEMORY_CAP = 500
 
 
@@ -727,8 +730,6 @@ def archive_position(pos):
 
 def append_history(state, pos):
     # Enrich pos with fields needed for dashboard charts before archiving.
-    # Original pos didn't include 'coin' (was only the parent dict key),
-    # 'outcome' (had close_reason only), or 'realized_pnl' (had close_px/entry/sz only).
     if 'coin' not in pos:
         for k, v in state.get('positions', {}).items():
             if v is pos:
@@ -848,9 +849,9 @@ def save_state(state):
     try:
         from dashboard_push import push_state as _dash_push
         _dash_push(
-            engine_name='pool-arch-rev',
+            engine_name='pool-arch-cont',
             live=LIVE_TRADING,
-            sizing_mode='fixed',
+            sizing_mode=SIZING_MODE,
             notional_usd=FIXED_NOTIONAL_USD,
             max_concurrent=MAX_CONCURRENT,
             positions_dict=state.get('positions', {}),
@@ -867,16 +868,42 @@ def save_state(state):
 # ═══════════════════════════════════════════════════════
 def make_cloid(coin, suffix):
     """16-byte hex cloid via SHA-256. Uniquely encodes coin+timestamp+suffix
-    regardless of coin name length (was truncating suffix for coins >=5 chars).
+    regardless of coin name length. Prefix `brk_` distinguishes from
+    SMC v2 (`smcv2_`), SMC-LOOSE (`smcloose_`), LSR (`lsr_`), multi-gate,
+    and SMC v1 cloids on the shared wallet.
     """
-    raw = f'pa_smc_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
+    raw = f'pa_brk_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
     return '0x' + hashlib.sha256(raw).hexdigest()[:32]
 
 
 def calc_size(coin, entry_px):
-    """Size = notional / price, rounded to coin's szDecimals."""
+    """Size = notional / price, rounded to coin's szDecimals.
+    Used as a default fallback; fire_setup uses compute_notional() per setup
+    when SIZING_MODE='risk_normalized'."""
     sz = FIXED_NOTIONAL_USD / entry_px
     return round_size(coin, sz)
+
+
+def compute_notional(setup):
+    """Return target dollar notional for this setup based on SIZING_MODE.
+
+    'fixed':            constant BRK_NOTIONAL_USD
+    'risk_normalized':  notional sized so abs($ risk) ≈ BRK_RISK_USD per trade
+                        notional = RISK_USD / risk_pct
+                        where risk_pct = |sl - entry| / entry
+    """
+    if SIZING_MODE == 'risk_normalized':
+        rp = setup.get('risk_pct') or 0.0
+        if rp <= 0:
+            entry = setup.get('entry') or 0.0
+            sl = setup.get('sl') or 0.0
+            if entry > 0 and abs(sl - entry) > 0:
+                rp = abs(sl - entry) / entry
+        if rp <= 0:
+            return FIXED_NOTIONAL_USD   # fallback
+        return RISK_USD / rp
+    # default 'fixed'
+    return FIXED_NOTIONAL_USD
 
 
 def place_entry(coin, is_long, entry_px, sz, cloid):
@@ -929,10 +956,9 @@ def cancel_order(coin, cloid):
     HL SDK requires Cloid object — wrap proactively to avoid the error+retry
     cycle that pollutes logs.
 
-    B202: retry up to 3 times on 429/rate-limit errors. The HL endpoint can
-    return 429 transiently, especially during high-activity windows. Without
-    retry, orphan reduce-only triggers stay on the book — actual bug observed
-    on SEI 13:51:30 SL fill where the orphan TP1 leg never got cancelled.
+    B202: retry up to 3 times on 429/rate-limit errors with exponential
+    backoff. The HL endpoint returns 429 transiently during high-activity
+    windows. Without retry, orphan reduce-only triggers stay on the book.
     """
     if not LIVE_TRADING:
         log(f'  [DRY] cancel {coin} cloid={cloid}')
@@ -940,7 +966,6 @@ def cancel_order(coin, cloid):
     if not cloid:
         log(f'  cancel {coin}: no cloid provided')
         return None
-    # B22: wrap cloid first; SDK rejects raw strings.
     cloid_obj = cloid
     try:
         from hyperliquid.utils.types import Cloid
@@ -950,7 +975,7 @@ def cancel_order(coin, cloid):
             from hyperliquid.utils.signing import Cloid
             cloid_obj = Cloid.from_str(cloid) if isinstance(cloid, str) else cloid
         except Exception:
-            pass  # fall through with raw string; SDK may still handle
+            pass
     last_err = None
     for attempt in range(3):
         try:
@@ -959,12 +984,10 @@ def cancel_order(coin, cloid):
             last_err = e
             msg = str(e)
             if '429' in msg or 'Too Many' in msg or 'rate' in msg.lower():
-                # Exponential backoff: 1s, 2s, 4s
                 sleep_t = 2 ** attempt
                 log(f'  cancel {coin} attempt {attempt+1}/3 hit rate-limit → sleep {sleep_t}s')
                 time.sleep(sleep_t)
                 continue
-            # Non-rate-limit error → log and bail
             log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: {e}')
             return None
     log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: gave up after 3 retries: {last_err}')
@@ -1088,11 +1111,13 @@ def fire_setup(coin, setup, state):
     # TP1+TP2 sum to sz_total with no residual. Round down to nearest 2*unit.
     szD = get_sz_decimals(coin)
     unit = 10 ** (-szD)
-    raw_sz = FIXED_NOTIONAL_USD / entry
+    target_notional = compute_notional(setup)
+    raw_sz = target_notional / entry
     n_pairs = int(raw_sz / (2 * unit))
     if n_pairs <= 0:
         log(f'  {coin} skip: notional too small for szDecimals={szD} '
-            f'(raw_sz={raw_sz:.8f}, min_pair={2*unit:.8f})')
+            f'(target_notional=${target_notional:.2f}, raw_sz={raw_sz:.8f}, '
+            f'min_pair={2*unit:.8f})  [SIZING_MODE={SIZING_MODE}]')
         return False
     sz_total = round(n_pairs * 2 * unit, szD)
     sz_half = round(n_pairs * unit, szD)
@@ -1186,10 +1211,10 @@ def fire_setup(coin, setup, state):
 
     close_dir = not is_long  # close direction (sell to close long, buy to close short)
 
-    # Exit policy — set via env SMCV2_EXIT_POLICY. Default 'tp1_full'.
+    # Exit policy — set via env BRK_EXIT_POLICY. Default 'tp1_full'.
     #   'tp1_full': 100% size exits at TP1 (1.5R). No TP2, no BE-stop. PF 1.61 net (re-BT).
     #   'split_be': 50/50 split with BE-stop. Legacy. PF 0.68 net.
-    EXIT_POLICY = os.environ.get('SMCV2_EXIT_POLICY', 'tp1_full').lower()
+    EXIT_POLICY = os.environ.get('BRK_EXIT_POLICY', 'tp1_full').lower()
 
     if EXIT_POLICY == 'tp1_full':
         orders = [
@@ -1261,7 +1286,9 @@ def fire_setup(coin, setup, state):
         # patterns the fix is to bump SDK to 0.21.0+ and restore the kwarg.
         #
         # B204: retry on 429/rate-limit, same pattern as B202 cancel_order.
-        # Without this, fires get dropped during HL rate spikes.
+        # Without this, ~37% of fires were dropped during HL rate spikes
+        # (live evidence: LIT 16:50, BLUR 20:31, ALGO 21:03 — all valid
+        # signals that never reached the order book).
         res = None
         last_err = None
         for attempt in range(3):
@@ -1294,9 +1321,16 @@ def fire_setup(coin, setup, state):
     #   {'status':'ok','response':{'type':'order','data':{'statuses':[...]}}}
     # Each status: {'resting':{'oid':...}} | {'filled':{...}} | {'error':'...'}
     #
-    # B205: validate response shape. We sent N legs, so statuses MUST contain N
-    # entries. If shape is malformed (during HL stress we've observed empty /
-    # short statuses with status=ok), treat as failure and bail.
+    # B205: validate response shape. We sent 4 legs (entry+sl+tp1+tp2), so
+    # statuses MUST contain 4 entries. If shape is malformed (during HL stress
+    # we've observed empty / short statuses with status=ok), treat as failure
+    # and bail. Without this, the parser silently accepts the malformed
+    # response, sets cloid_sl/tp1/tp2 with their pre-generated cloids but
+    # zero oids — engine state thinks position is protected but no triggers
+    # actually rest on book. Live evidence: PEOPLE 00:08:43 on smc-loose —
+    # FIRE returned ok, no failed_legs logged, but zombie check 18min later
+    # found no protective cloids on book. Position was force-closed for -$0.03
+    # to avoid naked exposure.
     statuses = []
     try:
         statuses = res.get('response', {}).get('data', {}).get('statuses', [])
@@ -1304,6 +1338,7 @@ def fire_setup(coin, setup, state):
         pass
     if not isinstance(statuses, list) or len(statuses) < len(orders):
         log(f'  {coin} bulk_orders malformed statuses: got {len(statuses) if isinstance(statuses, list) else type(statuses).__name__}, expected {len(orders)}. Raw res: {str(res)[:300]}')
+        # Cancel any cloids we generated — they may be on the book
         for cl in (cloid_entry, cloid_sl, cloid_tp1, cloid_tp2):
             if cl:
                 try:
@@ -1531,7 +1566,7 @@ def reconcile_positions(state):
 
         # TP1 leg → move SL to BE (or full close under tp1_full policy)
         elif leg == 'tp1' and pos['phase'] in ('live', 'pending_fill'):
-            EXIT_POLICY = os.environ.get('SMCV2_EXIT_POLICY', 'tp1_full').lower()
+            EXIT_POLICY = os.environ.get('BRK_EXIT_POLICY', 'tp1_full').lower()
             if EXIT_POLICY == 'tp1_full':
                 log(f'  {coin} TP1 hit at {fill_px} — full close (tp1_full policy)')
                 pos['phase'] = 'done'
@@ -2118,27 +2153,22 @@ def reconcile_phantoms(state):
                     fills_recent = fetch_recent_fills(since)
                     if fills_recent:
                         is_long = pos.get('is_long')
-                        close_side_is_buy = not is_long  # closing a long = sell, closing a short = buy
-                        # Find the latest fill on this coin that closes our position
+                        close_side_is_buy = not is_long
                         candidates = []
                         for f in fills_recent:
                             if f.get('coin') != coin: continue
                             if f.get('time', 0) < fired_t: continue
                             f_is_buy = (f.get('side') == 'B')
-                            # Must be on the closing side AND reduce_only
-                            # (HL marks reduceOnly via dir starting with 'Close')
                             d = (f.get('dir') or '').lower()
                             is_close = ('close' in d) or (f.get('startPosition') is not None
                                 and abs(float(f.get('startPosition', 0))) > abs(float(f.get('sz', 0))))
                             if f_is_buy == close_side_is_buy and is_close:
                                 candidates.append(f)
                         if candidates:
-                            # Use the latest (largest time)
                             candidates.sort(key=lambda x: x.get('time', 0))
                             exit_fill = candidates[-1]
                             exit_px = float(exit_fill.get('px', 0))
                             exit_t = exit_fill.get('time', int(time.time()*1000))
-                            # Compute realized R from entry
                             entry_px = float(pos.get('actual_entry_px') or pos.get('entry') or 0)
                             sl_px = float(pos.get('sl', 0))
                             sz = float(exit_fill.get('sz', 0))
@@ -2150,7 +2180,6 @@ def reconcile_phantoms(state):
                                     r_value = (exit_px - entry_px) / risk_per_unit
                                 else:
                                     r_value = (entry_px - exit_px) / risk_per_unit
-                            # Determine outcome from the closing fill's identity
                             cl = exit_fill.get('cloid')
                             recovered_outcome = None
                             if cl:
@@ -2160,7 +2189,6 @@ def reconcile_phantoms(state):
                                     recovered_outcome = 'BE' if pos.get('phase') == 'tp1_filled' else 'SL'
                                 elif cl == pos.get('cloid_close'): recovered_outcome = 'CLOSE'
                             if not recovered_outcome:
-                                # Infer from price relationship
                                 if is_long:
                                     if exit_px >= entry_px * 1.001: recovered_outcome = 'TP1'
                                     elif exit_px <= sl_px * 1.001: recovered_outcome = 'SL'
@@ -2196,7 +2224,6 @@ def reconcile_phantoms(state):
 
             pos['phase'] = 'done'
             if not recovered:
-                # Fall back to original behavior — mark as phantom with $0
                 pos['close_reason'] = reason
                 pos['closed_t'] = int(time.time() * 1000)
                 pos['close_px'] = pos.get('actual_entry_px') or pos.get('entry') or 0
@@ -2315,7 +2342,7 @@ def scan_for_setups(state, reconcile_fn=None):
     n_skip_held = 0          # already in state
     n_skip_cooldown = 0      # in cooldown
     n_skip_data = 0          # candle fetch failed / not enough bars
-    n_no_htf = 0             # no HTF zones detected
+    n_no_htf = 0             # unused (LSR is single-timeframe); kept for log compat
     n_no_setup = 0           # no LTF ARMED setup
     n_dedup = 0              # ARMED but already fired (mss_t match)
     n_stale = 0              # ARMED but past 75% of timeout budget
@@ -2354,98 +2381,78 @@ def scan_for_setups(state, reconcile_fn=None):
         try:
             cache = _coin_data_cache.get(coin, {})
             now_s = time.time()
-            need_refresh = (not cache) or (now_s - cache.get('fetched', 0)) > 600
+            need_refresh = (not cache) or (now_s - cache.get('fetched', 0)) > 300
             if need_refresh:
+                # BRK needs HTF (4h) zones + LTF (15m) for break/retest detection
                 c4 = fetch_candles(coin, '4h', 90)
-                c1 = fetch_candles(coin, '1h', 90)
-                c15 = fetch_candles(coin, '15m', 52)
-                if not (c4 and c1 and c15):
+                if not c4 or len(c4) < 30:
                     n_skip_data += 1
                     continue
-                if len(c4) < 30 or len(c1) < 100 or len(c15) < 500:
+                c15 = fetch_candles(coin, '15m', 30)
+                if not c15 or len(c15) < 200:
                     n_skip_data += 1
                     continue
-                cache = {'4h': c4, '1h': c1, '15m': c15, 'fetched': now_s}
+                cache = {'4h': c4, '15m': c15, 'fetched': now_s}
                 _coin_data_cache[coin] = cache
-            c4, c1, c15 = cache['4h'], cache['1h'], cache['15m']
+            c4 = cache['4h']
+            c15 = cache['15m']
 
-            # B7: drop the still-forming last bar on each TF. Engine must only
-            # see confirmed-closed bars or it can fire mid-bar setups that
-            # invalidate when the bar actually closes (repaint risk). HL's
-            # candles_snapshot returns the in-progress bar as the last element.
+            # Drop the still-forming last bar — only act on closed bars
             now_ms = int(time.time() * 1000)
-            def _drop_unclosed(bars, tf_ms):
-                if not bars: return bars
-                last_open = bars[-1]['t']
-                # Bar is closed once now >= open + tf duration
-                return bars if (now_ms - last_open) >= tf_ms else bars[:-1]
-            c4 = _drop_unclosed(c4, 4*3600*1000)
-            c1 = _drop_unclosed(c1, 3600*1000)
-            c15 = _drop_unclosed(c15, 15*60*1000)
-            if len(c4) < 30 or len(c1) < 100 or len(c15) < 500:
+            if c15 and (now_ms - c15[-1]['t']) < 15*60*1000:
+                c15 = c15[:-1]
+            if len(c15) < 200:
                 n_skip_data += 1
                 continue
 
-            # Run engine in LIVE mode: returns current ARMED setup (if any)
-            # rather than past FILL transitions. We place a GTC limit at entry
-            # NOW and let HL match naturally when price retests.
-            htfs = htf_bias_and_zones(c4, PARAMS['htf_lb'], PARAMS['htf_displace'], PARAMS['htf_max_age'])
-            if not htfs:
-                n_no_htf += 1
-                continue
-            mtf_phs, mtf_pls = precompute_mtf_pivots(c1, lb=PARAMS['ltf_lb'])
-            setups = run_ltf(c15, htfs, c1, mtf_phs, mtf_pls, PARAMS,
-                             return_armed_setup=True)
+            # Run BRK detection in LIVE mode (only fresh retests)
+            setups = run_brk(c15, c4, PARAMS, return_armed_only=True)
             if not setups:
                 n_no_setup += 1
                 continue
 
-            # At most one ARMED setup per coin from run_ltf in live mode
             s = setups[0]
 
-            # DEDUP: skip if already fired this exact setup. mss_t is the
-            # uniqueness key (same MSS candle on same coin = same setup).
-            # Survives restarts (mss_t persists in state file).
-            last_fired = state.setdefault('last_fired_mss_t', {})
-            mss_t = s.get('mss_t', 0)
+            # DEDUP: same sweep_t on same coin = same setup
+            last_fired = state.setdefault('last_fired_sweep_t', {})
+            sweep_t = s.get('sweep_t', 0)
             already = last_fired.get(coin, 0)
-            if mss_t and mss_t <= already:
+            if sweep_t and sweep_t <= already:
                 n_dedup += 1
                 continue
 
-            # B41: refuse to fire if MSS is already too old. Engine's
-            # ARMED→IDLE timeout is timeout_bars*15min from MSS. If most of
-            # that budget has elapsed, the live behaviour will diverge from
-            # backtest (which fires immediately when state hits ARMED in
-            # the bar-by-bar replay). Require at least 25% of the timeout
-            # budget remaining for a fresh fire.
-            if mss_t:
-                age_since_mss_sec = (time.time()*1000 - mss_t) / 1000
-                budget_total_sec = PARAMS['timeout_bars'] * 15 * 60
-                budget_remaining_sec = budget_total_sec - age_since_mss_sec
-                MIN_REMAINING_FRACTION = 0.25
-                if budget_remaining_sec < budget_total_sec * MIN_REMAINING_FRACTION:
-                    log(f'  {coin} ARMED but stale: '
-                        f'{age_since_mss_sec/3600:.1f}h since MSS, '
-                        f'only {budget_remaining_sec/60:.0f}m of budget left — '
-                        f'skipping (would diverge from backtest)')
-                    last_fired[coin] = mss_t
+            # Stale-fire guard: only fire if sweep bar is recent enough
+            # (max_setup_age_bars × 15m). Limit at pool_level needs price to
+            # retest within reasonable time; old sweeps usually don't retest.
+            if sweep_t:
+                age_sec = (time.time()*1000 - sweep_t) / 1000
+                max_age_sec = PARAMS.get('max_setup_age_bars', 3) * 15 * 60
+                if age_sec > max_age_sec:
+                    last_fired[coin] = sweep_t
                     n_stale += 1
                     continue
 
-            # UZT gate: refuse fire if zone already consumed or claimed by BRK
+            # UZT gate: refuse fire if zone is owned by SMC v2 (reversal armed/filled)
             if _UZT_ENABLED:
-                _z = s.get('htf_zone')
-                if _z:
+                _z = {'top': s.get('zone_top'), 'bot': s.get('zone_bot'),
+                      'is_bull': not s.get('is_long'),  # broken supply -> bull-zone-broken=False
+                      'kind': 'OB'}
+                # Note: for continuation, the zone polarity in unified_state matches the
+                # ORIGINAL HTF zone, not the trade direction. Bear OB broken UP = is_bull False.
+                if _z['top'] is not None and _z['bot'] is not None:
                     if _uzt.is_consumed(coin, _z):
                         log(f'  {coin} UZT skip: zone already consumed')
                         n_dedup += 1
                         continue
-                    if not _uzt.can_fire_reversal(coin, _z):
+                    if not _uzt.can_fire_continuation(coin, _z):
                         st = _uzt.get_zone_state(coin, _z)
-                        log(f'  {coin} UZT skip: zone state={st} blocks reversal')
+                        log(f'  {coin} UZT skip: zone state={st} blocks continuation')
                         n_dedup += 1
                         continue
+                    # Auto-mark broken on the way through (idempotent if already)
+                    if _uzt.get_zone_state(coin, _z) == 'IDLE':
+                        _uzt.mark_in_zone(coin, _z)
+                    _uzt.mark_broken(coin, _z, break_idx=s.get('broken_idx'))
 
             # auto_blacklist gate — coin paused after 3 consecutive losses
             if _BL_ENABLED and _bl.is_paused(coin):
@@ -2454,15 +2461,23 @@ def scan_for_setups(state, reconcile_fn=None):
                 continue
 
             n_armed += 1
-            log(f'  ARMED {coin}: {"LONG" if s["is_long"] else "SHORT"} entry={s["entry"]:.5f} mss_t={mss_t}')
-            if _UZT_ENABLED and s.get('htf_zone'):
-                _uzt.mark_reversal_armed(coin, s['htf_zone'], {
+            risk_pct = s.get('risk_pct', 0)
+            log(f'  ARMED {coin}: {"LONG" if s["is_long"] else "SHORT"} '
+                f'entry={s["entry"]:.6f} sl={s["sl"]:.6f} '
+                f'risk={risk_pct*100:.3f}% zone={s.get("zone_bot",0):g}-{s.get("zone_top",0):g} '
+                f'sweep_t={sweep_t}')
+            if _UZT_ENABLED and s.get('zone_top') is not None:
+                _z = {'top': s['zone_top'], 'bot': s['zone_bot'],
+                      'is_bull': not s.get('is_long'), 'kind': 'OB'}
+                _uzt.mark_continuation_armed(coin, _z, {
                     'entry': s.get('entry'), 'sl': s.get('sl'), 'tp1': s.get('tp1'),
-                    'mss_t': mss_t,
+                    'sweep_t': sweep_t,
                 })
 
-            if fire_setup(coin, s, state):
-                last_fired[coin] = mss_t
+            # fire_setup expects 'mss_t' as the setup timestamp key — pass sweep_t
+            s2 = dict(s); s2['mss_t'] = sweep_t
+            if fire_setup(coin, s2, state):
+                last_fired[coin] = sweep_t
                 n_fired_ok += 1
                 fired += 1
         except Exception as e:
@@ -2471,7 +2486,7 @@ def scan_for_setups(state, reconcile_fn=None):
 
     log(f'scan complete: {fired} new setups fired '
         f'| held={n_skip_held} cooldown={n_skip_cooldown} '
-        f'no_data={n_skip_data} no_htf={n_no_htf} no_setup={n_no_setup} '
+        f'no_data={n_skip_data} no_setup={n_no_setup} '
         f'dedup={n_dedup} stale={n_stale} armed={n_armed} fired_ok={n_fired_ok}')
     state['last_scan_ts'] = int(time.time()*1000)
     save_state(state)
@@ -2523,7 +2538,7 @@ def verify_agent_approval():
 
 def main():
     global LIVE_TRADING
-    log(f'SMC v2 service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
+    log(f'LSR service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
 
     # B160: verify agent approval before going live
     if LIVE_TRADING:
@@ -2540,25 +2555,26 @@ def main():
             LIVE_TRADING = False
 
     notify('Service online',
-           f'LIVE={LIVE_TRADING} notional=${FIXED_NOTIONAL_USD} '
+           f'LIVE={LIVE_TRADING} sizing={SIZING_MODE} '
+           f'notional=${FIXED_NOTIONAL_USD} risk=${RISK_USD} '
            f'leverage={DEFAULT_LEVERAGE}x max={MAX_CONCURRENT}',
            priority=0)
     log(f'PARAMS={PARAMS}')
+    log(f'SIZING_MODE={SIZING_MODE}  fixed_notional=${FIXED_NOTIONAL_USD}  risk_usd=${RISK_USD}')
     log(f'BLACKLIST={sorted(BLACKLIST)}')
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')
 
     # Dashboard heartbeat — pushes state snapshot every 60s regardless of scan
-    # activity, so the dashboard's 5-min staleness threshold isn't tripped on
-    # slow scans. Wraps state read in a lambda so each tick gets fresh data.
+    # activity, so the dashboard's 5-min staleness threshold isn't tripped.
     try:
         from dashboard_push import start_heartbeat as _start_hb
         _start_hb(
-            engine_name='pool-arch-rev',
+            engine_name='pool-arch-cont',
             state_getter=lambda: state,
             config_getter=lambda: {
                 'live': LIVE_TRADING,
-                'sizing_mode': 'fixed',
+                'sizing_mode': SIZING_MODE,
                 'notional_usd': FIXED_NOTIONAL_USD,
                 'max_concurrent': MAX_CONCURRENT,
             },
