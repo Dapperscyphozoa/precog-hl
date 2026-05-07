@@ -848,7 +848,7 @@ def save_state(state):
     try:
         from dashboard_push import push_state as _dash_push
         _dash_push(
-            engine_name='pool-arch-rev',
+            engine_name='smc-v2',
             live=LIVE_TRADING,
             sizing_mode='fixed',
             notional_usd=FIXED_NOTIONAL_USD,
@@ -2554,7 +2554,7 @@ def main():
     try:
         from dashboard_push import start_heartbeat as _start_hb
         _start_hb(
-            engine_name='pool-arch-rev',
+            engine_name='smc-v2',
             state_getter=lambda: state,
             config_getter=lambda: {
                 'live': LIVE_TRADING,
