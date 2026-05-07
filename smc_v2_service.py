@@ -357,11 +357,7 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
                     risk = entry - sl
                     if risk <= 0:
                         state = 'IDLE'; continue
-                    # B206: TP1 fallback multiplier 1.5 → 1.25 (no structural pivot reachable).
-                    # Primary TP1 stays as last_ph_v (structural pivot — framework-correct).
-                    # Only fallback case affected. BT showed 1.25R fixed produces
-                    # +$31.78/50d vs 1.5R +$19.04/50d on real fee structure.
-                    tp1 = last_ph_v if last_ph_v and last_ph_v > entry else entry + risk*1.25
+                    tp1 = last_ph_v if last_ph_v and last_ph_v > entry else entry + risk*1.5
                     tp2 = entry + risk * 3.0
                 else:
                     entry = min(opens[i], sweep_wick) if opens[i] > closes[i] else highs[i]
@@ -372,8 +368,7 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
                     risk = sl - entry
                     if risk <= 0:
                         state = 'IDLE'; continue
-                    # B206: TP1 fallback multiplier 1.5 → 1.25 (see long path comment).
-                    tp1 = last_pl_v if last_pl_v and last_pl_v < entry else entry - risk*1.25
+                    tp1 = last_pl_v if last_pl_v and last_pl_v < entry else entry - risk*1.5
                     tp2 = entry - risk * 3.0
 
                 rr_tp1 = abs(tp1 - entry) / risk

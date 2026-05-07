@@ -256,11 +256,7 @@ def run_brk(c15, c4, params, return_armed_only=False):
                         sl = min(sl, entry * (1 - _MIN_SL_PCT))
                         risk = entry - sl
                         if risk <= 0: break
-                        # B206: TP1 multiplier 1.5 → 1.25.
-                        # BT showed 1.25R produces +$31.78/50d vs 1.5R +$19.04/50d
-                        # (+67% improvement) on real fee structure ($0.072/trade).
-                        # WR rises 48.77% → 54.19%. More wins amortize fixed fees.
-                        tp1 = entry + risk * 1.25
+                        tp1 = entry + risk * 1.5
                         tp2 = entry + risk * rr_min
                         fills.append({
                             'is_long': True, 'entry': entry, 'sl': sl,
@@ -284,8 +280,7 @@ def run_brk(c15, c4, params, return_armed_only=False):
                         sl = max(sl, entry * (1 + _MIN_SL_PCT))
                         risk = sl - entry
                         if risk <= 0: break
-                        # B206: TP1 multiplier 1.5 → 1.25 (see long path comment).
-                        tp1 = entry - risk * 1.25
+                        tp1 = entry - risk * 1.5
                         tp2 = entry - risk * rr_min
                         fills.append({
                             'is_long': False, 'entry': entry, 'sl': sl,
