@@ -1,0 +1,403 @@
+"""V9 — fresh wall + breakout sibling. Trade BOTH directions of every wall.
+
+V8 only traded the bounce side per wall. When wall broke, V8 ate full SL.
+V9 places paired orders per wall:
+  1. Bounce limit AT the wall (V8 behavior preserved)
+  2. Breakout trigger PAST the wall (fires market when price closes through)
+
+When one fills, cancel the other. Whichever direction price chooses, we capture.
+
+Wall lifecycle:
+  ACTIVE       wall verified (>=5 polls, $500k+, multi-venue) but not yet armed
+  ARMED        bounce limit + breakout trigger both placed
+  BOUNCE_OPEN  bounce filled, breakout cancelled
+  BREAKOUT_OPEN breakout fired, bounce cancelled
+  EXPIRED      4h passed without trigger, both cancelled
+  DEAD         wall destroyed/spoofed/touched-without-triggering, both cancelled
+  TESTED       price has touched wall once → wall is dead to us until it disappears
+                and reappears fresh
+"""
+import time
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Tuple
+from collections import defaultdict, deque
+
+
+@dataclass
+class Wall:
+    coin: str
+    side: str               # 'bid' or 'ask'
+    price: float
+    low: float
+    high: float
+    usd: float
+    distance_pct: float
+    persistence_polls: int = 1
+    first_seen_t: float = 0
+    last_seen_t: float = 0
+    times_tested: int = 0
+    last_test_t: float = 0
+
+    @property
+    def wall_id(self) -> str:
+        return f"{self.coin}|{self.side}|{round(self.price, 8)}"
+
+
+@dataclass
+class BounceSetup:
+    coin: str
+    wall_id: str
+    side: str               # 'BUY' or 'SELL'
+    entry_price: float
+    sl_price: float
+    tp_price: float
+    rr: float
+    sibling_breakout_id: Optional[str] = None
+    notes: str = ''
+
+
+@dataclass
+class BreakoutTrigger:
+    coin: str
+    wall_id: str
+    side: str               # 'BUY' or 'SELL' = direction of breakout
+    trigger_price: float    # price at which to fire market
+    sl_price: float         # back inside the wall (failed breakout = invalidation)
+    tp_price: float         # next same-side wall in breakout direction
+    rr: float
+    armed_t: float = 0
+    sibling_bounce_id: Optional[str] = None
+    notes: str = ''
+
+
+def cluster_walls(orders: List[dict], mid: float, side: str,
+                   bucket_pct: float = 0.0005,
+                   min_usd: float = 500_000,
+                   max_dist_pct: float = 0.025) -> List[Wall]:
+    if not orders or mid <= 0: return []
+    buckets: Dict[float, dict] = {}
+    for o in orders:
+        if abs(o['price'] - mid) / mid > max_dist_pct: continue
+        b = round(o['price'] / mid / bucket_pct) * bucket_pct
+        info = buckets.setdefault(b, {'usd': 0.0, 'low': 9e18, 'high': 0.0})
+        info['usd'] += o['usd']
+        info['low'] = min(info['low'], o['price'])
+        info['high'] = max(info['high'], o['price'])
+    walls = []
+    for info in buckets.values():
+        if info['usd'] >= min_usd:
+            mid_px = (info['low'] + info['high']) / 2
+            dist = abs(mid_px - mid) / mid
+            walls.append(Wall(coin='', side=side, price=mid_px, low=info['low'],
+                               high=info['high'], usd=info['usd'], distance_pct=dist))
+    return walls
+
+
+class WallTracker:
+    """Tracks wall persistence + size history + first-touch test count."""
+    def __init__(self, max_history: int = 30):
+        self.history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=max_history))
+        self.last_seen: Dict[str, float] = {}
+        self.touch_counts: Dict[str, int] = defaultdict(int)
+        self.last_touch_t: Dict[str, float] = {}
+        self.armed: Dict[str, float] = {}  # wall_id → armed_t
+
+    @staticmethod
+    def _key(coin: str, side: str, price: float, mid: float) -> str:
+        bucket = round(price / mid / 0.0005) * 0.0005
+        return f"{coin}|{side}|{bucket:.5f}"
+
+    def update(self, coin: str, walls: List[Wall], mid: float, ts: float,
+                last_low: float, last_high: float) -> List[Wall]:
+        seen = set()
+        for w in walls:
+            w.coin = coin
+            k = self._key(coin, w.side, w.price, mid)
+            self.history[k].append((ts, w.usd))
+            self.last_seen[k] = ts
+            seen.add(k)
+            w.persistence_polls = len(self.history[k])
+            w.first_seen_t = self.history[k][0][0]
+            w.last_seen_t = ts
+            w.times_tested = self.touch_counts.get(k, 0)
+            w.last_test_t = self.last_touch_t.get(k, 0)
+            # Detect new touch this poll
+            if w.side == 'bid' and last_low <= w.high * 1.0002:
+                if ts - w.last_test_t > 300:  # >5min between touches counts as new
+                    self.touch_counts[k] = w.times_tested + 1
+                    self.last_touch_t[k] = ts
+                    w.times_tested = self.touch_counts[k]
+                    w.last_test_t = ts
+            if w.side == 'ask' and last_high >= w.low * 0.9998:
+                if ts - w.last_test_t > 300:
+                    self.touch_counts[k] = w.times_tested + 1
+                    self.last_touch_t[k] = ts
+                    w.times_tested = self.touch_counts[k]
+                    w.last_test_t = ts
+        # Decay walls not seen in >180s
+        for k in list(self.last_seen.keys()):
+            if k.startswith(f"{coin}|") and k not in seen and ts - self.last_seen[k] > 180:
+                self.history.pop(k, None)
+                self.last_seen.pop(k, None)
+                self.touch_counts.pop(k, None)
+                self.last_touch_t.pop(k, None)
+                self.armed.pop(k, None)
+        return walls
+
+    def shrink_pct(self, coin: str, side: str, price: float, mid: float,
+                    window_s: float = 90) -> Optional[float]:
+        k = self._key(coin, side, price, mid)
+        h = self.history.get(k)
+        if not h or len(h) < 3: return None
+        now_ts = h[-1][0]
+        cutoff = now_ts - window_s
+        within = [usd for ts, usd in h if ts >= cutoff]
+        if not within: return None
+        peak = max(within)
+        if peak <= 0: return None
+        return 1.0 - (h[-1][1] / peak)
+
+    def all_keys_for(self, coin: str) -> List[str]:
+        return [k for k in self.history.keys() if k.startswith(f"{coin}|")]
+
+
+class PoleEngineV9:
+    """Generates paired bounce + breakout orders per fresh wall.
+
+    First-touch only. After wall is touched (price wicks into wall low/high),
+    the wall is DEAD until it disappears (>180s gone) and reappears fresh.
+    """
+
+    def __init__(self,
+                  min_persistence_polls: int = 5,
+                  min_rr_bounce: float = 1.5,
+                  min_rr_breakout: float = 1.5,
+                  sl_atr_mult: float = 0.5,
+                  sl_buffer_pct: float = 0.0010,
+                  breakout_trigger_pct: float = 0.0005,
+                  breakout_sl_inside_pct: float = 0.0030,
+                  spoof_filter_shrink: float = 0.40,
+                  cooldown_s: int = 4 * 3600):
+        self.min_persistence = min_persistence_polls
+        self.min_rr_bounce = min_rr_bounce
+        self.min_rr_breakout = min_rr_breakout
+        self.sl_atr_mult = sl_atr_mult
+        self.sl_buffer_pct = sl_buffer_pct
+        self.breakout_trigger_pct = breakout_trigger_pct
+        self.breakout_sl_inside_pct = breakout_sl_inside_pct
+        self.spoof_filter_shrink = spoof_filter_shrink
+        self.cooldown_s = cooldown_s
+        self._fired: Dict[str, float] = {}  # wall_id → fired_t
+
+    def evaluate(self, coin: str, walls: List[Wall], tracker: WallTracker,
+                  mid: float, atr_v: float,
+                  now_ts: Optional[float] = None
+                  ) -> Tuple[List[BounceSetup], List[BreakoutTrigger]]:
+        if now_ts is None: now_ts = time.time()
+        if not walls or mid <= 0 or atr_v <= 0: return [], []
+
+        # Verified walls only — passed persistence + spoof defense + first-touch
+        verified = []
+        for w in walls:
+            if w.persistence_polls < self.min_persistence: continue
+            if w.times_tested > 0: continue  # FIRST-TOUCH ONLY
+            shrink = tracker.shrink_pct(coin, w.side, w.price, mid, window_s=90)
+            if shrink is not None and shrink >= self.spoof_filter_shrink: continue
+            verified.append(w)
+
+        bids = sorted([w for w in verified if w.side == 'bid'], key=lambda w: -w.price)
+        asks = sorted([w for w in verified if w.side == 'ask'], key=lambda w: w.price)
+
+        # Need both sides for proper TP targeting
+        if not bids or not asks: return [], []
+
+        nearest_bid = bids[0]
+        nearest_ask = asks[0]
+
+        bounces = []
+        breakouts = []
+
+        # Skip if already fired on this wall in cooldown window
+        def _can_fire(wall: Wall) -> bool:
+            wid = wall.wall_id
+            if wid in self._fired and (now_ts - self._fired[wid]) < self.cooldown_s:
+                return False
+            return True
+
+        # === NEAREST BID WALL ===
+        if _can_fire(nearest_bid):
+            wid = nearest_bid.wall_id
+            # BOUNCE: BUY limit at top of bid wall, TP at nearest ask wall
+            bounce_limit = nearest_bid.high
+            bounce_sl = nearest_bid.low - max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
+            bounce_tp = nearest_ask.low - mid * 0.0005
+            if bounce_limit < mid and bounce_sl < bounce_limit < bounce_tp:
+                br_risk = bounce_limit - bounce_sl
+                br_reward = bounce_tp - bounce_limit
+                if br_risk > 0:
+                    rr = br_reward / br_risk
+                    if self.min_rr_bounce <= rr <= 12:
+                        # BREAKOUT: SELL trigger past bottom of bid wall
+                        # When price closes BELOW the bid wall, the wall broke down
+                        # → SELL with breakout, target next bid wall below or distant low
+                        further_bids = [w for w in walls if w.side == 'bid'
+                                          and w.persistence_polls >= 3
+                                          and w.price < nearest_bid.low * 0.998]
+                        breakout_tp = (max(further_bids, key=lambda w: w.price).high
+                                        if further_bids else nearest_bid.low * 0.99)  # 1% extension fallback
+                        breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
+                        breakout_sl = nearest_bid.low * (1 + self.breakout_sl_inside_pct)
+                        if breakout_sl > breakout_trigger > breakout_tp:
+                            bo_risk = breakout_sl - breakout_trigger
+                            bo_reward = breakout_trigger - breakout_tp
+                            if bo_risk > 0:
+                                bo_rr = bo_reward / bo_risk
+                                if self.min_rr_breakout <= bo_rr <= 12:
+                                    bid_breakout = BreakoutTrigger(
+                                        coin=coin, wall_id=wid + '|BO',
+                                        side='SELL', trigger_price=breakout_trigger,
+                                        sl_price=breakout_sl, tp_price=breakout_tp, rr=bo_rr,
+                                        armed_t=now_ts,
+                                        notes=f"BID-BREAK ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}"
+                                    )
+                                    bid_bounce = BounceSetup(
+                                        coin=coin, wall_id=wid,
+                                        side='BUY', entry_price=bounce_limit,
+                                        sl_price=bounce_sl, tp_price=bounce_tp, rr=rr,
+                                        sibling_breakout_id=bid_breakout.wall_id,
+                                        notes=f"BID-BOUNCE ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}({nearest_bid.persistence_polls}p) → ASK ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}"
+                                    )
+                                    bid_breakout.sibling_bounce_id = wid
+                                    bounces.append(bid_bounce)
+                                    breakouts.append(bid_breakout)
+                                    self._fired[wid] = now_ts
+
+        # === NEAREST ASK WALL ===
+        if _can_fire(nearest_ask):
+            wid = nearest_ask.wall_id
+            # BOUNCE: SELL limit at bottom of ask wall, TP at nearest bid wall
+            bounce_limit = nearest_ask.low
+            bounce_sl = nearest_ask.high + max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
+            bounce_tp = nearest_bid.high + mid * 0.0005
+            if bounce_limit > mid and bounce_tp < bounce_limit < bounce_sl:
+                br_risk = bounce_sl - bounce_limit
+                br_reward = bounce_limit - bounce_tp
+                if br_risk > 0:
+                    rr = br_reward / br_risk
+                    if self.min_rr_bounce <= rr <= 12:
+                        # BREAKOUT: BUY trigger past top of ask wall
+                        # When price closes ABOVE the ask wall, the wall broke up
+                        further_asks = [w for w in walls if w.side == 'ask'
+                                          and w.persistence_polls >= 3
+                                          and w.price > nearest_ask.high * 1.002]
+                        breakout_tp = (min(further_asks, key=lambda w: w.price).low
+                                        if further_asks else nearest_ask.high * 1.01)
+                        breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
+                        breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
+                        if breakout_sl < breakout_trigger < breakout_tp:
+                            bo_risk = breakout_trigger - breakout_sl
+                            bo_reward = breakout_tp - breakout_trigger
+                            if bo_risk > 0:
+                                bo_rr = bo_reward / bo_risk
+                                if self.min_rr_breakout <= bo_rr <= 12:
+                                    ask_breakout = BreakoutTrigger(
+                                        coin=coin, wall_id=wid + '|BO',
+                                        side='BUY', trigger_price=breakout_trigger,
+                                        sl_price=breakout_sl, tp_price=breakout_tp, rr=bo_rr,
+                                        armed_t=now_ts,
+                                        notes=f"ASK-BREAK ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}"
+                                    )
+                                    ask_bounce = BounceSetup(
+                                        coin=coin, wall_id=wid,
+                                        side='SELL', entry_price=bounce_limit,
+                                        sl_price=bounce_sl, tp_price=bounce_tp, rr=rr,
+                                        sibling_breakout_id=ask_breakout.wall_id,
+                                        notes=f"ASK-BOUNCE ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}({nearest_ask.persistence_polls}p) → BID ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}"
+                                    )
+                                    ask_breakout.sibling_bounce_id = wid
+                                    bounces.append(ask_bounce)
+                                    breakouts.append(ask_breakout)
+                                    self._fired[wid] = now_ts
+
+        return bounces, breakouts
+
+
+class SpoofBreakoutEngine:
+    """Sub-engine 2: market entry WITH spoof breakout direction. Unchanged from V8."""
+
+    def __init__(self, min_withdraw_pct: float = 0.70,
+                  min_peak_usd: float = 500_000,
+                  price_cross_pct: float = 0.0005,
+                  sl_buffer_pct: float = 0.0020,
+                  atr_buffer_mult: float = 0.2,
+                  cooldown_s: int = 300):
+        self.min_withdraw = min_withdraw_pct
+        self.min_peak_usd = min_peak_usd
+        self.price_cross_pct = price_cross_pct
+        self.sl_buffer_pct = sl_buffer_pct
+        self.atr_buffer_mult = atr_buffer_mult
+        self.cooldown_s = cooldown_s
+        self._fired: Dict = {}
+
+    def evaluate(self, coin: str, walls: List[Wall], tracker: WallTracker,
+                  mid: float, atr_v: float, now_ts: Optional[float] = None) -> List:
+        if now_ts is None: now_ts = time.time()
+        if mid <= 0 or atr_v <= 0: return []
+        if coin in self._fired and (now_ts - self._fired[coin]) < self.cooldown_s:
+            return []
+
+        for k in tracker.all_keys_for(coin):
+            h = tracker.history.get(k)
+            if not h or len(h) < 4: continue
+            try:
+                _, side, bucket_str = k.split('|')
+                bucket_price = float(bucket_str) * mid
+            except (ValueError, IndexError):
+                continue
+            peak_usd = max(usd for ts, usd in h)
+            recent_usd = h[-1][1]
+            if peak_usd < self.min_peak_usd: continue
+            shrink = 1.0 - (recent_usd / peak_usd)
+            if shrink < self.min_withdraw: continue
+
+            if side == 'bid':
+                if mid >= bucket_price * (1 - self.price_cross_pct): continue
+                sl = bucket_price * (1 + self.sl_buffer_pct) + self.atr_buffer_mult * atr_v
+                bids_left = sorted(
+                    [w for w in walls if w.side == 'bid' and w.price < mid and w.persistence_polls >= 3],
+                    key=lambda w: -w.price)
+                if not bids_left: continue
+                target = bids_left[0]
+                tp = target.high + mid * 0.0005
+                if not (sl > mid > tp): continue
+                risk = sl - mid; reward = mid - tp
+                if risk <= 0 or reward <= 0: continue
+                rr = reward / risk
+                if rr < 1.0 or rr > 10: continue
+                self._fired[coin] = now_ts
+                return [{
+                    'coin': coin, 'side': 'SELL', 'kind': 'SPOOF_BREAKOUT',
+                    'entry_price': mid, 'sl_price': sl, 'tp_price': tp, 'rr': rr,
+                    'notes': f"BID spoof @{bucket_price:.6f} peak ${peak_usd/1000:.0f}k → ${recent_usd/1000:.0f}k (-{shrink*100:.0f}%)",
+                }]
+            elif side == 'ask':
+                if mid <= bucket_price * (1 + self.price_cross_pct): continue
+                sl = bucket_price * (1 - self.sl_buffer_pct) - self.atr_buffer_mult * atr_v
+                asks_left = sorted(
+                    [w for w in walls if w.side == 'ask' and w.price > mid and w.persistence_polls >= 3],
+                    key=lambda w: w.price)
+                if not asks_left: continue
+                target = asks_left[0]
+                tp = target.low - mid * 0.0005
+                if not (sl < mid < tp): continue
+                risk = mid - sl; reward = tp - mid
+                if risk <= 0 or reward <= 0: continue
+                rr = reward / risk
+                if rr < 1.0 or rr > 10: continue
+                self._fired[coin] = now_ts
+                return [{
+                    'coin': coin, 'side': 'BUY', 'kind': 'SPOOF_BREAKOUT',
+                    'entry_price': mid, 'sl_price': sl, 'tp_price': tp, 'rr': rr,
+                    'notes': f"ASK spoof @{bucket_price:.6f} peak ${peak_usd/1000:.0f}k → ${recent_usd/1000:.0f}k (-{shrink*100:.0f}%)",
+                }]
+        return []
