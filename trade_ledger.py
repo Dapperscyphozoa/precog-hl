@@ -856,13 +856,31 @@ def system_aggregate(system='a', hours=12.0):
                 'engine': engine,
                 'coin': (row.get('coin') or '').upper(),
                 'pnl': pnl,
+                'close_reason': (row.get('close_reason') or '').lower(),
             })
 
     n_closed = len(closes)
     decided = [c for c in closes if c['pnl'] is not None]
-    wins = [c for c in decided if c['pnl'] > 0]
-    losses = [c for c in decided if c['pnl'] < 0]
-    breakevens = [c for c in decided if c['pnl'] == 0]
+
+    # 2026-05-07: BE-trail and TP exits with non-negative pnl count as wins.
+    # The BE-trail only fires after price moved in our favor enough to lock
+    # breakeven — that's a positive trade outcome, not a flat tape. TP exits
+    # rounding to exact zero pnl from microscopic fees are also wins.
+    def _is_win(c):
+        if c['pnl'] is None: return False
+        if c['pnl'] > 0: return True
+        cr = c.get('close_reason') or ''
+        if cr.startswith('tp') and c['pnl'] >= 0: return True
+        if cr == 'be_stop' and c['pnl'] >= 0: return True
+        return False
+    def _is_loss(c):
+        if c['pnl'] is None: return False
+        if _is_win(c): return False
+        return c['pnl'] < 0
+
+    wins = [c for c in decided if _is_win(c)]
+    losses = [c for c in decided if _is_loss(c)]
+    breakevens = [c for c in decided if not _is_win(c) and not _is_loss(c)]
     n_dec = len(wins) + len(losses)
 
     total_usd = sum(c['pnl'] for c in decided)
@@ -877,8 +895,8 @@ def system_aggregate(system='a', hours=12.0):
         by_engine[e]['n'] += 1
         if c['pnl'] is not None:
             by_engine[e]['pnl_usd'] += c['pnl']
-            if c['pnl'] > 0: by_engine[e]['w'] += 1
-            elif c['pnl'] < 0: by_engine[e]['l'] += 1
+            if _is_win(c): by_engine[e]['w'] += 1
+            elif _is_loss(c): by_engine[e]['l'] += 1
             else: by_engine[e]['b'] += 1
     for e, v in by_engine.items():
         dec = v['w'] + v['l']
@@ -892,8 +910,8 @@ def system_aggregate(system='a', hours=12.0):
         by_coin[ck]['n'] += 1
         if c['pnl'] is not None:
             by_coin[ck]['pnl_usd'] += c['pnl']
-            if c['pnl'] > 0: by_coin[ck]['w'] += 1
-            elif c['pnl'] < 0: by_coin[ck]['l'] += 1
+            if _is_win(c): by_coin[ck]['w'] += 1
+            elif _is_loss(c): by_coin[ck]['l'] += 1
             else: by_coin[ck]['b'] += 1
     for ck, v in by_coin.items():
         dec = v['w'] + v['l']
