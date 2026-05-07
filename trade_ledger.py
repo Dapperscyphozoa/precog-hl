@@ -851,12 +851,29 @@ def system_aggregate(system='a', hours=12.0):
                 pnl = float(pnl_raw) if pnl_raw not in (None, '') else None
             except (TypeError, ValueError):
                 pnl = None
+
+            cr = (row.get('close_reason') or '').lower()
+            # 2026-05-07: exclude non-trades from WR aggregator. These are
+            # signal-side bookkeeping rows where no real position ever existed:
+            #   confluence_no_fill         — limit order never filled
+            #   confluence_order_exception — order submission errored out
+            #   legacy_close_shim          — reconciler placeholder for orphan rows
+            # Including them drags WR by adding noise to the BE column.
+            if cr in ('confluence_no_fill', 'confluence_order_exception',
+                      'legacy_close_shim', 'reconcile_missing',
+                      'reconcile_duplicate_entry', 'reconcile_missing_on_cleanup'):
+                continue
+            # Reconciler 'missing close' attributions with no exit/no pnl —
+            # also not a real trade outcome.
+            if cr == 'exchange_fill' and pnl is None:
+                continue
+
             closes.append({
                 'ts': ts,
                 'engine': engine,
                 'coin': (row.get('coin') or '').upper(),
                 'pnl': pnl,
-                'close_reason': (row.get('close_reason') or '').lower(),
+                'close_reason': cr,
             })
 
     n_closed = len(closes)
