@@ -18,7 +18,8 @@ Isolation: HTTP polling only. No production touched.
 import json, os, sys, time, traceback, urllib.request
 from datetime import datetime, timezone
 from typing import Optional
-from coin_tiers import DepthBaseline, get_tier
+from coin_tiers import DepthBaseline, get_tier, coins_for_tick, ALL_COINS
+from concurrent.futures import ThreadPoolExecutor
 from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
                               cluster_walls, Wall, BounceSetup, BreakoutTrigger)
 
@@ -39,9 +40,11 @@ COIN_PACE_MS     = int(os.environ.get('COIN_PACE_MS', '400'))
 TRIGGER_EXPIRE_S = int(os.environ.get('TRIGGER_EXPIRE_S', '14400'))  # 4h
 BOUNCE_EXPIRE_S  = int(os.environ.get('BOUNCE_EXPIRE_S', '14400'))   # 4h
 STATE_FILE       = os.environ.get('STATE_FILE', '/var/data/pole_state_v9.json')
-DEFAULT_COINS    = ('BTC,ETH,SOL,BNB,XRP,ADA,AVAX,DOGE,LINK,DOT,ATOM,NEAR,APT,SUI,'
-                    'ARB,OP,INJ,TIA,SEI,LTC,UNI,CRV,WIF,ENA,JUP,ONDO,FET,LDO')
-COINS            = [c.strip().upper() for c in os.environ.get('COINS', DEFAULT_COINS).split(',') if c.strip()]
+# COINS env optional override; default uses full tiered universe (152 coins)
+COINS_OVERRIDE   = os.environ.get('COINS', '').strip()
+COINS            = ([c.strip().upper() for c in COINS_OVERRIDE.split(',') if c.strip()]
+                    if COINS_OVERRIDE else list(ALL_COINS))
+SCAN_WORKERS     = int(os.environ.get('SCAN_WORKERS', '8'))
 
 state = {
     'balance': 0.0, 'positions': {}, 'pending': {}, 'triggers': {},
@@ -310,80 +313,80 @@ def tick():
     now_ts = time.time()
     summary = {}
 
-    for coin in COINS:
+    # Tier-staggered scan: only scan coins due this tick
+    coins_this_tick = coins_for_tick(state['tick_count'], COINS)
+    log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick (tiered cadence)")
+
+    def scan_one(coin):
+        """Fetch + cluster for one coin. Returns (coin, summary_data, bounces, breakouts, spoof_setups) or None on fail."""
         try:
             ob = fetch_orderbook(coin)
-            if not ob or not ob.get('mid'):
-                time.sleep(COIN_PACE_MS/1000.0); continue
+            if not ob or not ob.get('mid'): return None
             mid = ob['mid']
-            # Per-coin dynamic threshold: max(tier_floor, dynamic_baseline × multiplier)
             tier_usd, tier_persistence = get_tier(coin)
             min_usd, min_persistence = DEPTH_BASE.threshold(coin)
-
             bid_res = cluster_walls(ob.get('bids', []), mid, 'bid', min_usd=min_usd, return_all_buckets=True)
             ask_res = cluster_walls(ob.get('asks', []), mid, 'ask', min_usd=min_usd, return_all_buckets=True)
             bid_walls, bid_bucket_usds = bid_res
             ask_walls, ask_bucket_usds = ask_res
-            # Update depth baseline for this coin
             DEPTH_BASE.record(coin, bid_bucket_usds + ask_bucket_usds)
-
-            # Need last 5m candle for touch detection + trigger evaluation
             last_5m = get_5m_close(coin)
             last_low = last_5m['l'] if last_5m else mid
             last_high = last_5m['h'] if last_5m else mid
             tracked = TRACKER.update(coin, bid_walls + ask_walls, mid, now_ts, last_low, last_high)
-
             verified_b = [w for w in tracked if w.side=='bid' and w.persistence_polls >= min_persistence and w.times_tested == 0]
             verified_a = [w for w in tracked if w.side=='ask' and w.persistence_polls >= min_persistence and w.times_tested == 0]
             nb = min(verified_b, key=lambda w: w.distance_pct, default=None)
             na = min(verified_a, key=lambda w: w.distance_pct, default=None)
-            summary[coin] = {
+            sm = {
                 'mid': mid, 'vb': len(verified_b), 'va': len(verified_a), 'nb': nb, 'na': na,
                 'min_usd': min_usd, 'tier_usd': tier_usd,
                 'all_buckets': len(bid_bucket_usds) + len(ask_bucket_usds),
                 'near_miss_b': len([w for w in tracked if w.side=='bid' and w.persistence_polls >= max(1, min_persistence-1)]),
                 'near_miss_a': len([w for w in tracked if w.side=='ask' and w.persistence_polls >= max(1, min_persistence-1)]),
             }
-
             atr_v = get_atr(coin)
-            if atr_v <= 0:
-                time.sleep(COIN_PACE_MS/1000.0); continue
-
-            # Check breakout triggers FIRST (before generating new ones)
-            check_triggers(coin, last_5m)
-
-            # Generate new paired setups — pass existing armed triggers for cluster dedup
+            if atr_v <= 0: return (coin, sm, [], [], [], last_5m)
             existing_armed = [t for t in state['triggers'].values() if t.get('coin') == coin]
             bounces, breakouts = POLE.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts,
                                                   min_persistence_polls=min_persistence,
                                                   existing_armed_triggers=existing_armed)
-            for b in bounces: place_bounce(b)
-            for bk in breakouts: arm_breakout(bk)
-
-            # Spoof breakout (separate sub-engine)
             sps = SPOOF.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts)
-            for sp in sps:
-                if sp['coin'] in state['positions']: continue
-                if len(state['positions']) >= MAX_POSITIONS: continue
-                size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])
-                if size <= 0: continue
-                log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} sz={size:.6f} ${notional:.2f}")
-                log(f"  notes: {sp['notes']}")
-                is_buy = (sp['side'] == 'BUY')
-                place_market(sp['coin'], is_buy, size, label='SPOOF')
-                place_limit(sp['coin'], not is_buy, size, sp['sl_price'], reduce_only=True, label='SPOOF-SL')
-                place_limit(sp['coin'], not is_buy, size, sp['tp_price'], reduce_only=True, label='SPOOF-TP')
-                state['positions'][sp['coin']] = {
-                    'side': sp['side'], 'kind': 'SPOOF', 'entry': sp['entry_price'],
-                    'sl': sp['sl_price'], 'tp': sp['tp_price'], 'size': size,
-                    'opened_t': int(time.time()*1000),
-                }
-                state['fires_spoof'] += 1
-
-            time.sleep(COIN_PACE_MS/1000.0)
+            return (coin, sm, bounces, breakouts, sps, last_5m)
         except Exception as e:
             log(f"  scan {coin} err: {e}")
+            return None
 
+    # Parallel scan
+    scan_results = []
+    with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:
+        for r in ex.map(scan_one, coins_this_tick):
+            if r is not None: scan_results.append(r)
+
+    # Sequential processing of results (handle_setup not thread-safe wrt state)
+    for coin, sm, bounces, breakouts, sps, last_5m in scan_results:
+        summary[coin] = sm
+        # Triggers FIRST
+        check_triggers(coin, last_5m)
+        for b in bounces: place_bounce(b)
+        for bk in breakouts: arm_breakout(bk)
+        for sp in sps:
+            if sp['coin'] in state['positions']: continue
+            if len(state['positions']) >= MAX_POSITIONS: continue
+            size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])
+            if size <= 0: continue
+            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} sz={size:.6f} ${notional:.2f}")
+            log(f"  notes: {sp['notes']}")
+            is_buy = (sp['side'] == 'BUY')
+            place_market(sp['coin'], is_buy, size, label='SPOOF')
+            place_limit(sp['coin'], not is_buy, size, sp['sl_price'], reduce_only=True, label='SPOOF-SL')
+            place_limit(sp['coin'], not is_buy, size, sp['tp_price'], reduce_only=True, label='SPOOF-TP')
+            state['positions'][sp['coin']] = {
+                'side': sp['side'], 'kind': 'SPOOF', 'entry': sp['entry_price'],
+                'sl': sp['sl_price'], 'tp': sp['tp_price'], 'size': size,
+                'opened_t': int(time.time()*1000),
+            }
+            state['fires_spoof'] += 1
     coins_with_zones = [c for c, d in summary.items() if d['nb'] and d['na']]
     log(f"Wall map: {len(coins_with_zones)} coins with both fresh bid+ask verified walls")
     for c in coins_with_zones[:12]:
