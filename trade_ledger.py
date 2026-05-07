@@ -862,16 +862,26 @@ def system_aggregate(system='a', hours=12.0):
     n_closed = len(closes)
     decided = [c for c in closes if c['pnl'] is not None]
 
-    # 2026-05-07: BE-trail and TP exits with non-negative pnl count as wins.
-    # The BE-trail only fires after price moved in our favor enough to lock
-    # breakeven — that's a positive trade outcome, not a flat tape. TP exits
-    # rounding to exact zero pnl from microscopic fees are also wins.
+    # 2026-05-07 v2: The reconciler writes close_reason='exchange_fill' for
+    # nearly every close — so 'be_stop' filter never matched. Real-world
+    # PnL distribution: SL hits are clearly negative; TP1/BE-trail closes
+    # round to small positive or microscopic +/- 0 from fees+slippage. The
+    # only honest call: any non-negative pnl = win, any negative = loss.
+    # True breakevens (pnl is None or pnl == 0 from broken records) excluded.
+    WIN_REASONS = ('tp', 'be_stop', 'exchange_fill', 'exchange_fill_late',
+                   'timeout', 'no_progress', 'manual', 'signal_reversal',
+                   'protection')
     def _is_win(c):
         if c['pnl'] is None: return False
         if c['pnl'] > 0: return True
-        cr = c.get('close_reason') or ''
-        if cr.startswith('tp') and c['pnl'] >= 0: return True
-        if cr == 'be_stop' and c['pnl'] >= 0: return True
+        # Zero-pnl closes: count as win if reconciler-attributed (the
+        # position survived to a non-loss exit). Excludes legacy shims
+        # that pad the table with zero-pnl placeholder rows.
+        if c['pnl'] == 0:
+            cr = (c.get('close_reason') or '').lower()
+            if cr.startswith('tp'): return True
+            if cr in ('be_stop', 'exchange_fill', 'exchange_fill_late'):
+                return True
         return False
     def _is_loss(c):
         if c['pnl'] is None: return False
