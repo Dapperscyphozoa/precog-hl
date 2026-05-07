@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """
-smc_v2_service.py — SMC-LOOSE engine (R-1_max params, 4-coin whitelist).
+smc_v2_service.py — Standalone SMC v2 (R3) live trader.
 
-Runs alongside SMC v2, Multi-gate, and SMC v1 on the same HL account.
-Total isolation:
-  - Tags all orders with cloid prefix `smcloose_`
-  - Owns only positions it placed (tracked in /var/data/smc_loose_state.json)
-  - Does NOT touch other engines' state, code, or open positions
+Runs alongside PreCog v8.28 on the same HL account. Total isolation:
+  - Tags all orders with cloid prefix `pa_smc_` (Pool Architect SMC)
+  - Owns only positions it placed (tracked in /var/data/smc_v2_state.json)
+  - Does NOT touch precog.py, does NOT manage other engines' positions
+  - Does NOT read/modify PreCog's state file
 
-Strategy: same SMC top-down state machine as v2, with LOOSER thresholds
-(R-1_max preset) and a CURATED whitelist of 4 coins that showed
-consistent positive edge across both halves of a 7-week 50d backtest.
+Strategy: SMC top-down (HTF=4H → MTF=1H → LTF=15m), Rank 3 config.
+Setup pipeline: IDLE → IN_ZONE → SWEPT → ARMED → FILL.
+Exits: 50% TP1 → SL→BE → 50% TP2 (or BE-stop, or time-stop).
 
-Whitelist (validated 2026-05-05):
-  DYM   — n=6 +6.87R 67% WR, both halves positive
-  AVAX  — n=4 +5.62R 75% WR, both halves positive
-  XLM   — n=5 +3.10R 60% WR, both halves positive
-  BCH   — n=5 +2.00R 60% WR, both halves positive
-
-Sizing: FIXED_NOTIONAL_USD per trade. Leverage: per-coin HL caps.
+Sizing: FIXED_NOTIONAL_USD per trade (default $25). Leverage: from leverage_map (default 10x).
 """
 import os, sys, time, json, math, hashlib, traceback
 from datetime import datetime, timezone
@@ -30,46 +24,62 @@ from hyperliquid.utils import constants
 from eth_account import Account
 
 
+
+# UZT bridge — Lesson 2 unified zone trading
+try:
+    import unified_state as _uzt
+    import htf_zones as _hz
+    _UZT_ENABLED = True
+except ImportError:
+    _UZT_ENABLED = False
+
+# auto_blacklist — 3-consecutive-loss demote
+try:
+    import auto_blacklist as _bl
+    _BL_ENABLED = True
+except ImportError:
+    _BL_ENABLED = False
+
+_bl_last_tick = [0.0]
 # ═══════════════════════════════════════════════════════
-# CONFIG — R-1_max (LOOSE) — validated on whitelist coins only
+# CONFIG — R3 (locked from sweep results)
 # ═══════════════════════════════════════════════════════
 PARAMS = {
-    'htf_lb': 3,             # was 5 — smaller pivot lookback, more zones
-    'htf_displace': 0.8,     # was 1.75 — smaller HTF displacement filter
+    'htf_lb': 5,
+    'htf_displace': 0.8,
     'htf_max_age': 540,
-    'ltf_lb': 2,             # was 4 — more sensitive LTF pivots
-    'sweep_vol': 0.3,        # was 1.0 — much weaker sweep vol confirmation
-    'mss_vol': 0.3,          # was 1.0 — much weaker MSS vol confirmation
-    'displace': 0.6,         # was 2.0 — small candles allowed
+    'ltf_lb': 4,
+    'sweep_vol': 1.0,
+    'mss_vol': 1.0,
+    'displace': 2.0,
     'sl_buf_pct': 0.0003,
-    'approach_pct': 0.08,    # was 0.03 — wider approach to HTF zone
-    'rr_min': 1.3,           # was 2.25 — accept tighter R:R
-    'timeout_bars': 80,      # was 40 — more patience (20h vs 10h on 15m)
+    'approach_pct': 0.03,
+    'rr_min': 2.25,
+    'timeout_bars': 40,
 }
 
-# WHITELIST: only trade these coins. Validated 7-week split-window stable.
-WHITELIST = {'DYM', 'AVAX', 'XLM', 'BCH'}
-
-# Coins with strict-negative outcomes in 52-day backtest — kept for safety,
-# but WHITELIST already filters everything stricter than this.
+# Coins with strict-negative outcomes in 52-day backtest (n>=2, 0 wins)
 BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC', 'BLAST'}
 
+# Majors — handled by PreCog v8.28, not SMC v2
+EXCLUDED_MAJORS = {'BTC','ETH','BNB','SOL','BCH','LTC','XRP','ADA','DOGE','AVAX','DOT','TRX','TON'}
+
 # Sizing
-FIXED_NOTIONAL_USD = float(os.environ.get('SMCLOOSE_NOTIONAL_USD', '25'))
-DEFAULT_LEVERAGE = int(os.environ.get('SMCLOOSE_LEVERAGE', '10'))
-MAX_CONCURRENT = int(os.environ.get('SMCLOOSE_MAX_CONCURRENT', '15'))   # only 4 coins
-COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCLOOSE_COIN_LOSS_THRESHOLD', '2'))
-COIN_COOLDOWN_HOURS = int(os.environ.get('SMCLOOSE_COIN_COOLDOWN_HOURS', '24'))
-LIVE_TRADING = os.environ.get('SMCLOOSE_LIVE', '0') == '1'
+FIXED_NOTIONAL_USD = float(os.environ.get('SMCV2_NOTIONAL_USD', '25'))
+DEFAULT_LEVERAGE = int(os.environ.get('SMCV2_LEVERAGE', '10'))
+MAX_CONCURRENT = int(os.environ.get('SMCV2_MAX_CONCURRENT', '20'))
+COIN_LOSS_COOLDOWN_THRESHOLD = int(os.environ.get('SMCV2_COIN_LOSS_THRESHOLD', '2'))
+COIN_COOLDOWN_HOURS = int(os.environ.get('SMCV2_COIN_COOLDOWN_HOURS', '24'))
+LIVE_TRADING = os.environ.get('SMCV2_LIVE', '0') == '1'
 
 # Timing
 TICK_SEC = 60                       # main loop cadence
 POSITION_CHECK_SEC = 30             # poll position state for TP1 fills
-MAX_HOLD_BARS_LTF = 80 * 4          # 80 bars × 15m = 20h (looser timeout_bars)
+MAX_HOLD_BARS_LTF = 40 * 4          # 40 bars × 15m = 10h; keep liberal time-stop
 MAX_HOLD_SEC = MAX_HOLD_BARS_LTF * 15 * 60
 
 # Storage
-STATE_PATH = os.environ.get('SMCLOOSE_STATE_PATH', '/var/data/smc_loose_state.json')
+STATE_PATH = os.environ.get('SMCV2_STATE_PATH', '/var/data/smc_v2_state.json')
 LOG_BUFFER = deque(maxlen=500)
 
 
@@ -338,16 +348,12 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
 
             if mss:
                 sweep_wick = setup['sweep_wick']
-                # 2026-05-05: SL floor — sweep_wick can be at/near entry,
-                # producing 0.03-0.20% SLs that fire on noise within seconds.
-                # Floor SL distance at MIN_SL_PCT (default 0.5%) to give
-                # trades room to breathe. Live audit: 63% of trades were
-                # being flushed at near-BE due to this. See FIX 1 audit.
-                MIN_SL_PCT = float(os.environ.get('SMCLOOSE_MIN_SL_PCT', '0.005'))
                 if setup['is_long']:
                     entry = max(opens[i], sweep_wick) if opens[i] < closes[i] else lows[i]
                     sl = sweep_wick * (1 - sl_buf_pct)
-                    sl = min(sl, entry * (1 - MIN_SL_PCT))   # floor: SL ≥ MIN_SL_PCT below entry
+                    # Fix 1: floor SL distance at MIN_SL_PCT to prevent BE-flushes
+                    MIN_SL_PCT = float(os.environ.get('SMCV2_MIN_SL_PCT', '0.005'))
+                    sl = min(sl, entry * (1 - MIN_SL_PCT))
                     risk = entry - sl
                     if risk <= 0:
                         state = 'IDLE'; continue
@@ -356,7 +362,9 @@ def run_ltf(c15, htf_states, c1h, mtf_phs, mtf_pls, params, return_armed_setup=F
                 else:
                     entry = min(opens[i], sweep_wick) if opens[i] > closes[i] else highs[i]
                     sl = sweep_wick * (1 + sl_buf_pct)
-                    sl = max(sl, entry * (1 + MIN_SL_PCT))   # floor: SL ≥ MIN_SL_PCT above entry
+                    # Fix 1: floor SL distance at MIN_SL_PCT
+                    MIN_SL_PCT = float(os.environ.get('SMCV2_MIN_SL_PCT', '0.005'))
+                    sl = max(sl, entry * (1 + MIN_SL_PCT))
                     risk = sl - entry
                     if risk <= 0:
                         state = 'IDLE'; continue
@@ -475,16 +483,6 @@ def round_size(coin, sz):
 
 
 def get_universe():
-    """Scan full HL perp universe (minus delisted + blacklist).
-
-    2026-05-05: WHITELIST gate REMOVED at operator request. SMC-LOOSE now
-    scans all coins with R-1_max params. The original 4-coin curated set
-    (DYM/AVAX/XLM/BCH) was based on 7-week backtest stable-edge filtering;
-    full universe now lets the engine surface real-time opportunities and
-    we filter post-hoc from live results. Note: backtest universe-wide
-    showed -0.25R total over 30 coins / 7w with R-1_max — track per-coin
-    P&L closely and re-whitelist if edge isn't there live.
-    """
     try:
         m = info.meta()
         coins = []
@@ -492,6 +490,10 @@ def get_universe():
             n = u.get('name')
             if not n: continue
             if u.get('isDelisted'): continue
+            # 2026-05-05: majors RE-INCLUDED. Operator notes that BTC/ETH/etc.
+            # respect market-maker levels more cleanly than midcaps; SMC setups
+            # work well on them. EXCLUDED_MAJORS retained as a constant for
+            # other code paths but no longer filters here.
             if n in BLACKLIST: continue
             coins.append(n)
         return coins
@@ -751,6 +753,20 @@ def append_history(state, pos):
             pos['realized_pnl'] = round(sign * (close_px - entry) * sz, 4)
         else:
             pos['realized_pnl'] = 0.0
+    # auto_blacklist — record outcome for consec-loss tracking
+    if _BL_ENABLED:
+        try:
+            coin_name = pos.get('coin')
+            outcome = pos.get('outcome', 'UNKNOWN')
+            realized = float(pos.get('realized_pnl') or 0)
+            if coin_name:
+                # WIN: TP1, TP2, BE (partial banked), or any positive realized PnL
+                # LOSS: SL or any negative realized PnL
+                won = (outcome in ('TP1', 'TP2', 'BE')) or realized > 0
+                _bl.record_outcome(coin_name, won=won, r_mult=None)
+        except Exception as e:
+            log(f'  blacklist record_outcome err: {e}')
+
     archive_position(pos)
     state['history'].append(pos)
     # Cap in-memory list
@@ -832,7 +848,7 @@ def save_state(state):
     try:
         from dashboard_push import push_state as _dash_push
         _dash_push(
-            engine_name='smc-loose',
+            engine_name='pool-arch-rev',
             live=LIVE_TRADING,
             sizing_mode='fixed',
             notional_usd=FIXED_NOTIONAL_USD,
@@ -851,10 +867,9 @@ def save_state(state):
 # ═══════════════════════════════════════════════════════
 def make_cloid(coin, suffix):
     """16-byte hex cloid via SHA-256. Uniquely encodes coin+timestamp+suffix
-    regardless of coin name length. Prefix `smcloose_` distinguishes from
-    SMC v2 (`smcv2_`), multi-gate, and SMC v1 cloids on the shared wallet.
+    regardless of coin name length (was truncating suffix for coins >=5 chars).
     """
-    raw = f'smcloose_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
+    raw = f'pa_smc_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
     return '0x' + hashlib.sha256(raw).hexdigest()[:32]
 
 
@@ -913,6 +928,11 @@ def cancel_order(coin, cloid):
     """Cancel a resting order by cloid (string, 0x-prefixed 32-hex).
     HL SDK requires Cloid object — wrap proactively to avoid the error+retry
     cycle that pollutes logs.
+
+    B202: retry up to 3 times on 429/rate-limit errors. The HL endpoint can
+    return 429 transiently, especially during high-activity windows. Without
+    retry, orphan reduce-only triggers stay on the book — actual bug observed
+    on SEI 13:51:30 SL fill where the orphan TP1 leg never got cancelled.
     """
     if not LIVE_TRADING:
         log(f'  [DRY] cancel {coin} cloid={cloid}')
@@ -931,11 +951,24 @@ def cancel_order(coin, cloid):
             cloid_obj = Cloid.from_str(cloid) if isinstance(cloid, str) else cloid
         except Exception:
             pass  # fall through with raw string; SDK may still handle
-    try:
-        return exchange.cancel_by_cloid(coin, cloid_obj)
-    except Exception as e:
-        log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: {e}')
-        return None
+    last_err = None
+    for attempt in range(3):
+        try:
+            return exchange.cancel_by_cloid(coin, cloid_obj)
+        except Exception as e:
+            last_err = e
+            msg = str(e)
+            if '429' in msg or 'Too Many' in msg or 'rate' in msg.lower():
+                # Exponential backoff: 1s, 2s, 4s
+                sleep_t = 2 ** attempt
+                log(f'  cancel {coin} attempt {attempt+1}/3 hit rate-limit → sleep {sleep_t}s')
+                time.sleep(sleep_t)
+                continue
+            # Non-rate-limit error → log and bail
+            log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: {e}')
+            return None
+    log(f'  cancel err {coin} cloid={str(cloid)[:18]}...: gave up after 3 retries: {last_err}')
+    return None
 
 
 def cancel_orphan_legs(coin, pos, fired_leg):
@@ -1153,10 +1186,10 @@ def fire_setup(coin, setup, state):
 
     close_dir = not is_long  # close direction (sell to close long, buy to close short)
 
-    # Exit policy — set via env SMCLOOSE_EXIT_POLICY. Default 'tp1_full'.
+    # Exit policy — set via env SMCV2_EXIT_POLICY. Default 'tp1_full'.
     #   'tp1_full': 100% size exits at TP1 (1.5R). No TP2, no BE-stop. PF 1.61 net (re-BT).
     #   'split_be': 50/50 split with BE-stop. Legacy. PF 0.68 net.
-    EXIT_POLICY = os.environ.get('SMCLOOSE_EXIT_POLICY', 'tp1_full').lower()
+    EXIT_POLICY = os.environ.get('SMCV2_EXIT_POLICY', 'tp1_full').lower()
 
     if EXIT_POLICY == 'tp1_full':
         orders = [
@@ -1226,9 +1259,31 @@ def fire_setup(coin, setup, state):
         # reduceOnlyRejected. For SMC retests this is rare since entry +
         # protective legs land in one bulk_orders request — if we see reject
         # patterns the fix is to bump SDK to 0.21.0+ and restore the kwarg.
-        res = exchange.bulk_orders(orders)
+        #
+        # B204: retry on 429/rate-limit, same pattern as B202 cancel_order.
+        # Without this, fires get dropped during HL rate spikes.
+        res = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                res = exchange.bulk_orders(orders)
+                break
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                if '429' in msg or 'Too Many' in msg or 'rate' in msg.lower():
+                    sleep_t = 2 ** attempt  # 1s, 2s, 4s
+                    log(f'  {coin} bulk_orders attempt {attempt+1}/3 hit rate-limit → sleep {sleep_t}s')
+                    time.sleep(sleep_t)
+                    continue
+                # Non-rate-limit error — bail immediately
+                log(f'  {coin} bulk_orders exception: {e}')
+                return False
+        if res is None:
+            log(f'  {coin} bulk_orders gave up after 3 retries: {last_err}')
+            return False
     except Exception as e:
-        log(f'  {coin} bulk_orders exception: {e}')
+        log(f'  {coin} bulk_orders exception (outer): {e}')
         return False
 
     if not res or res.get('status') != 'ok':
@@ -1238,11 +1293,24 @@ def fire_setup(coin, setup, state):
     # Parse per-leg statuses. HL response shape:
     #   {'status':'ok','response':{'type':'order','data':{'statuses':[...]}}}
     # Each status: {'resting':{'oid':...}} | {'filled':{...}} | {'error':'...'}
+    #
+    # B205: validate response shape. We sent N legs, so statuses MUST contain N
+    # entries. If shape is malformed (during HL stress we've observed empty /
+    # short statuses with status=ok), treat as failure and bail.
     statuses = []
     try:
         statuses = res.get('response', {}).get('data', {}).get('statuses', [])
     except (AttributeError, TypeError):
         pass
+    if not isinstance(statuses, list) or len(statuses) < len(orders):
+        log(f'  {coin} bulk_orders malformed statuses: got {len(statuses) if isinstance(statuses, list) else type(statuses).__name__}, expected {len(orders)}. Raw res: {str(res)[:300]}')
+        for cl in (cloid_entry, cloid_sl, cloid_tp1, cloid_tp2):
+            if cl:
+                try:
+                    cancel_order(coin, cl)
+                except Exception:
+                    pass
+        return False
 
     leg_names = ['entry', 'sl', 'tp1', 'tp2']
     failed_legs = []
@@ -1463,7 +1531,7 @@ def reconcile_positions(state):
 
         # TP1 leg → move SL to BE (or full close under tp1_full policy)
         elif leg == 'tp1' and pos['phase'] in ('live', 'pending_fill'):
-            EXIT_POLICY = os.environ.get('SMCLOOSE_EXIT_POLICY', 'tp1_full').lower()
+            EXIT_POLICY = os.environ.get('SMCV2_EXIT_POLICY', 'tp1_full').lower()
             if EXIT_POLICY == 'tp1_full':
                 log(f'  {coin} TP1 hit at {fill_px} — full close (tp1_full policy)')
                 pos['phase'] = 'done'
@@ -2035,6 +2103,85 @@ def reconcile_phantoms(state):
 
         if is_phantom:
             log(f'  phantom detected: {coin} phase={pos.get("phase")} → {reason}')
+
+            # B201: BEFORE marking phantom_closed with pnl=0, try to recover the
+            # actual exit fill from HL userFillsByTime. If reconcile_positions
+            # missed the fill (429 backoff, network glitch), the exit really
+            # happened on HL — we just didn't process it. Inventing pnl=0 hides
+            # real wins/losses. Look back from fired_t to now and pick the most
+            # recent reduce-only fill on this coin matching close direction.
+            recovered = False
+            try:
+                fired_t = pos.get('fired_t', 0) or pos.get('opened_t', 0) or 0
+                if fired_t > 0:
+                    since = max(fired_t - 60_000, int(time.time()*1000) - 24*3600*1000)
+                    fills_recent = fetch_recent_fills(since)
+                    if fills_recent:
+                        is_long = pos.get('is_long')
+                        close_side_is_buy = not is_long  # closing a long = sell, closing a short = buy
+                        # Find the latest fill on this coin that closes our position
+                        candidates = []
+                        for f in fills_recent:
+                            if f.get('coin') != coin: continue
+                            if f.get('time', 0) < fired_t: continue
+                            f_is_buy = (f.get('side') == 'B')
+                            # Must be on the closing side AND reduce_only
+                            # (HL marks reduceOnly via dir starting with 'Close')
+                            d = (f.get('dir') or '').lower()
+                            is_close = ('close' in d) or (f.get('startPosition') is not None
+                                and abs(float(f.get('startPosition', 0))) > abs(float(f.get('sz', 0))))
+                            if f_is_buy == close_side_is_buy and is_close:
+                                candidates.append(f)
+                        if candidates:
+                            # Use the latest (largest time)
+                            candidates.sort(key=lambda x: x.get('time', 0))
+                            exit_fill = candidates[-1]
+                            exit_px = float(exit_fill.get('px', 0))
+                            exit_t = exit_fill.get('time', int(time.time()*1000))
+                            # Compute realized R from entry
+                            entry_px = float(pos.get('actual_entry_px') or pos.get('entry') or 0)
+                            sl_px = float(pos.get('sl', 0))
+                            sz = float(exit_fill.get('sz', 0))
+                            realized_pnl = float(exit_fill.get('closedPnl', 0))
+                            risk_per_unit = abs(entry_px - sl_px) if (entry_px and sl_px) else 0
+                            r_value = 0.0
+                            if risk_per_unit > 0 and sz > 0:
+                                if is_long:
+                                    r_value = (exit_px - entry_px) / risk_per_unit
+                                else:
+                                    r_value = (entry_px - exit_px) / risk_per_unit
+                            # Determine outcome from the closing fill's identity
+                            cl = exit_fill.get('cloid')
+                            recovered_outcome = None
+                            if cl:
+                                if cl == pos.get('cloid_tp1'): recovered_outcome = 'TP1'
+                                elif cl == pos.get('cloid_tp2'): recovered_outcome = 'TP2'
+                                elif cl == pos.get('cloid_sl'):
+                                    recovered_outcome = 'BE' if pos.get('phase') == 'tp1_filled' else 'SL'
+                                elif cl == pos.get('cloid_close'): recovered_outcome = 'CLOSE'
+                            if not recovered_outcome:
+                                # Infer from price relationship
+                                if is_long:
+                                    if exit_px >= entry_px * 1.001: recovered_outcome = 'TP1'
+                                    elif exit_px <= sl_px * 1.001: recovered_outcome = 'SL'
+                                    else: recovered_outcome = 'BE'
+                                else:
+                                    if exit_px <= entry_px * 0.999: recovered_outcome = 'TP1'
+                                    elif exit_px >= sl_px * 0.999: recovered_outcome = 'SL'
+                                    else: recovered_outcome = 'BE'
+                            log(f'  {coin} RECOVERED real exit from HL fills: '
+                                f'px={exit_px} pnl=${realized_pnl:+.4f} R={r_value:+.2f} '
+                                f'outcome={recovered_outcome} (was about to mark phantom_closed=$0)')
+                            pos['close_px'] = exit_px
+                            pos['closed_t'] = exit_t
+                            pos['close_reason'] = recovered_outcome.lower()
+                            pos['outcome'] = recovered_outcome
+                            pos['realized_pnl'] = realized_pnl
+                            pos['final_r'] = r_value
+                            recovered = True
+            except Exception as _e:
+                log(f'  {coin} fill recovery err: {_e} — falling through to phantom mark')
+
             # Cancel any orphaned reduce-only triggers we own for this coin
             for o in hl_orders_by_coin.get(coin, []):
                 cl = o.get('cloid')
@@ -2048,9 +2195,11 @@ def reconcile_phantoms(state):
                         log(f'    cancel orphaned err: {_e}')
 
             pos['phase'] = 'done'
-            pos['close_reason'] = reason
-            pos['closed_t'] = int(time.time() * 1000)
-            pos['close_px'] = pos.get('actual_entry_px') or pos.get('entry') or 0
+            if not recovered:
+                # Fall back to original behavior — mark as phantom with $0
+                pos['close_reason'] = reason
+                pos['closed_t'] = int(time.time() * 1000)
+                pos['close_px'] = pos.get('actual_entry_px') or pos.get('entry') or 0
             append_history(state, pos)
             to_remove.append(coin)
             purged += 1
@@ -2095,14 +2244,17 @@ def sweep_stale_orders(state):
         log(f'sweep_stale_orders: HL fetch err: {e}')
         return 0
 
+    # Coins with active positions on HL
     hl_open_coins = set()
     for ap in (us or {}).get('assetPositions', []):
         pos = ap.get('position', {})
         if abs(float(pos.get('szi', 0) or 0)) > 0:
             hl_open_coins.add(pos.get('coin'))
 
+    # Coins we think we have positions for
     our_active_coins = set(state.get('positions', {}).keys())
 
+    # Build set of cloids we know about across history (last 200 closed)
     known_cloids = set()
     for pos in state.get('positions', {}).values():
         for k in ('cloid_entry', 'cloid_sl', 'cloid_tp1', 'cloid_tp2', 'cloid_close'):
@@ -2118,9 +2270,15 @@ def sweep_stale_orders(state):
         coin = o.get('coin')
         if not coin:
             continue
+        # Skip if coin still has a real position on HL or we still track it
         if coin in hl_open_coins or coin in our_active_coins:
             continue
         # ONLY cancel orders whose cloid we explicitly placed.
+        # The previous rule "cancel any reduce_only" was wrong on a multi-engine
+        # wallet: when smcv2 placed SPX entry+SL+TP and the entry was still
+        # pending_fill, brk's sweep saw the SL as reduce_only on a coin neither
+        # in brk's state nor on HL (entry hadn't filled) and cancelled it.
+        # Strict cloid match ensures each engine only cleans up its own legs.
         cloid = o.get('cloid')
         if not cloid or cloid not in known_cloids:
             continue
@@ -2275,8 +2433,34 @@ def scan_for_setups(state, reconcile_fn=None):
                     n_stale += 1
                     continue
 
+            # UZT gate: refuse fire if zone already consumed or claimed by BRK
+            if _UZT_ENABLED:
+                _z = s.get('htf_zone')
+                if _z:
+                    if _uzt.is_consumed(coin, _z):
+                        log(f'  {coin} UZT skip: zone already consumed')
+                        n_dedup += 1
+                        continue
+                    if not _uzt.can_fire_reversal(coin, _z):
+                        st = _uzt.get_zone_state(coin, _z)
+                        log(f'  {coin} UZT skip: zone state={st} blocks reversal')
+                        n_dedup += 1
+                        continue
+
+            # auto_blacklist gate — coin paused after 3 consecutive losses
+            if _BL_ENABLED and _bl.is_paused(coin):
+                log(f'  {coin} BL skip: coin paused (consec_losses ≥ 3)')
+                n_dedup += 1
+                continue
+
             n_armed += 1
             log(f'  ARMED {coin}: {"LONG" if s["is_long"] else "SHORT"} entry={s["entry"]:.5f} mss_t={mss_t}')
+            if _UZT_ENABLED and s.get('htf_zone'):
+                _uzt.mark_reversal_armed(coin, s['htf_zone'], {
+                    'entry': s.get('entry'), 'sl': s.get('sl'), 'tp1': s.get('tp1'),
+                    'mss_t': mss_t,
+                })
+
             if fire_setup(coin, s, state):
                 last_fired[coin] = mss_t
                 n_fired_ok += 1
@@ -2339,7 +2523,7 @@ def verify_agent_approval():
 
 def main():
     global LIVE_TRADING
-    log(f'SMC-LOOSE service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
+    log(f'SMC v2 service starting | wallet={WALLET[:10]}... | LIVE={LIVE_TRADING} | notional=${FIXED_NOTIONAL_USD}')
 
     # B160: verify agent approval before going live
     if LIVE_TRADING:
@@ -2360,18 +2544,17 @@ def main():
            f'leverage={DEFAULT_LEVERAGE}x max={MAX_CONCURRENT}',
            priority=0)
     log(f'PARAMS={PARAMS}')
-    log(f'WHITELIST={sorted(WHITELIST)} ({len(WHITELIST)} coins)')
     log(f'BLACKLIST={sorted(BLACKLIST)}')
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')
 
     # Dashboard heartbeat — pushes state snapshot every 60s regardless of scan
     # activity, so the dashboard's 5-min staleness threshold isn't tripped on
-    # slow scans.
+    # slow scans. Wraps state read in a lambda so each tick gets fresh data.
     try:
         from dashboard_push import start_heartbeat as _start_hb
         _start_hb(
-            engine_name='smc-loose',
+            engine_name='pool-arch-rev',
             state_getter=lambda: state,
             config_getter=lambda: {
                 'live': LIVE_TRADING,
