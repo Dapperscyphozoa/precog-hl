@@ -218,16 +218,32 @@ def arm_breakout(t: BreakoutTrigger):
     state['fires_breakout_armed'] += 1
 
 def check_triggers(coin: str, last_5m: dict):
-    """For each armed trigger on this coin, check if 5m close crossed trigger."""
+    """For each armed trigger, check if 5m candle BODY close crossed trigger.
+
+    Body-close requirement (stricter than V9 raw):
+      - BUY trigger: candle must close >= trigger AND body bottom (min(o,c)) must be >= trigger
+        (= the candle closed strongly past the trigger, not just wick-poked)
+      - SELL trigger: candle must close <= trigger AND body top (max(o,c)) must be <= trigger
+
+    This filters wick-only fakeouts that print past the trigger and immediately
+    reverse — the V9 17%-WR-breakout failure mode.
+    """
     if not last_5m: return
+    o = last_5m['o']; c = last_5m['c']
+    body_top = max(o, c)
+    body_bot = min(o, c)
     fired = []
     for tkey, t in list(state['triggers'].items()):
         if t['coin'] != coin: continue
-        c = last_5m['c']
-        if t['side'] == 'BUY' and c >= t['trigger_price']:
-            fired.append((tkey, t, last_5m))
-        elif t['side'] == 'SELL' and c <= t['trigger_price']:
-            fired.append((tkey, t, last_5m))
+        trigger_px = t['trigger_price']
+        if t['side'] == 'BUY':
+            # Bull breakout: body must close ABOVE trigger
+            if c >= trigger_px and body_bot >= trigger_px * 0.9999:
+                fired.append((tkey, t, last_5m))
+        elif t['side'] == 'SELL':
+            # Bear breakout: body must close BELOW trigger
+            if c <= trigger_px and body_top <= trigger_px * 1.0001:
+                fired.append((tkey, t, last_5m))
     for tkey, t, bar in fired:
         size, notional = calc_size(state['balance'], RISK_PCT, t['trigger_price'], t['sl'])
         if size <= 0: del state['triggers'][tkey]; continue

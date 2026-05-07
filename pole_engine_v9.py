@@ -181,8 +181,9 @@ class PoleEngineV9:
                   min_rr_breakout: float = 1.5,
                   sl_atr_mult: float = 0.5,
                   sl_buffer_pct: float = 0.0010,
-                  breakout_trigger_pct: float = 0.0005,
-                  breakout_sl_inside_pct: float = 0.0030,
+                  breakout_trigger_pct: float = 0.0015,
+                  breakout_sl_inside_pct: float = 0.0050,
+                  require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
                   cooldown_s: int = 4 * 3600):
         self.min_persistence = min_persistence_polls
@@ -192,6 +193,7 @@ class PoleEngineV9:
         self.sl_buffer_pct = sl_buffer_pct
         self.breakout_trigger_pct = breakout_trigger_pct
         self.breakout_sl_inside_pct = breakout_sl_inside_pct
+        self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
         self.cooldown_s = cooldown_s
         self._fired: Dict[str, float] = {}  # wall_id → fired_t
