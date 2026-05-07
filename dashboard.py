@@ -33,7 +33,7 @@ STATE_PATH    = os.environ.get('DASH_STATE_PATH', '/var/data/dashboard_state.jso
 COMMIT        = os.environ.get('RENDER_GIT_COMMIT', 'dev')[:7]
 
 # Engines we expect (defines panel order on the UI)
-ENGINES = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'pool-arch-rev', 'pool-arch-cont', 'pool-engine']
+ENGINES = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'pool-engine']
 
 # ────────────────────────────────────────────────────────────────
 # State cache (thread-safe)
