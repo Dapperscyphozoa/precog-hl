@@ -57,6 +57,8 @@ state = {
     'tick_count': 0, 'last_tick_t': 0,
     'fires_total': 0,
     'qualified_setups': 0, 'wall_confluence_blocked': 0,
+    'wall_present': 0,           # framework setup also had a confirmed wall (additive confluence)
+    'wall_absent': 0,            # framework setup fired without wall confluence (still a valid trade)
     'stage_drops': {'no_4h_data':0,'no_zones':0,'no_5m_recent':0,'not_at_zone':0,
                     'no_1h_data':0,'mtf_block':0,'no_5m_data':0,'no_ltf':0,
                     'already_fired':0,'build_setup_fail':0},
@@ -291,16 +293,19 @@ def evaluate_coin(coin: str) -> Optional[Setup]:
     if already_fired(coin, ltf['ob_body_top'], ltf['ob_body_bottom']):
         sd['already_fired'] += 1; return None
 
-    # Stage 5 (moved earlier): wall confluence on the LTF OB body before paying for build_setup
+    # Stage 5 (moved earlier): wall confluence — ADDITIVE NOTE, never blocks the framework setup.
+    # Walls are a second-source confirmation when present; absence does NOT kill the trade.
     state['qualified_setups'] += 1
     side_for_wall = ltf['side']
-    passed, wall_usd, wall_notes = wall_confluence_check(
+    wall_passed, wall_usd, wall_notes = wall_confluence_check(
         coin, ltf['ob_body_top'], ltf['ob_body_bottom'], side_for_wall
     )
-    if not passed:
-        state['wall_confluence_blocked'] += 1
-        log(f"  WALL-BLOCK {coin} {side_for_wall} ({wall_notes})")
-        return None
+    if wall_passed:
+        state['wall_present'] += 1
+        log(f"  WALL-PRESENT {coin} {side_for_wall} ${wall_usd/1000:.0f}k")
+    else:
+        state['wall_absent'] += 1
+        log(f"  WALL-ABSENT  {coin} {side_for_wall} ({wall_notes})")
 
     # Stage 6: build setup (computes SL past wick + 1 tick, R:R checks)
     tick = COIN_TICKS.get(coin, 0.0001)
@@ -311,7 +316,13 @@ def evaluate_coin(coin: str) -> Optional[Setup]:
         log(f"  BUILD-FAIL {coin} {ltf['side']} (R:R<2 or no TPs)")
         return None
 
-    setup.notes += f" | wall ${wall_usd/1000:.0f}k confluence ✓"
+    if wall_passed:
+        setup.notes += f" | wall ${wall_usd/1000:.0f}k ✓"
+    else:
+        setup.notes += " | no wall"
+    # Stash on setup for persistence on the pending record (split-WR analysis later)
+    setup.wall_present = wall_passed
+    setup.wall_usd = wall_usd
 
     return setup
 
@@ -389,6 +400,8 @@ def place_setup(setup: Setup):
         'ob_body_top': setup.ltf_ob_body_top, 'ob_body_bottom': setup.ltf_ob_body_bottom,
         'ob_wick_top': setup.ltf_ob_wick_top, 'ob_wick_bottom': setup.ltf_ob_wick_bottom,
         'sweep_wick': setup.sweep_wick,
+        'wall_present': getattr(setup, 'wall_present', False),
+        'wall_usd': getattr(setup, 'wall_usd', 0),
     }
     state['fires_total'] += 1
     mark_fired(coin, setup.ltf_ob_body_top, setup.ltf_ob_body_bottom)
@@ -432,6 +445,8 @@ def record_outcome(p, outcome, pnl_pct):
         'placed_t': p.get('placed_t'), 'fill_t': p.get('fill_t'),
         'closed_t': int(time.time()*1000),
         'outcome': outcome, 'pnl_pct': pnl_pct,
+        'wall_present': p.get('wall_present', False),
+        'wall_usd': p.get('wall_usd', 0),
     }
     state['recent_trades'].append(rec)
     if len(state['recent_trades']) > 20:
@@ -579,7 +594,7 @@ def tick():
     state['last_tick_t'] = int(time.time()*1000)
     log(f"━━ TICK #{state['tick_count']} ━━")
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} | "
-        f"Total fires:{state['fires_total']} Qualified:{state['qualified_setups']} WallBlocked:{state['wall_confluence_blocked']}")
+        f"Total fires:{state['fires_total']} Qualified:{state['qualified_setups']} Wall+:{state['wall_present']} Wall-:{state['wall_absent']}")
     # Win/loss tracker (paper)
     wins = state['wins_tp1_tp2'] + state['wins_tp1_be'] + state['wins_tp1_betimeout']
     losses = state['losses_sl']
