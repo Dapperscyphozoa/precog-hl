@@ -60,14 +60,20 @@ state = {
     'stage_drops': {'no_4h_data':0,'no_zones':0,'no_5m_recent':0,'not_at_zone':0,
                     'no_1h_data':0,'mtf_block':0,'no_5m_data':0,'no_ltf':0,
                     'already_fired':0,'build_setup_fail':0},
+    # Stage 4 (LTF) sub-drop instrumentation
+    'ltf_drops': {'no_pivots':0,'no_atr':0,'no_sweep':0,'no_local_window':0,
+                   'no_mss':0,'no_ob_window':0},
     # Outcome tracker (paper P&L)
     'wins_tp1_tp2': 0,        # both TPs hit
     'wins_tp1_be': 0,         # TP1 hit, runner stopped at breakeven (still net +)
+    'wins_tp1_betimeout': 0,  # TP1 hit, runner force-closed at BE after RUNNER_BE_TIMEOUT_S
     'losses_sl': 0,           # full loss before TP1
     'expired_unfilled': 0,    # entry never filled within SETUP_EXPIRE_S
     'closed_open_eow': 0,     # filled but neither SL nor TP1 hit before tracker timeout
     'pnl_pct_total': 0.0,     # cumulative paper PnL %, fee-adjusted
     'recent_trades': [],      # last 20 closed trades for inspection
+    # Persistent OB-fired dedup (replaces in-memory COIN_FIRED_OBS)
+    'fired_obs': {},          # coin -> list of [body_top, body_bottom]
     'log': [],
 }
 
@@ -130,19 +136,20 @@ def get_candles_cached(coin, interval, days):
     return bars
 
 # Per-coin setup deduplication: don't re-fire same OB
-COIN_FIRED_OBS = {}  # coin -> set of (body_top, body_bottom) tuples
 def already_fired(coin, ob_body_top, ob_body_bottom, tolerance=0.001):
-    fired = COIN_FIRED_OBS.get(coin, set())
-    for (t, b) in fired:
+    fired = state['fired_obs'].get(coin, [])
+    for entry in fired:
+        t, b = entry[0], entry[1]
         if abs(t - ob_body_top) / ob_body_top < tolerance and abs(b - ob_body_bottom) / ob_body_bottom < tolerance:
             return True
     return False
 
 def mark_fired(coin, ob_body_top, ob_body_bottom):
-    COIN_FIRED_OBS.setdefault(coin, set()).add((ob_body_top, ob_body_bottom))
-    if len(COIN_FIRED_OBS[coin]) > 50:
-        # Trim oldest
-        COIN_FIRED_OBS[coin] = set(list(COIN_FIRED_OBS[coin])[-50:])
+    lst = state['fired_obs'].setdefault(coin, [])
+    lst.append([ob_body_top, ob_body_bottom])
+    if len(lst) > 50:
+        # Trim oldest, keep last 50
+        state['fired_obs'][coin] = lst[-50:]
 
 def calc_size(balance, entry, sl):
     if balance <= 0: return 0, 0
@@ -272,13 +279,28 @@ def evaluate_coin(coin: str) -> Optional[Setup]:
     bars_5m = get_candles_cached(coin, '5m', 7)
     if len(bars_5m) < 30: sd['no_5m_data'] += 1; return None
     bars_5m_window = bars_5m[-50:]
-    ltf = detect_ltf_setup(bars_5m_window, bias)
-    if ltf is None: sd['no_ltf'] += 1; return None
+    ltf, ltf_drop = detect_ltf_setup(bars_5m_window, bias)
+    if ltf is None:
+        sd['no_ltf'] += 1
+        if ltf_drop:
+            state['ltf_drops'][ltf_drop] = state['ltf_drops'].get(ltf_drop, 0) + 1
+        return None
 
     log(f"  STAGE4-PASS {coin} {ltf['side']} ob_body=[{ltf['ob_body_bottom']:.6f}-{ltf['ob_body_top']:.6f}]")
 
     if already_fired(coin, ltf['ob_body_top'], ltf['ob_body_bottom']):
         sd['already_fired'] += 1; return None
+
+    # Stage 5 (moved earlier): wall confluence on the LTF OB body before paying for build_setup
+    state['qualified_setups'] += 1
+    side_for_wall = ltf['side']
+    passed, wall_usd, wall_notes = wall_confluence_check(
+        coin, ltf['ob_body_top'], ltf['ob_body_bottom'], side_for_wall
+    )
+    if not passed:
+        state['wall_confluence_blocked'] += 1
+        log(f"  WALL-BLOCK {coin} {side_for_wall} ({wall_notes})")
+        return None
 
     # Stage 6: build setup (computes SL past wick + 1 tick, R:R checks)
     tick = COIN_TICKS.get(coin, 0.0001)
@@ -289,15 +311,6 @@ def evaluate_coin(coin: str) -> Optional[Setup]:
         log(f"  BUILD-FAIL {coin} {ltf['side']} (R:R<2 or no TPs)")
         return None
 
-    # Stage 5: wall confluence check (after setup so we know body edges)
-    state['qualified_setups'] += 1
-    passed, wall_usd, wall_notes = wall_confluence_check(
-        coin, setup.ltf_ob_body_top, setup.ltf_ob_body_bottom, setup.side
-    )
-    if not passed:
-        state['wall_confluence_blocked'] += 1
-        log(f"  WALL-BLOCK {coin} {setup.side} ({wall_notes})")
-        return None
     setup.notes += f" | wall ${wall_usd/1000:.0f}k confluence ✓"
 
     return setup
@@ -328,9 +341,39 @@ def place_setup(setup: Setup):
     if not or_res: return
     entry_oid = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
 
-    sl_res = place_limit(coin, not is_buy, size, setup.sl_price, reduce_only=True, label='SL')
+    sl_res  = place_limit(coin, not is_buy, size, setup.sl_price,  reduce_only=True, label='SL')
     tp1_res = place_limit(coin, not is_buy, half, setup.tp1_price, reduce_only=True, label='TP1')
     tp2_res = place_limit(coin, not is_buy, half, setup.tp2_price, reduce_only=True, label='TP2')
+
+    # Atomic bracket guarantee — only meaningful in LIVE mode
+    if LIVE and EXCHANGE is not None:
+        bracket_failed = (not sl_res) or (not tp1_res) or (not tp2_res)
+        if bracket_failed:
+            log(f"  BRACKET-FAIL {coin} sl={bool(sl_res)} tp1={bool(tp1_res)} tp2={bool(tp2_res)} — rolling back")
+            # 1) Cancel any of the bracket legs that DID land
+            for leg_res, leg_name in ((sl_res,'SL'), (tp1_res,'TP1'), (tp2_res,'TP2')):
+                if not leg_res: continue
+                leg_oid = leg_res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
+                if leg_oid:
+                    try: EXCHANGE.cancel(coin, leg_oid)
+                    except Exception as e: log(f"    cancel {leg_name} err: {e}")
+            # 2) Cancel the entry if still resting
+            if entry_oid:
+                try: EXCHANGE.cancel(coin, entry_oid)
+                except Exception as e: log(f"    cancel ENTRY err: {e}")
+            # 3) If entry already filled (race), force a market close to avoid naked exposure
+            try:
+                acct = fetch_account()
+                pos_sz = 0.0
+                for ap in (acct or {}).get('assetPositions', []):
+                    if ap.get('position', {}).get('coin') == coin:
+                        pos_sz = float(ap['position'].get('szi') or 0.0); break
+                if abs(pos_sz) > 0:
+                    log(f"    entry filled before rollback — emergency market close sz={pos_sz}")
+                    EXCHANGE.market_close(coin)
+            except Exception as e:
+                log(f"    emergency-close err: {e}")
+            return  # do not record this as a fire
 
     pkey = f"{coin}|{setup.side}|{setup.entry_price:.8f}"
     state['pending'][pkey] = {
@@ -342,15 +385,18 @@ def place_setup(setup: Setup):
         'size': size, 'notional': notional,
         'entry_oid': entry_oid,
         'placed_t': int(time.time()*1000),
+        'last_scanned_t': int(time.time()*1000),  # bookmark for fetch_1m_since
         'ob_body_top': setup.ltf_ob_body_top, 'ob_body_bottom': setup.ltf_ob_body_bottom,
         'ob_wick_top': setup.ltf_ob_wick_top, 'ob_wick_bottom': setup.ltf_ob_wick_bottom,
         'sweep_wick': setup.sweep_wick,
     }
     state['fires_total'] += 1
     mark_fired(coin, setup.ltf_ob_body_top, setup.ltf_ob_body_bottom)
+    save_state()  # persist immediately — a crash now would otherwise lose the fire + dedup
 
 FEE_RT = 0.0006   # round-trip fee assumption (3bp each side)
-TRACKER_TIMEOUT_S = int(os.environ.get('TRACKER_TIMEOUT_S', '86400'))  # close as 'open_eow' after 24h
+TRACKER_TIMEOUT_S    = int(os.environ.get('TRACKER_TIMEOUT_S', '86400'))     # close as 'open_eow' after 24h
+RUNNER_BE_TIMEOUT_S  = int(os.environ.get('RUNNER_BE_TIMEOUT_S', '7200'))    # force runner to BE after 2h post-TP1
 
 
 def fetch_1m_since(coin, since_ms):
@@ -371,6 +417,7 @@ def record_outcome(p, outcome, pnl_pct):
     counter_map = {
         'TP1_TP2': 'wins_tp1_tp2',
         'TP1_BE':  'wins_tp1_be',
+        'TP1_BETIMEOUT': 'wins_tp1_betimeout',
         'SL':      'losses_sl',
         'EXPIRED': 'expired_unfilled',
         'OPEN_EOW': 'closed_open_eow',
@@ -389,6 +436,7 @@ def record_outcome(p, outcome, pnl_pct):
     state['recent_trades'].append(rec)
     if len(state['recent_trades']) > 20:
         state['recent_trades'] = state['recent_trades'][-20:]
+    save_state()  # persist immediately so a mid-tick crash doesn't lose the outcome
 
 
 def reconcile():
@@ -413,9 +461,12 @@ def reconcile():
         if age_s > SETUP_EXPIRE_S:
             pending_expired.append(pkey)
             continue
-        # Fetch 1m bars since pending was placed
-        bars = fetch_1m_since(p['coin'], p['placed_t'])
-        if not bars: continue
+        # Fetch 1m bars only since last scan (bookmark) — falls back to placed_t for legacy entries
+        since_ms = p.get('last_scanned_t') or p.get('placed_t', now_ms)
+        bars = fetch_1m_since(p['coin'], since_ms)
+        if not bars:
+            p['last_scanned_t'] = now_ms
+            continue
         entry = p['entry']; side = p['side']
         for b in bars:
             if side == 'BUY' and b['l'] <= entry:
@@ -424,6 +475,8 @@ def reconcile():
             if side == 'SELL' and b['h'] >= entry:
                 p['fill_t'] = b['t']; p['fill_price'] = entry
                 pending_filled.append((pkey, p)); break
+        # Advance bookmark to last bar we examined (whether filled or not)
+        p['last_scanned_t'] = bars[-1]['t']
 
     for pkey in pending_expired:
         p = state['pending'][pkey]
@@ -433,6 +486,7 @@ def reconcile():
 
     for pkey, p in pending_filled:
         log(f"  FILLED {p['coin']} {p['side']} @ {p['fill_price']:.6f}")
+        p['last_scanned_t'] = p['fill_t']  # reset bookmark to fill_t so position scan starts there
         state['positions'][p['coin']] = p
         del state['pending'][pkey]
 
@@ -440,33 +494,47 @@ def reconcile():
     closed = []
     for coin, p in list(state['positions'].items()):
         age_s = (now_ms - p.get('fill_t', now_ms)) / 1000
-        bars = fetch_1m_since(coin, p['fill_t'])
+        # Once TP1 has hit, scan from tp1_t forward (cheaper); else scan from last bookmark
+        scan_since = p.get('tp1_t') or p.get('last_scanned_t') or p.get('fill_t', now_ms)
+        bars = fetch_1m_since(coin, scan_since)
         if not bars:
             if age_s > TRACKER_TIMEOUT_S:
                 closed.append((coin, 'OPEN_EOW', 0.0))
             continue
         side = p['side']; entry = p['fill_price']; sl = p['sl']
         tp1 = p['tp1']; tp2 = p['tp2']
-        sl_idx = tp1_idx = None
-        for i, b in enumerate(bars):
-            if side == 'BUY':
-                if b['l'] <= sl and sl_idx is None: sl_idx = i
-                if b['h'] >= tp1 and tp1_idx is None: tp1_idx = i
-            else:
-                if b['h'] >= sl and sl_idx is None: sl_idx = i
-                if b['l'] <= tp1 and tp1_idx is None: tp1_idx = i
-            if sl_idx is not None or tp1_idx is not None: break
+
+        # If TP1 already hit on a previous tick, skip the pre-TP1 search and go straight to runner watch
+        if p.get('tp1_t'):
+            tp1_idx = -1  # sentinel: TP1 already in the past
+            sl_idx = None
+        else:
+            sl_idx = tp1_idx = None
+            for i, b in enumerate(bars):
+                if side == 'BUY':
+                    if b['l'] <= sl and sl_idx is None: sl_idx = i
+                    if b['h'] >= tp1 and tp1_idx is None: tp1_idx = i
+                else:
+                    if b['h'] >= sl and sl_idx is None: sl_idx = i
+                    if b['l'] <= tp1 and tp1_idx is None: tp1_idx = i
+                if sl_idx is not None or tp1_idx is not None: break
         # SL hit first (or simultaneously) → full loss
         if sl_idx is not None and (tp1_idx is None or sl_idx <= tp1_idx):
             sl_pct = (sl - entry) / entry if side == 'BUY' else (entry - sl) / entry
             closed.append((coin, 'SL', sl_pct - FEE_RT))
             continue
-        # TP1 hit first → close 50%, runner watches for TP2 or BE-stop
+        # TP1 hit (now or earlier) → 50% banked, watch runner for TP2 / BE-stop / time-BE
         if tp1_idx is not None:
+            # Stamp tp1_t once
+            if not p.get('tp1_t'):
+                p['tp1_t'] = bars[tp1_idx]['t']
+                p['tp1_partial_pnl'] = 0.5 * (((tp1 - entry)/entry if side == 'BUY' else (entry - tp1)/entry) - FEE_RT/2)
             tp1_pct = (tp1 - entry) / entry if side == 'BUY' else (entry - tp1) / entry
-            partial = 0.5 * (tp1_pct - FEE_RT/2)
+            partial = p.get('tp1_partial_pnl', 0.5 * (tp1_pct - FEE_RT/2))
             outcome = None; runner_pnl = 0.0
-            for j in range(tp1_idx + 1, len(bars)):
+            # Walk runner candles — start either after tp1_idx (if hit this tick) or from the very start of bars (subsequent ticks, scan_since == tp1_t)
+            start_j = tp1_idx + 1 if tp1_idx >= 0 else 0
+            for j in range(start_j, len(bars)):
                 b = bars[j]
                 if side == 'BUY':
                     if b['l'] <= entry:
@@ -481,11 +549,18 @@ def reconcile():
                         tp2_pct = (entry - tp2) / entry
                         outcome = 'TP1_TP2'; runner_pnl = 0.5 * (tp2_pct - FEE_RT/2); break
             if outcome is None:
-                # Runner still open — leave position in state
-                continue
+                # Runner still open — apply hard-BE timeout if too long since TP1
+                runner_age_s = (now_ms - p.get('tp1_t', now_ms)) / 1000
+                if runner_age_s > RUNNER_BE_TIMEOUT_S:
+                    outcome = 'TP1_BETIMEOUT'; runner_pnl = 0.5 * (0.0 - FEE_RT/2)
+                else:
+                    # leave position in state, advance bookmark to last bar
+                    p['last_scanned_t'] = bars[-1]['t']
+                    continue
             closed.append((coin, outcome, partial + runner_pnl))
             continue
-        # Neither SL nor TP yet — check tracker timeout
+        # Neither SL nor TP yet — advance bookmark, then check tracker timeout
+        p['last_scanned_t'] = bars[-1]['t']
         if age_s > TRACKER_TIMEOUT_S:
             last = bars[-1]['c']
             unr = (last - entry) / entry if side == 'BUY' else (entry - last) / entry
@@ -506,14 +581,16 @@ def tick():
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} | "
         f"Total fires:{state['fires_total']} Qualified:{state['qualified_setups']} WallBlocked:{state['wall_confluence_blocked']}")
     # Win/loss tracker (paper)
-    wins = state['wins_tp1_tp2'] + state['wins_tp1_be']
+    wins = state['wins_tp1_tp2'] + state['wins_tp1_be'] + state['wins_tp1_betimeout']
     losses = state['losses_sl']
     closed_count = wins + losses + state['expired_unfilled'] + state['closed_open_eow']
     wr = (wins / max(1, wins + losses)) * 100 if (wins + losses) else 0
-    log(f"  Tracker: closed={closed_count} (W:{state['wins_tp1_tp2']}+{state['wins_tp1_be']}/L:{state['losses_sl']}/EXP:{state['expired_unfilled']}/EOW:{state['closed_open_eow']}) "
+    log(f"  Tracker: closed={closed_count} (W:{state['wins_tp1_tp2']}+{state['wins_tp1_be']}+{state['wins_tp1_betimeout']}/L:{state['losses_sl']}/EXP:{state['expired_unfilled']}/EOW:{state['closed_open_eow']}) "
         f"WR={wr:.0f}% PnL%={state['pnl_pct_total']*100:+.2f}")
     sd = state['stage_drops']
     log(f"  Drops: zones={sd['no_zones']} not_at_zone={sd['not_at_zone']} mtf_block={sd['mtf_block']} no_ltf={sd['no_ltf']} build_fail={sd['build_setup_fail']}")
+    ld = state['ltf_drops']
+    log(f"  LTF-drops: piv={ld['no_pivots']} atr={ld['no_atr']} sweep={ld['no_sweep']} window={ld['no_local_window']} mss={ld['no_mss']} ob={ld['no_ob_window']}")
 
     coins_this_tick = coins_for_tick(state['tick_count'], COINS)
     log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick")
@@ -538,7 +615,8 @@ def main():
     log(f"  MAX_POS: {MAX_POSITIONS}, MAX_PENDING: {MAX_PENDING}")
     log(f"  POLL_INTERVAL_S: {POLL_INTERVAL_S}, SCAN_WORKERS: {SCAN_WORKERS}")
     log(f"  WALL_CONFLUENCE: {WALL_CONFLUENCE}, MIN_WALL_USD: ${MIN_WALL_USD}")
-    log(f"  SETUP_EXPIRE_S: {SETUP_EXPIRE_S}")
+    log(f"  SETUP_EXPIRE_S: {SETUP_EXPIRE_S}, RUNNER_BE_TIMEOUT_S: {RUNNER_BE_TIMEOUT_S}, TRACKER_TIMEOUT_S: {TRACKER_TIMEOUT_S}")
+    log(f"  STATE_FILE: {STATE_FILE}")
     log(f"  WALLET: {WALLET[:10]+'...' if WALLET else 'NONE'}")
     fetch_tick_sizes()
     load_state()
