@@ -174,6 +174,26 @@ class HLUserWS:
 _INSTANCE = None
 
 
+def _try_create_ws_info(max_retries=6, base_wait=2):
+    """Construct an Info(WS-enabled). Retries with exponential backoff on
+    transient errors (HL CloudFront 429s on boot are common because every
+    service on the same wallet hits /info/meta near-simultaneously).
+    Returns Info instance or None.
+    """
+    from hyperliquid.info import Info
+    from hyperliquid.utils import constants
+    for attempt in range(max_retries):
+        try:
+            return Info(constants.MAINNET_API_URL)  # default: WS-enabled
+        except Exception as e:
+            wait = base_wait * (2 ** attempt)  # 2,4,8,16,32,64s
+            log.warning(f"WS Info() attempt {attempt+1}/{max_retries} failed ({str(e)[:80]}); retry in {wait}s")
+            if attempt < max_retries - 1:
+                time.sleep(wait)
+    log.error("WS Info() retries exhausted")
+    return None
+
+
 def init(info_unused, wallet):
     """Initialize singleton + start subscriptions. Idempotent.
 
@@ -182,17 +202,33 @@ def init(info_unused, wallet):
     create our OWN Info instance dedicated to WS subscriptions. Two
     instances is fine — one TCP connection for REST, one for WS, no
     cross-contamination.
+
+    Boot resilience: HL frequently rate-limits /info/meta during a coordinated
+    multi-service redeploy. We retry the Info() constructor up to 6× with
+    exponential backoff so transient 429s don't leave the WS singleton dead
+    until the next deploy.
     """
     global _INSTANCE
     if _INSTANCE is not None:
         return _INSTANCE
-    try:
-        from hyperliquid.info import Info
-        from hyperliquid.utils import constants
-        # Default skip_ws=False — this Info DOES open a WebSocket
-        ws_info = Info(constants.MAINNET_API_URL)
-    except Exception as e:
-        log.error(f"Failed to create dedicated WS Info: {e}")
+    ws_info = _try_create_ws_info()
+    if ws_info is None:
+        # Schedule a deferred retry so we eventually come up even if all
+        # initial retries failed (e.g. extended HL outage during boot).
+        def _delayed_retry():
+            global _INSTANCE
+            time.sleep(120)  # 2 min defer
+            if _INSTANCE is not None:
+                return
+            log.info("WS Info() deferred retry kicking off")
+            ws = _try_create_ws_info(max_retries=10, base_wait=5)
+            if ws is None:
+                log.error("WS Info() deferred retry also exhausted")
+                return
+            _INSTANCE = HLUserWS(ws, wallet)
+            _INSTANCE.start()
+            log.info("WS Info() deferred retry succeeded — subscriptions live")
+        threading.Thread(target=_delayed_retry, daemon=True, name='ws_retry').start()
         return None
     _INSTANCE = HLUserWS(ws_info, wallet)
     _INSTANCE.start()
