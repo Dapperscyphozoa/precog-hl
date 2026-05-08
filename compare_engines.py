@@ -14,6 +14,28 @@ import json, sys, urllib.request, re
 
 RENDER_TOKEN = "rnd_GbOYfugIiAl0ihJR2O2wOjYNpWUz"
 OWNER_ID = "tea-d6ufmnea2pns739be9gg"
+HL_API = "https://api.hyperliquid.xyz/info"
+HL_WALLET = "0x3eDaD0649Db466E6E7B9a0Caa3E5d6ddc71B5ffE"
+
+
+def hl_post(body):
+    req = urllib.request.Request(HL_API, data=json.dumps(body).encode(),
+                                   headers={"Content-Type": "application/json"})
+    return json.loads(urllib.request.urlopen(req, timeout=15).read())
+
+
+def v9_actual_pnl():
+    """V9 actual realized PnL — currently NOT recoverable via cloid prefix.
+
+    HL hashes client-supplied cloid into a 16-byte hex hash on-chain. The original
+    `V9{coin}...` string V9 sends is keccak-hashed before storage in user fills.
+    To get V9's true closed-trade PnL, options are:
+      1. SSH into V9 service and read /var/data/pole_state_v9.json
+      2. Add a /stats HTTP endpoint to V9 (small code change to V9)
+      3. Add CLOSE-event logging in V9's reconcile() so log parsing captures PnL
+    """
+    return {"trades": 0, "note": "V9 PnL not recoverable via HL cloid (HL hashes cloids); see compare_engines.py source for options"}
+
 
 ENGINES = [
     {"name": "V9 (wall bounce, live)",  "id": "srv-d7u59hl0lvsc73enssrg"},
@@ -52,6 +74,22 @@ def parse_engine(svc_id):
         out['pos'] = int(m.group(2))
         out['pend'] = int(m.group(3))
         out['snapshot_t'] = ts
+
+    # V9 tick line: "Bal:$X Pos:N Pend:M Trig:T | BO_armed:A BO_fired:F Bounce:B Spoof:S FundKill:K Foreign:Fn"
+    m, _ = latest_match(logs,
+        r'Bal:\$([\d.]+)\s+Pos:(\d+)\s+Pend:(\d+)\s+Trig:(\d+)\s+\|\s+BO_armed:(\d+)\s+BO_fired:(\d+)\s+Bounce:(\d+)\s+Spoof:(\d+)\s+FundKill:(\d+)\s+Foreign:(\d+)')
+    if m:
+        out['bal'] = float(m.group(1))
+        out['pos'] = int(m.group(2))
+        out['pend'] = int(m.group(3))
+        out['v9_trig'] = int(m.group(4))
+        out['v9_bo_armed'] = int(m.group(5))
+        out['v9_bo_fired'] = int(m.group(6))
+        out['v9_bounce'] = int(m.group(7))
+        out['v9_spoof'] = int(m.group(8))
+        out['v9_fundkill'] = int(m.group(9))
+        out['v9_foreign'] = int(m.group(10))
+        out['fires_total'] = out['v9_bo_fired'] + out['v9_bounce']
 
     # V10 tick line: "Total fires:N (4h:N 1h:N) Qualified:N Wall+:N Wall-:N"
     m, _ = latest_match(logs,
@@ -123,12 +161,18 @@ def main():
     row("Open pos",     v9.get('pos','-'), v10.get('pos','-'))
     row("Pending",      v9.get('pend','-'), v10.get('pend','-'))
     print()
-    row("Lifetime fires", v9.get('fires_total','-'), v10.get('fires_total','-'))
-    row("  Path A (4h)", '-', v10.get('fires_4h','-'))
-    row("  Path B (1h)", '-', v10.get('fires_1h','-'))
-    row("Qualified setups", v9.get('qualified','-'), v10.get('qualified','-'))
-    row("Wall present",  '-', v10.get('wall_present_or_blocked','-'))
-    row("Wall absent",   '-', v10.get('wall_absent','-'))
+    row("Lifetime fires (total)", v9.get('fires_total','-'), v10.get('fires_total','-'))
+    row("  V9 BO_fired (breakouts)", v9.get('v9_bo_fired','-'), '-')
+    row("  V9 Bounce (wall bounces)", v9.get('v9_bounce','-'), '-')
+    row("  V9 BO_armed (waiting)", v9.get('v9_bo_armed','-'), '-')
+    row("  V9 Trig (active triggers)", v9.get('v9_trig','-'), '-')
+    row("  V9 Spoof / FundKill", f"{v9.get('v9_spoof','-')} / {v9.get('v9_fundkill','-')}", '-')
+    row("  V10 Path A (4h)", '-', v10.get('fires_4h','-'))
+    row("  V10 Path B (1h)", '-', v10.get('fires_1h','-'))
+    row("Qualified setups (V10)", '-', v10.get('qualified','-'))
+    row("Wall present (V10)",  '-', v10.get('wall_present_or_blocked','-'))
+    row("Wall absent (V10)",   '-', v10.get('wall_absent','-'))
+    row("Foreign positions (V9)", v9.get('v9_foreign','-'), '-')
 
     # V9 lifetime parse
     v9l = v9.get('v9_lifetime', {})
@@ -149,6 +193,21 @@ def main():
         row("V10 expired/EOW", '-', f"{t['expired']}/{t['eow']}")
         row("V10 WR%", '-', t['wr_pct'])
         row("V10 PnL%", '-', f"{t['pnl_pct']:+.2f}")
+
+    # V9 ACTUAL realized PnL from HL exchange (V9-prefixed cloids only, last 7d)
+    print("\n=== V9 actual realized PnL (HL exchange, V9-prefix cloids, last 7d) ===")
+    pnl = v9_actual_pnl()
+    if 'error' in pnl:
+        print(f"  err: {pnl['error']}")
+    elif pnl.get('trades', 0) == 0:
+        print(f"  {pnl.get('note', 'no closed trades')}")
+    else:
+        print(f"  Closed trades: {pnl['trades']}")
+        print(f"  Wins / Losses: {pnl['wins']} / {pnl['losses']}")
+        print(f"  WR%:           {pnl['wr_pct']}")
+        print(f"  Net PnL:       ${pnl['net_pnl_usd']:+.2f}")
+        print(f"  Avg win:       ${pnl['avg_win_usd']:+.2f}")
+        print(f"  Avg loss:      ${pnl['avg_loss_usd']:+.2f}")
 
 
 if __name__ == '__main__':
