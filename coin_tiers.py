@@ -254,21 +254,18 @@ class DepthBaseline:
         return med * self.multiplier
 
     def threshold(self, coin: str) -> tuple:
-        """Effective threshold = max(volume_driven, dynamic_baseline).
+        """Effective threshold = dynamic baseline (median bucket × multiplier).
 
-        Volume-driven is the primary signal: K × sqrt(24h_volume_USD).
-        Dynamic baseline acts as a guard against thin-book regimes (ensures
-        we don't trade on walls smaller than recent typical bucket size × 8).
-
-        Tier floor is NOT used here — it scales poorly across BTC↔alts.
-        Tier table is retained only for cadence and persistence requirements.
+        Falls back to tier_floor only when no depth samples exist yet (cold start).
+        Volume-driven threshold deprecated — DepthBaseline directly reflects the
+        book at this moment and adapts to current liquidity, which is what
+        actually matters for wall significance.
         """
-        _, tier_p = get_tier(coin)
-        vol_thr = get_volume_threshold(coin)
+        tier_usd, tier_p = get_tier(coin)
         dyn = self.baseline(coin)
         if dyn is None:
-            return vol_thr, tier_p
-        return max(vol_thr, dyn), tier_p
+            return float(tier_usd), tier_p
+        return dyn, tier_p
 
     def stats(self, coin: str) -> dict:
         h = self.history.get(coin)

@@ -115,7 +115,8 @@ class WallTracker:
         return f"{coin}|{side}|{bucket:.5f}"
 
     def update(self, coin: str, walls: List[Wall], mid: float, ts: float,
-                last_low: float, last_high: float) -> List[Wall]:
+                last_low: float, last_high: float,
+                decay_s: float = 180) -> List[Wall]:
         seen = set()
         for w in walls:
             w.coin = coin
@@ -141,9 +142,9 @@ class WallTracker:
                     self.last_touch_t[k] = ts
                     w.times_tested = self.touch_counts[k]
                     w.last_test_t = ts
-        # Decay walls not seen in >180s
+        # Decay walls not seen in >decay_s
         for k in list(self.last_seen.keys()):
-            if k.startswith(f"{coin}|") and k not in seen and ts - self.last_seen[k] > 180:
+            if k.startswith(f"{coin}|") and k not in seen and ts - self.last_seen[k] > decay_s:
                 self.history.pop(k, None)
                 self.last_seen.pop(k, None)
                 self.touch_counts.pop(k, None)
@@ -182,7 +183,7 @@ class PoleEngineV9:
                   sl_atr_mult: float = 0.5,
                   sl_buffer_pct: float = 0.0010,
                   breakout_trigger_pct: float = 0.0015,
-                  breakout_sl_inside_pct: float = 0.0050,
+                  breakout_sl_buffer_atr: float = 0.10,
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
                   cooldown_s: int = 4 * 3600):
@@ -192,7 +193,7 @@ class PoleEngineV9:
         self.sl_atr_mult = sl_atr_mult
         self.sl_buffer_pct = sl_buffer_pct
         self.breakout_trigger_pct = breakout_trigger_pct
-        self.breakout_sl_inside_pct = breakout_sl_inside_pct
+        self.breakout_sl_buffer_atr = breakout_sl_buffer_atr
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
         self.cooldown_s = cooldown_s
@@ -271,7 +272,8 @@ class PoleEngineV9:
                         breakout_tp = (max(further_bids, key=lambda w: w.price).high
                                         if further_bids else nearest_bid.low * 0.99)  # 1% extension fallback
                         breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
-                        breakout_sl = nearest_bid.low * (1 + self.breakout_sl_inside_pct)
+                        # SL = cluster top (structural reclaim invalidates breakout) + ATR buffer
+                        breakout_sl = nearest_bid.high + self.breakout_sl_buffer_atr * atr_v
                         if breakout_sl > breakout_trigger > breakout_tp and \
                            not self._too_close_to_armed(coin, 'SELL', breakout_trigger, existing_armed_triggers):
                             bo_risk = breakout_sl - breakout_trigger
@@ -319,7 +321,8 @@ class PoleEngineV9:
                         breakout_tp = (min(further_asks, key=lambda w: w.price).low
                                         if further_asks else nearest_ask.high * 1.01)
                         breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
-                        breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
+                        # SL = cluster bottom (structural reclaim invalidates breakout) - ATR buffer
+                        breakout_sl = nearest_ask.low - self.breakout_sl_buffer_atr * atr_v
                         if breakout_sl < breakout_trigger < breakout_tp and \
                            not self._too_close_to_armed(coin, 'BUY', breakout_trigger, existing_armed_triggers):
                             bo_risk = breakout_trigger - breakout_sl
