@@ -425,7 +425,8 @@ def reconcile():
 
     # Funding kill — exit V9 positions where 4h+ held AND funding has eaten unrealized PnL
     if FUNDING_KILL_ON and asset_positions_raw:
-        kills = funding_v9.positions_to_close(state['positions'], asset_positions_raw)
+        kills = funding_v9.positions_to_close(state['positions'], asset_positions_raw,
+                                                engine_prefix=ENGINE_PREFIX)
         for k in kills:
             log(f"FUNDING-KILL {k['coin']} {k['side']} {k['reason']}")
             is_buy_to_close = (k['side'] == 'SELL')

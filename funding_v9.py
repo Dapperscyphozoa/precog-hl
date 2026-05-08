@@ -22,13 +22,19 @@ MIN_HOLD_S = 4 * 3600  # 4 hours
 
 def positions_to_close(state_positions: Dict[str, dict],
                        hl_asset_positions: List[dict],
+                       engine_prefix: str = 'V9',
                        now_ts: Optional[float] = None) -> List[Dict]:
     """Scan open HL positions; return those V9 should close due to funding burn.
 
-    state_positions: V9's position registry (used to identify V9-managed only).
-    hl_asset_positions: clearinghouseState['assetPositions'] raw list.
+    Eligibility:
+      - position is in V9 state_positions
+      - position has trade_id starting with engine_prefix (skips pre-cloid legacy entries)
+      - held >= MIN_HOLD_S
+      - cumFunding.sinceOpen > 0 (we are paying)
+      - cumFunding.sinceOpen >= unrealizedPnl
 
-    Returns: list of {'coin', 'size', 'side', 'reason', 'unrealizedPnl', 'cumFunding', 'age_s'}
+    Legacy positions without a V9-prefixed trade_id are skipped — they may
+    belong to another engine that shares the wallet.
     """
     if now_ts is None:
         now_ts = time.time()
@@ -37,7 +43,11 @@ def positions_to_close(state_positions: Dict[str, dict],
         p = ap.get('position', {})
         coin = p.get('coin')
         if coin not in state_positions:
-            continue  # not V9-managed
+            continue
+        sp = state_positions[coin]
+        tid = sp.get('trade_id', '')
+        if not tid or not tid.startswith(engine_prefix):
+            continue  # not V9-tagged; do not close
         sz = float(p.get('szi', 0))
         if abs(sz) < 1e-9:
             continue
@@ -46,15 +56,14 @@ def positions_to_close(state_positions: Dict[str, dict],
             cum_funding = float(p.get('cumFunding', {}).get('sinceOpen', 0))
         except (TypeError, ValueError):
             continue
-        # HL convention: cumFunding.sinceOpen positive = paid (cost to us)
-        opened_t_ms = state_positions[coin].get('opened_t') or state_positions[coin].get('filled_t', 0)
+        opened_t_ms = sp.get('opened_t') or sp.get('filled_t', 0)
         age_s = now_ts - (opened_t_ms / 1000.0) if opened_t_ms else 0
         if age_s < MIN_HOLD_S:
             continue
         if cum_funding <= 0:
-            continue  # we're being paid, hold
+            continue
         if cum_funding < unrealized:
-            continue  # gains still exceed funding cost
+            continue
         out.append({
             'coin': coin,
             'size': abs(sz),
