@@ -25,16 +25,8 @@ def hl_post(body):
 
 
 def v9_actual_pnl():
-    """V9 actual realized PnL — currently NOT recoverable via cloid prefix.
-
-    HL hashes client-supplied cloid into a 16-byte hex hash on-chain. The original
-    `V9{coin}...` string V9 sends is keccak-hashed before storage in user fills.
-    To get V9's true closed-trade PnL, options are:
-      1. SSH into V9 service and read /var/data/pole_state_v9.json
-      2. Add a /stats HTTP endpoint to V9 (small code change to V9)
-      3. Add CLOSE-event logging in V9's reconcile() so log parsing captures PnL
-    """
-    return {"trades": 0, "note": "V9 PnL not recoverable via HL cloid (HL hashes cloids); see compare_engines.py source for options"}
+    """DEPRECATED — V9 now logs CLOSE events directly. Use v9_tracker dict instead."""
+    return None
 
 
 ENGINES = [
@@ -90,6 +82,28 @@ def parse_engine(svc_id):
         out['v9_fundkill'] = int(m.group(9))
         out['v9_foreign'] = int(m.group(10))
         out['fires_total'] = out['v9_bo_fired'] + out['v9_bounce']
+
+    # V9 closed-trade tracker line: "V9-Tracker: closed=N (W:A/L:B/F:C) WR=X% RealizedPnL=$Y"
+    m, _ = latest_match(logs,
+        r'V9-Tracker:\s+closed=(\d+)\s+\(W:(\d+)/L:(\d+)/F:(\d+)\)\s+WR=(\d+)%\s+RealizedPnL=\$([+-]?\d+\.\d+)')
+    if m:
+        out['v9_tracker'] = {
+            'closed': int(m.group(1)),
+            'wins':   int(m.group(2)),
+            'losses': int(m.group(3)),
+            'flats':  int(m.group(4)),
+            'wr_pct': int(m.group(5)),
+            'realized_pnl': float(m.group(6)),
+        }
+
+    # Also count CLOSE events seen in this log slice (last N ticks)
+    close_events = [l for l in logs if 'CLOSE V9' in l.get('message', '')]
+    if close_events:
+        out['v9_close_events_in_window'] = len(close_events)
+        # Last 5 closes for quick inspection
+        out['v9_last_closes'] = []
+        for l in close_events[-5:]:
+            out['v9_last_closes'].append({'ts': l['timestamp'][11:19], 'msg': l['message'].rstrip()[:200]})
 
     # V10 tick line: "Total fires:N (4h:N 1h:N) Qualified:N Wall+:N Wall-:N"
     m, _ = latest_match(logs,
@@ -183,6 +197,23 @@ def main():
         if 'pf' in v9l: row("V9 lifetime PF", v9l['pf'], '-')
         if 'net' in v9l: row("V9 lifetime net", v9l['net'], '-')
 
+    # V9 actual closed-trade tracker (from new V9-Tracker log line)
+    v9t = v9.get('v9_tracker', {})
+    if v9t:
+        print()
+        row("V9 closed trades", v9t['closed'], '-')
+        row("V9 wins / losses / flats", f"{v9t['wins']} / {v9t['losses']} / {v9t['flats']}", '-')
+        row("V9 WR%", v9t['wr_pct'], '-')
+        row("V9 realized PnL ($)", f"{v9t['realized_pnl']:+.2f}", '-')
+    elif 'v9_close_events_in_window' in v9:
+        print(f"\n  (V9-Tracker line not yet seen — next tick will surface it. "
+              f"{v9['v9_close_events_in_window']} CLOSE events in current log window.)")
+
+    if v9.get('v9_last_closes'):
+        print("\n=== V9 last 5 CLOSE events ===")
+        for c in v9['v9_last_closes']:
+            print(f"  [{c['ts']}] {c['msg']}")
+
     # V10 paper tracker
     t = v10.get('tracker', {})
     if t:
@@ -193,21 +224,6 @@ def main():
         row("V10 expired/EOW", '-', f"{t['expired']}/{t['eow']}")
         row("V10 WR%", '-', t['wr_pct'])
         row("V10 PnL%", '-', f"{t['pnl_pct']:+.2f}")
-
-    # V9 ACTUAL realized PnL from HL exchange (V9-prefixed cloids only, last 7d)
-    print("\n=== V9 actual realized PnL (HL exchange, V9-prefix cloids, last 7d) ===")
-    pnl = v9_actual_pnl()
-    if 'error' in pnl:
-        print(f"  err: {pnl['error']}")
-    elif pnl.get('trades', 0) == 0:
-        print(f"  {pnl.get('note', 'no closed trades')}")
-    else:
-        print(f"  Closed trades: {pnl['trades']}")
-        print(f"  Wins / Losses: {pnl['wins']} / {pnl['losses']}")
-        print(f"  WR%:           {pnl['wr_pct']}")
-        print(f"  Net PnL:       ${pnl['net_pnl_usd']:+.2f}")
-        print(f"  Avg win:       ${pnl['avg_win_usd']:+.2f}")
-        print(f"  Avg loss:      ${pnl['avg_loss_usd']:+.2f}")
 
 
 if __name__ == '__main__':
