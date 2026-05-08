@@ -254,14 +254,14 @@ def place_bounce(s: BounceSetup, bias: str = 'neutral') -> Optional[str]:
     if s.coin in state['positions']: return None
     if len(state['pending']) >= MAX_PENDING:
         log(f"  skip bounce {s.coin} {s.side}: max pending"); return None
-    rr_mult = trend_v9.rr_multiplier(s.side, bias) if TREND_FILTER_ON else 1.0
-    effective_min = POLE.min_rr_bounce * rr_mult
-    if s.rr < effective_min:
-        log(f"  skip bounce {s.coin} {s.side} rr={s.rr:.2f} < trend-min {effective_min:.2f} (bias={bias})")
-        return None
     size, notional = calc_size(state['balance'], RISK_PCT, s.entry_price, s.sl_price)
     if size <= 0: return None
-    log(f"PLACE-BOUNCE {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} bias={bias} sz={size:.6f} ${notional:.2f}")
+    # Trend-aware size: counter-trend setups get 0.5×; with-trend / neutral 1.0×
+    size_mult = trend_v9.size_multiplier(s.side, bias) if TREND_FILTER_ON else 1.0
+    size *= size_mult
+    notional *= size_mult
+    if size <= 0: return None
+    log(f"PLACE-BOUNCE {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
     log(f"  notes: {s.notes}")
     is_buy = (s.side == 'BUY')
     tid = _trade_id(s.coin, s.side)
@@ -286,11 +286,7 @@ def place_bounce(s: BounceSetup, bias: str = 'neutral') -> Optional[str]:
 
 
 def arm_breakout(t: BreakoutTrigger, bias: str = 'neutral'):
-    rr_mult = trend_v9.rr_multiplier(t.side, bias) if TREND_FILTER_ON else 1.0
-    effective_min = POLE.min_rr_breakout * rr_mult
-    if t.rr < effective_min:
-        log(f"  skip arm-breakout {t.coin} {t.side} rr={t.rr:.2f} < trend-min {effective_min:.2f} (bias={bias})")
-        return
+    # No RR gate from trend — trend now affects size at trigger-fire time
     # Queue full -> evict lowest-RR if this beats it
     if len(state['triggers']) >= MAX_TRIGGERS:
         worst_key = None; worst_rr = float('inf')
@@ -313,6 +309,7 @@ def arm_breakout(t: BreakoutTrigger, bias: str = 'neutral'):
         'trigger_price': t.trigger_price, 'sl': t.sl_price, 'tp': t.tp_price,
         'rr': t.rr, 'armed_t': int(time.time()*1000),
         'sibling_bounce_id': t.sibling_bounce_id,
+        'bias': bias,
     }
     state['fires_breakout_armed'] += 1
 
@@ -343,7 +340,13 @@ def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
     for tkey, t, bar in fired:
         size, notional = calc_size(state['balance'], RISK_PCT, t['trigger_price'], t['sl'])
         if size <= 0: del state['triggers'][tkey]; continue
-        log(f"TRIGGER-FIRE {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f}")
+        # Trend-aware size on breakout fire
+        bias = t.get('bias', 'neutral')
+        size_mult = trend_v9.size_multiplier(t['side'], bias) if TREND_FILTER_ON else 1.0
+        size *= size_mult
+        notional *= size_mult
+        if size <= 0: del state['triggers'][tkey]; continue
+        log(f"TRIGGER-FIRE {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f} bias={bias}×{size_mult:.1f}")
         is_buy = (t['side'] == 'BUY')
         tid = _trade_id(t['coin'], t['side'])
         place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
@@ -533,14 +536,13 @@ def tick():
         for sp in sps:
             if sp['coin'] in state['positions']: continue
             if len(state['positions']) >= MAX_POSITIONS: continue
-            if TREND_FILTER_ON:
-                sp_mult = trend_v9.rr_multiplier(sp['side'], bias)
-                if sp['rr'] < 1.0 * sp_mult:
-                    log(f"  skip spoof {sp['coin']} rr={sp['rr']:.2f} < {1.0*sp_mult:.2f} (bias={bias})")
-                    continue
             size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])
             if size <= 0: continue
-            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} sz={size:.6f} ${notional:.2f}")
+            size_mult = trend_v9.size_multiplier(sp['side'], bias) if TREND_FILTER_ON else 1.0
+            size *= size_mult
+            notional *= size_mult
+            if size <= 0: continue
+            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
             log(f"  notes: {sp['notes']}")
             is_buy = (sp['side'] == 'BUY')
             tid = _trade_id(sp['coin'], sp['side'])

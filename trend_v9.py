@@ -86,9 +86,19 @@ def get_bias(coin: str, fetch_1h_bars) -> str:
 
 
 def rr_multiplier(side: str, bias: str) -> float:
-    """Return RR-min multiplier for a setup given its side and the bias.
-    Counter-trend setups must clear a higher bar."""
+    """DEPRECATED. Returns 1.0 always — trend now affects size, not RR.
+    Kept for back-compat with any callers. Use size_multiplier instead."""
+    return 1.0
+
+
+def size_multiplier(side: str, bias: str) -> float:
+    """Position size multiplier based on trend alignment.
+
+    With-trend or neutral: full size (1.0).
+    Counter-trend: half size (0.5) — preserves fire frequency, halves exposure
+    on lower-conviction setups.
+    """
     if bias == 'neutral':
         return 1.0
     with_trend = (side == 'BUY' and bias == 'up') or (side == 'SELL' and bias == 'down')
-    return 1.0 if with_trend else 1.7
+    return 1.0 if with_trend else 0.5

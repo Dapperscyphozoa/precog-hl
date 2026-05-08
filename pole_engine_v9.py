@@ -181,15 +181,15 @@ class PoleEngineV9:
 
     def __init__(self,
                   min_persistence_polls: int = 5,
-                  min_rr_bounce: float = 1.5,
-                  min_rr_breakout: float = 1.5,
+                  min_rr_bounce: float = 1.0,
+                  min_rr_breakout: float = 1.0,
                   sl_atr_mult: float = 0.5,
                   sl_buffer_pct: float = 0.0010,
                   breakout_trigger_pct: float = 0.0015,
                   breakout_sl_buffer_atr: float = 0.10,
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
-                  min_dist_pct: float = 0.0010,
+                  min_r_pct: float = 0.005,
                   cooldown_s: int = 4 * 3600):
         self.min_persistence = min_persistence_polls
         self.min_rr_bounce = min_rr_bounce
@@ -200,7 +200,7 @@ class PoleEngineV9:
         self.breakout_sl_buffer_atr = breakout_sl_buffer_atr
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
-        self.min_dist_pct = min_dist_pct
+        self.min_r_pct = min_r_pct
         self.cooldown_s = cooldown_s
         self._fired: Dict[str, float] = {}  # wall_id → fired_t
 
@@ -258,31 +258,32 @@ class PoleEngineV9:
         # === NEAREST BID WALL ===
         if _can_fire(nearest_bid):
             wid = nearest_bid.wall_id
-            # BOUNCE: BUY limit at top of bid wall, TP at nearest ask wall
+            # BOUNCE: BUY limit at top of bid wall, SL beyond wall, TP at 1R clean sweep
             bounce_limit = nearest_bid.high
             bounce_sl = nearest_bid.low - max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
-            bounce_tp = nearest_ask.low - mid * 0.0005
-            if bounce_limit < mid and bounce_sl < bounce_limit < bounce_tp:
-                br_risk = bounce_limit - bounce_sl
-                br_reward = bounce_tp - bounce_limit
+            R = bounce_limit - bounce_sl
+            r_pct = R / bounce_limit if bounce_limit > 0 else 0
+            bounce_tp = bounce_limit + R  # 1R clean sweep
+            if (bounce_limit < mid and bounce_sl < bounce_limit < bounce_tp
+                  and r_pct >= self.min_r_pct):
+                br_risk = R
+                br_reward = R
                 if br_risk > 0:
-                    rr = br_reward / br_risk
+                    rr = br_reward / br_risk  # always 1.0 by construction
                     if self.min_rr_bounce <= rr <= 12:
                         # BREAKOUT: SELL trigger past bottom of bid wall
-                        # When price closes BELOW the bid wall, the wall broke down
-                        # → SELL with breakout, target next bid wall below or distant low
-                        further_bids = [w for w in walls if w.side == 'bid'
-                                          and w.persistence_polls >= 3
-                                          and w.price < nearest_bid.low * 0.998]
-                        breakout_tp = (max(further_bids, key=lambda w: w.price).high
-                                        if further_bids else nearest_bid.low * 0.99)  # 1% extension fallback
+                        # When price closes BELOW the bid wall, the wall broke down.
+                        # SL = cluster top reclaim invalidation; TP = 1R clean sweep.
                         breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
-                        # SL = cluster top (structural reclaim invalidates breakout) + ATR buffer
                         breakout_sl = nearest_bid.high + self.breakout_sl_buffer_atr * atr_v
-                        if breakout_sl > breakout_trigger > breakout_tp and \
-                           not self._too_close_to_armed(coin, 'SELL', breakout_trigger, existing_armed_triggers):
-                            bo_risk = breakout_sl - breakout_trigger
-                            bo_reward = breakout_trigger - breakout_tp
+                        bo_R = breakout_sl - breakout_trigger
+                        bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
+                        breakout_tp = breakout_trigger - bo_R  # 1R clean sweep
+                        if (breakout_sl > breakout_trigger > breakout_tp
+                              and bo_r_pct >= self.min_r_pct
+                              and not self._too_close_to_armed(coin, 'SELL', breakout_trigger, existing_armed_triggers)):
+                            bo_risk = bo_R
+                            bo_reward = bo_R
                             if bo_risk > 0:
                                 bo_rr = bo_reward / bo_risk
                                 if self.min_rr_breakout <= bo_rr <= 12:
@@ -308,30 +309,32 @@ class PoleEngineV9:
         # === NEAREST ASK WALL ===
         if _can_fire(nearest_ask):
             wid = nearest_ask.wall_id
-            # BOUNCE: SELL limit at bottom of ask wall, TP at nearest bid wall
+            # BOUNCE: SELL limit at bottom of ask wall, SL beyond wall, TP at 1R clean sweep
             bounce_limit = nearest_ask.low
             bounce_sl = nearest_ask.high + max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
-            bounce_tp = nearest_bid.high + mid * 0.0005
-            if bounce_limit > mid and bounce_tp < bounce_limit < bounce_sl:
-                br_risk = bounce_sl - bounce_limit
-                br_reward = bounce_limit - bounce_tp
+            R = bounce_sl - bounce_limit
+            r_pct = R / bounce_limit if bounce_limit > 0 else 0
+            bounce_tp = bounce_limit - R  # 1R clean sweep
+            if (bounce_limit > mid and bounce_tp < bounce_limit < bounce_sl
+                  and r_pct >= self.min_r_pct):
+                br_risk = R
+                br_reward = R
                 if br_risk > 0:
-                    rr = br_reward / br_risk
+                    rr = br_reward / br_risk  # always 1.0 by construction
                     if self.min_rr_bounce <= rr <= 12:
                         # BREAKOUT: BUY trigger past top of ask wall
-                        # When price closes ABOVE the ask wall, the wall broke up
-                        further_asks = [w for w in walls if w.side == 'ask'
-                                          and w.persistence_polls >= 3
-                                          and w.price > nearest_ask.high * 1.002]
-                        breakout_tp = (min(further_asks, key=lambda w: w.price).low
-                                        if further_asks else nearest_ask.high * 1.01)
+                        # When price closes ABOVE the ask wall, the wall broke up.
+                        # SL = cluster bottom reclaim invalidation; TP = 1R clean sweep.
                         breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
-                        # SL = cluster bottom (structural reclaim invalidates breakout) - ATR buffer
                         breakout_sl = nearest_ask.low - self.breakout_sl_buffer_atr * atr_v
-                        if breakout_sl < breakout_trigger < breakout_tp and \
-                           not self._too_close_to_armed(coin, 'BUY', breakout_trigger, existing_armed_triggers):
-                            bo_risk = breakout_trigger - breakout_sl
-                            bo_reward = breakout_tp - breakout_trigger
+                        bo_R = breakout_trigger - breakout_sl
+                        bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
+                        breakout_tp = breakout_trigger + bo_R  # 1R clean sweep
+                        if (breakout_sl < breakout_trigger < breakout_tp
+                              and bo_r_pct >= self.min_r_pct
+                              and not self._too_close_to_armed(coin, 'BUY', breakout_trigger, existing_armed_triggers)):
+                            bo_risk = bo_R
+                            bo_reward = bo_R
                             if bo_risk > 0:
                                 bo_rr = bo_reward / bo_risk
                                 if self.min_rr_breakout <= bo_rr <= 12:
