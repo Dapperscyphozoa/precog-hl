@@ -18,7 +18,8 @@ Isolation: HTTP polling only. No production touched.
 import json, os, sys, time, traceback, urllib.request
 from datetime import datetime, timezone
 from typing import Optional
-from coin_tiers import DepthBaseline, get_tier, coins_for_tick, ALL_COINS
+from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS,
+                          refresh_hl_volumes, get_volume_threshold, get_volume)
 from concurrent.futures import ThreadPoolExecutor
 from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
                               cluster_walls, Wall, BounceSetup, BreakoutTrigger)
@@ -346,6 +347,7 @@ def expire_stale():
 def tick():
     expire_stale()
     reconcile()
+    refresh_hl_volumes()  # volume-driven wall threshold; rate-limited internally
     state['tick_count'] += 1
     state['last_tick_t'] = int(time.time()*1000)
     log(f"━━ TICK #{state['tick_count']} ━━")

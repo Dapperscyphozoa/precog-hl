@@ -130,6 +130,109 @@ def coins_for_tick(tick_n: int, all_coins: Optional[List[str]] = None) -> List[s
     return [c for c in all_coins if tick_n % get_cadence(c) == 0]
 
 
+# ============================================================================
+# Volume-driven wall threshold
+# ============================================================================
+# Walls scale with the square root of 24h notional volume. This avoids:
+#   - linear scaling forcing impossible thresholds on alts ($500k on a $500k/day coin)
+#   - flat thresholds making BTC walls ($500k = 0.02% of vol) trivial
+#
+# threshold(coin) = max(K × sqrt(24h_volume_USD), FLOOR, tier_floor) capped at CEILING
+#
+# K=8 gives:
+#   BTC ($2.5B vol)   → $403k
+#   SOL ($248M)       → $126k
+#   DOGE ($31M)       → $45k
+#   AVAX ($2.5M)      → $13k
+#   PYTH ($0.5M)      → $6k (clamped to FLOOR)
+# ============================================================================
+
+import math
+import json
+import time
+import urllib.request
+
+_VOL_CACHE: Dict[str, float] = {}     # coin -> 24h notional volume USD
+_VOL_REFRESH_T: float = 0.0
+VOL_REFRESH_S = 600                   # refresh volumes every 10 minutes
+
+
+def refresh_hl_volumes() -> int:
+    """Pull dayNtlVlm for every coin from HL metaAndAssetCtxs. Returns count loaded.
+
+    Safe to call repeatedly — internally rate-limited to once per VOL_REFRESH_S.
+    Idempotent on failure (keeps last good cache).
+    """
+    global _VOL_REFRESH_T
+    if time.time() - _VOL_REFRESH_T < VOL_REFRESH_S and _VOL_CACHE:
+        return len(_VOL_CACHE)
+    try:
+        body = json.dumps({'type': 'metaAndAssetCtxs'}).encode()
+        req = urllib.request.Request(
+            'https://api.hyperliquid.xyz/info',
+            data=body, headers={'Content-Type': 'application/json'},
+        )
+        raw = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        if not raw or len(raw) < 2: return len(_VOL_CACHE)
+        universe, ctxs = raw[0]['universe'], raw[1]
+        new_cache: Dict[str, float] = {}
+        for u, c in zip(universe, ctxs):
+            try:
+                v = float(c.get('dayNtlVlm', 0))
+                if v > 0:
+                    new_cache[u['name']] = v
+            except (TypeError, ValueError):
+                continue
+        if new_cache:
+            _VOL_CACHE.clear()
+            _VOL_CACHE.update(new_cache)
+            _VOL_REFRESH_T = time.time()
+        return len(_VOL_CACHE)
+    except Exception:
+        return len(_VOL_CACHE)
+
+
+def get_volume_threshold(coin: str,
+                          k: float = 8.0,
+                          floor_usd: float = 5000.0,
+                          ceiling_usd: float = 1_000_000.0) -> float:
+    """Compute volume-driven wall threshold for a coin.
+
+    Formula: max(floor, k × sqrt(24h_volume))  capped at ceiling.
+
+    If volume not yet cached, falls back to coin's tier floor.
+    Returns dollar amount.
+    """
+    vol = _VOL_CACHE.get(coin)
+    if vol is None:
+        # No volume data yet — fall back to tier floor
+        tier_usd, _ = get_tier(coin)
+        return float(tier_usd)
+    threshold = k * math.sqrt(vol)
+    return max(floor_usd, min(ceiling_usd, threshold))
+
+
+def get_volume(coin: str) -> Optional[float]:
+    """Raw 24h notional volume for a coin (USD), or None if not cached."""
+    return _VOL_CACHE.get(coin)
+
+
+def vol_threshold_stats() -> Dict[str, dict]:
+    """Per-coin breakdown for diagnostics."""
+    out = {}
+    for coin in _VOL_CACHE:
+        vol = _VOL_CACHE[coin]
+        thr = get_volume_threshold(coin)
+        tier_usd, _ = get_tier(coin)
+        out[coin] = {
+            'volume_24h_usd': vol,
+            'vol_threshold_usd': thr,
+            'tier_floor_usd': tier_usd,
+            'effective_usd': max(thr, tier_usd),
+        }
+    return out
+
+
 class DepthBaseline:
     """Tracks per-coin recent typical bucket size for dynamic threshold adjustment."""
     def __init__(self, window: int = 20, multiplier: float = 8.0):
@@ -151,17 +254,34 @@ class DepthBaseline:
         return med * self.multiplier
 
     def threshold(self, coin: str) -> tuple:
-        tier_usd, tier_p = get_tier(coin)
+        """Effective threshold = max(volume_driven, dynamic_baseline).
+
+        Volume-driven is the primary signal: K × sqrt(24h_volume_USD).
+        Dynamic baseline acts as a guard against thin-book regimes (ensures
+        we don't trade on walls smaller than recent typical bucket size × 8).
+
+        Tier floor is NOT used here — it scales poorly across BTC↔alts.
+        Tier table is retained only for cadence and persistence requirements.
+        """
+        _, tier_p = get_tier(coin)
+        vol_thr = get_volume_threshold(coin)
         dyn = self.baseline(coin)
-        if dyn is None: return tier_usd, tier_p
-        return max(tier_usd, dyn), tier_p
+        if dyn is None:
+            return vol_thr, tier_p
+        return max(vol_thr, dyn), tier_p
 
     def stats(self, coin: str) -> dict:
         h = self.history.get(coin)
         tier_usd, tier_p = get_tier(coin)
         dyn = self.baseline(coin)
+        vol_thr = get_volume_threshold(coin)
+        vol = get_volume(coin)
+        eff, _ = self.threshold(coin)
         return {
-            'tier_floor': tier_usd, 'tier_persistence': tier_p,
+            'tier_floor_legacy': tier_usd,  # informational only, not used
+            'tier_persistence': tier_p,
             'dynamic_baseline': dyn, 'samples': len(h) if h else 0,
-            'effective_threshold': max(tier_usd, dyn) if dyn is not None else tier_usd,
+            'volume_threshold': vol_thr,
+            'volume_24h_usd': vol,
+            'effective_threshold': eff,
         }
