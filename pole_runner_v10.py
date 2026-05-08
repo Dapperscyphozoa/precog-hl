@@ -247,7 +247,7 @@ def evaluate_coin(coin: str) -> Optional[Setup]:
     # Stage 6: build setup (computes SL past wick + 1 tick, R:R checks)
     tick = COIN_TICKS.get(coin, 0.0001)
     setup = build_setup(coin, ltf, zone, bars_1h, bars_4h, zones_4h,
-                          tick_size=tick, sl_buffer_ticks=2, sl_min_buffer_pct=0.0005, min_rr_to_tp1=2.0)
+                          tick_size=tick, sl_buffer_ticks=2, sl_min_buffer_pct=0.0005, min_rr_to_tp1=1.5)
     if setup is None:
         sd['build_setup_fail'] += 1
         log(f"  BUILD-FAIL {coin} {ltf['side']} (R:R<2 or no TPs)")
