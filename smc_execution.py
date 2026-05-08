@@ -99,9 +99,10 @@ def submit_smc_trade(payload: dict, ctx: dict):
     if _exchange is None:
         return {'status': 'no_exchange', 'error': 'HL_PRIVATE_KEY not set'}, 500
 
-    # Ensure ENTRY_TIF is set per spec (maker-only, no taker fallback)
-    if SMC_CONFIG.get('order_type') == 'maker_only':
-        os.environ.setdefault('ENTRY_TIF', 'Alo')
+    # SMC v1: taker-aggressive entry to fix 0% fill rate. Retest fills are
+    # detected on bar close, by which point price has already crossed ob_top.
+    # Alo refuses to cross spread → 0% fills. Force Ioc with 0.5% slip cap.
+    os.environ['ENTRY_TIF'] = 'Ioc'
 
     coin = _coin_upper(payload.get('coin') or '')
     notional = SMC_CONFIG['force_notional_usd']
@@ -171,7 +172,7 @@ def submit_smc_trade(payload: dict, ctx: dict):
         sl_px=sl_px,
         tp_px=tp_px,
         trade_id=trade_id,
-        slip_pct=0.0,
+        slip_pct=0.005,             # 0.5% Ioc cap — entry must cross spread on retest
         log_fn=lambda m: log.info(f"atomic_entry: {m}"),
         price_rounder=round_price,
     )

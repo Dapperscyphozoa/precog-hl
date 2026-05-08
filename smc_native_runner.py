@@ -62,7 +62,22 @@ class NativeSMCRunner:
             self.on_log(f"native_runner: universe = {len(self.universe)} coins")
             
             # 2. Build detectors
-            self.detectors = {c: SMCDetector(c) for c in self.universe}
+            # 2. Build detectors with config from smc_config (so min_rr_to_take,
+            # swing_lookback, displace_atr etc. all flow through to live engine
+            # — not just defaults).
+            from smc_config import SMC_CONFIG
+            det_kwargs = {
+                'swing_lookback':     SMC_CONFIG.get('swing_lookback', 5),
+                'sweep_strictness':   SMC_CONFIG.get('sweep_strictness', 'Loose'),
+                'mss_volume_mult':    SMC_CONFIG.get('mss_volume_mult', 1.5),
+                'displace_atr':       SMC_CONFIG.get('displace_atr', 1.5),
+                'fvg_min_atr':        SMC_CONFIG.get('fvg_min_atr', 0.3),
+                'sl_atr_mult':        SMC_CONFIG.get('sl_atr_mult', 2.0),
+                'setup_expiry_bars':  SMC_CONFIG.get('setup_expiry_bars', 20),
+                'min_rr_to_take':     SMC_CONFIG.get('min_rr_to_take', 1.0),
+                'long_only':          SMC_CONFIG.get('long_only', True),
+            }
+            self.detectors = {c: SMCDetector(c, **det_kwargs) for c in self.universe}
             
             # 3. Bootstrap candle history (this takes ~217/5 = 43 seconds throttled)
             self.on_log("native_runner: bootstrapping candle history…")

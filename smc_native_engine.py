@@ -267,24 +267,37 @@ class SMCDetector:
                     tp1_ = self.sl_prices[-1][1] if self.sl_prices else None
                     tp2_ = self.sl_prices[-2][1] if len(self.sl_prices) >= 2 else None
 
-                if tp1_ is None:
-                    tp1_ = entry + (entry - sl_) * 2 if is_long else entry - (sl_ - entry) * 2
+                # Dynamic TP — use REAL structural pivots only.
+                # No fabrication: if pivots are missing or pointing the wrong
+                # way (already broken / on the wrong side of entry), skip the
+                # setup. Position sizes the trade against whatever R the
+                # nearest valid pivot offers.
+                risk = abs(entry - sl_)
+                if risk <= 0:
+                    self.state = 'NONE'
+                    return None
+
+                def _valid(tp):
+                    if tp is None:
+                        return False
+                    return (tp > entry) if is_long else (tp < entry)
+
+                if not _valid(tp1_):
+                    tp1_ = None
+                if not _valid(tp2_):
+                    tp2_ = None
+
+                # If only the closer pivot is valid, use it as the actual exit.
+                if tp2_ is None and tp1_ is not None:
+                    tp2_ = tp1_
+                # If neither pivot is valid, skip the setup entirely.
                 if tp2_ is None:
-                    tp2_ = entry + (entry - sl_) * 4 if is_long else entry - (sl_ - entry) * 4
+                    self.state = 'NONE'
+                    return None
+                if tp1_ is None:
+                    tp1_ = tp2_
 
-                risk = abs(entry - sl_)
-                rew = abs(tp2_ - entry)
-                # Clamp TP2: backward OR rew/risk < 1.5 → set to 3R
-                if (is_long and tp2_ <= entry) or (not is_long and tp2_ >= entry):
-                    tp2_ = entry + risk * 3 if is_long else entry - risk * 3
-                elif rew / risk < 1.5:
-                    tp2_ = entry + risk * 3 if is_long else entry - risk * 3
-                # Clamp TP1
-                if (is_long and tp1_ <= entry) or (not is_long and tp1_ >= entry):
-                    tp1_ = entry + risk * 1.5 if is_long else entry - risk * 1.5
-
-                risk = abs(entry - sl_)
-                rr = abs(tp2_ - entry) / risk if risk > 0 else 0
+                rr = abs(tp2_ - entry) / risk
                 if rr >= self.min_rr_to_take and risk > 0:
                     self.setup.update({
                         'entry': entry, 'sl': sl_, 'tp1': tp1_, 'tp2': tp2_,
