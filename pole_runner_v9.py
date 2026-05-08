@@ -266,7 +266,14 @@ def check_triggers(coin: str, last_5m: dict):
         del state['triggers'][tkey]
 
 def reconcile():
-    """Sync pending limits + positions vs exchange. Cancel siblings on fill."""
+    """Sync pending limits + positions vs exchange. Cancel siblings on fill.
+
+    Position sync rules:
+      1. Build authoritative ex_pos map from exchange clearinghouseState.
+      2. For coins on exchange but not in state: ADOPT (so we don't double-open).
+      3. For coins in state but not on exchange: PRUNE (closed externally — TP/SL hit, manual close, etc.).
+      4. For coins in both: leave state entry alone (it has our SL/TP/entry context).
+    """
     open_orders = fetch_open_orders()
     open_oids = {o['oid'] for o in open_orders}
     acct = fetch_account()
@@ -275,7 +282,11 @@ def reconcile():
         state['balance'] = float(acct['marginSummary']['accountValue'])
         for ap in acct.get('assetPositions', []):
             p = ap['position']
-            ex_pos[p['coin']] = float(p['szi'])
+            sz = float(p['szi'])
+            if abs(sz) > 1e-9:
+                ex_pos[p['coin']] = sz
+
+    # Fill detection from pending → positions
     to_remove = []
     for pkey, p in list(state['pending'].items()):
         oid = p.get('entry_oid')
@@ -284,7 +295,6 @@ def reconcile():
             if coin in ex_pos and abs(ex_pos[coin]) > 1e-9:
                 state['positions'][coin] = {**p, 'filled_t': int(time.time()*1000)}
                 log(f"  FILLED bounce {coin} {p['side']} @ {p['entry_price']}")
-                # Cancel sibling breakout
                 sibling = p.get('sibling_breakout_id')
                 if sibling:
                     for tkey in list(state['triggers'].keys()):
@@ -295,6 +305,26 @@ def reconcile():
                 log(f"  UNFILLED bounce {coin} removed")
             to_remove.append(pkey)
     for k in to_remove: del state['pending'][k]
+
+    # Position sync — drift detection
+    state_coins = set(state['positions'].keys())
+    ex_coins = set(ex_pos.keys())
+    pruned = state_coins - ex_coins
+    adopted = ex_coins - state_coins
+    if pruned:
+        for coin in pruned:
+            log(f"  PRUNE {coin} — in state but not on exchange (closed externally)")
+            del state['positions'][coin]
+    if adopted:
+        for coin in adopted:
+            sz = ex_pos[coin]
+            side = 'BUY' if sz > 0 else 'SELL'
+            log(f"  ADOPT {coin} {side} sz={sz:+.4f} — on exchange but not in state")
+            state['positions'][coin] = {
+                'coin': coin, 'side': side, 'size': abs(sz),
+                'entry_price': None, 'sl_price': None, 'tp_price': None,
+                'kind': 'ADOPTED', 'filled_t': int(time.time()*1000),
+            }
 
 def expire_stale():
     """Cancel bounces and triggers older than expire windows."""
