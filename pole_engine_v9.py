@@ -129,14 +129,17 @@ class WallTracker:
             w.last_seen_t = ts
             w.times_tested = self.touch_counts.get(k, 0)
             w.last_test_t = self.last_touch_t.get(k, 0)
-            # Detect new touch this poll
-            if w.side == 'bid' and last_low <= w.high * 1.0002:
-                if ts - w.last_test_t > 300:  # >5min between touches counts as new
+            # Detect new touch only when price PENETRATED past the wall midpoint —
+            # a wick brushing wall.high (bid) or wall.low (ask) is normal noise
+            # for walls near mid and shouldn't kill the wall permanently.
+            wall_mid = (w.low + w.high) / 2
+            if w.side == 'bid' and last_low <= wall_mid:
+                if ts - w.last_test_t > 300:
                     self.touch_counts[k] = w.times_tested + 1
                     self.last_touch_t[k] = ts
                     w.times_tested = self.touch_counts[k]
                     w.last_test_t = ts
-            if w.side == 'ask' and last_high >= w.low * 0.9998:
+            if w.side == 'ask' and last_high >= wall_mid:
                 if ts - w.last_test_t > 300:
                     self.touch_counts[k] = w.times_tested + 1
                     self.last_touch_t[k] = ts
@@ -186,6 +189,7 @@ class PoleEngineV9:
                   breakout_sl_buffer_atr: float = 0.10,
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
+                  min_dist_pct: float = 0.0010,
                   cooldown_s: int = 4 * 3600):
         self.min_persistence = min_persistence_polls
         self.min_rr_bounce = min_rr_bounce
@@ -196,6 +200,7 @@ class PoleEngineV9:
         self.breakout_sl_buffer_atr = breakout_sl_buffer_atr
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
+        self.min_dist_pct = min_dist_pct
         self.cooldown_s = cooldown_s
         self._fired: Dict[str, float] = {}  # wall_id → fired_t
 
@@ -221,12 +226,13 @@ class PoleEngineV9:
         if now_ts is None: now_ts = time.time()
         if not walls or mid <= 0 or atr_v <= 0: return [], []
 
-        # Verified walls only — passed persistence + spoof defense + first-touch
+        # Verified walls only — passed persistence + spoof defense + first-touch + min distance
         min_p = min_persistence_polls if min_persistence_polls is not None else self.min_persistence
         verified = []
         for w in walls:
             if w.persistence_polls < min_p: continue
             if w.times_tested > 0: continue  # FIRST-TOUCH ONLY
+            if w.distance_pct < self.min_dist_pct: continue  # too close to mid — no setup
             shrink = tracker.shrink_pct(coin, w.side, w.price, mid, window_s=90)
             if shrink is not None and shrink >= self.spoof_filter_shrink: continue
             verified.append(w)
