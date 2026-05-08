@@ -21,7 +21,8 @@ from datetime import datetime, timezone
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
-from coin_tiers import DepthBaseline, get_tier, coins_for_tick, ALL_COINS
+from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS,
+                          refresh_hl_volumes, get_volume_threshold, get_volume)
 from pole_engine_v10 import (
     detect_consolidation_obs, get_unmitigated_zone_at, mtf_structure_intact,
     detect_ltf_setup, build_setup, OBZone, Setup, atr,
@@ -202,13 +203,17 @@ def fetch_hl_l2(coin):
 
 
 def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, side: str) -> tuple:
-    """Stage 5: verify there's a wall at the LTF OB (production aggregator OR HL L2 fallback)."""
+    """Stage 5: verify there's a wall at the LTF OB (production aggregator OR HL L2 fallback).
+
+    Threshold is volume-driven per coin: K × sqrt(24h_notional_volume).
+    Falls back to MIN_WALL_USD env var if volume cache is empty.
+    HL-L2 fallback uses 40% of computed threshold (single-venue depth).
+    """
     if not WALL_CONFLUENCE:
         return True, 0, 'wall confluence disabled'
     ob = fetch_orderbook(coin)
     used_hl_fallback = False
     if not ob or not ob.get('mid'):
-        # Fallback: HL native L2 (for HL-only tokens like STABLE, WLFI, PURR, HYPE)
         ob = fetch_hl_l2(coin)
         used_hl_fallback = True
         if not ob or not ob.get('mid'):
@@ -219,11 +224,17 @@ def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, 
     relevant_orders = bids if side == 'BUY' else asks
     cluster_usd = sum(o['usd'] for o in relevant_orders
                        if abs(o['price'] - target_price) / target_price < 0.003)
-    # On HL fallback, use lower threshold (HL alone has less depth than aggregated)
-    threshold = MIN_WALL_USD * 0.4 if used_hl_fallback else MIN_WALL_USD
+    # Volume-driven base threshold; fall back to env-var if no volume cached
+    base_thr = get_volume_threshold(coin)
+    if base_thr <= 5000.0:  # floor returned — volume not yet loaded
+        base_thr = MIN_WALL_USD
+    # HL single-venue gets 40% of the multi-venue threshold
+    threshold = base_thr * 0.4 if used_hl_fallback else base_thr
     passed = cluster_usd >= threshold
     src = 'HL-L2' if used_hl_fallback else 'multi-venue'
-    return passed, cluster_usd, f"{src} target={target_price:.6f} cluster=${cluster_usd/1000:.0f}k thr=${threshold/1000:.0f}k"
+    vol = get_volume(coin)
+    vol_str = f"vol=${(vol or 0)/1e6:.1f}M" if vol else "vol=?"
+    return passed, cluster_usd, f"{src} {vol_str} target={target_price:.6f} cluster=${cluster_usd/1000:.0f}k thr=${threshold/1000:.0f}k"
 
 def evaluate_coin(coin: str) -> Optional[Setup]:
     """Run full framework evaluation for one coin. Returns Setup or None."""
@@ -347,6 +358,7 @@ def reconcile():
 
 def tick():
     reconcile()
+    refresh_hl_volumes()  # volume-driven wall threshold; rate-limited internally
     state['tick_count'] += 1
     state['last_tick_t'] = int(time.time()*1000)
     log(f"━━ TICK #{state['tick_count']} ━━")
