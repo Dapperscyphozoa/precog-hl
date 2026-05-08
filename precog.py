@@ -2752,12 +2752,6 @@ def all_systems():
         'smc-loose':  {'label': 'SMC-LOOSE',   'branch': 'smc-loose',    'direction': 'L+S',
                        'universe': 173,   'desc': 'R-1_max loose params, full universe',
                        'url': ''},
-        'lsr':        {'label': 'LSR',         'branch': 'lsr-engine',   'direction': 'L+S',
-                       'universe': 173,   'desc': 'Liquidity sweep reversal — sweep+reject',
-                       'url': ''},
-        'brk':        {'label': 'BRK',         'branch': 'brk-engine',   'direction': 'L+S',
-                       'universe': 173,   'desc': 'OB break+retest continuation — BT 60% WR PF 2.13',
-                       'url': ''},
         'pool-arch-rev':  {'label': 'POOL-ARCH (REV)', 'branch': 'uzt-unified', 'direction': 'L+S',
                        'universe': 173,   'desc': 'Pool Architect — REVERSAL leg. UZT bridge, htf_displace=0.8',
                        'url': ''},
@@ -2765,7 +2759,7 @@ def all_systems():
                        'universe': 173,   'desc': 'Pool Architect — CONTINUATION leg. BT +1,328R / 156 coins / 50d',
                        'url': ''},
     }
-    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'lsr', 'brk', 'pool-arch-rev', 'pool-arch-cont']
+    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'pool-arch-rev', 'pool-arch-cont']
 
     # Pull dash state (single round-trip)
     dash_state = None

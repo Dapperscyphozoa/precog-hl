@@ -7,7 +7,7 @@ Usage in any engine service:
 
     # at the end of save_state(state):
     push_state(
-        engine_name      = 'lsr',                 # one of: multi-gate, smc-v1, smc-v2, smc-loose, lsr
+        engine_name      = 'multi-gate',          # one of: multi-gate, smc-v1, smc-v2, smc-loose, pool-arch-rev, pool-arch-cont
         live             = LIVE_TRADING,
         sizing_mode      = SIZING_MODE,
         notional_usd     = FIXED_NOTIONAL_USD,
@@ -252,7 +252,7 @@ def start_heartbeat(engine_name, state_getter, config_getter, interval_sec=60,
     threshold isn't tripped.
 
     Args:
-        engine_name:    'multi-gate' / 'smc-v1' / 'smc-v2' / 'smc-loose' / 'lsr'
+        engine_name:    'multi-gate' / 'smc-v1' / 'smc-v2' / 'smc-loose' / 'pool-arch-rev' / 'pool-arch-cont'
         state_getter:   callable() -> the engine's state dict (with 'positions' and 'history')
         config_getter:  callable() -> dict with keys: live, sizing_mode, notional_usd, max_concurrent
         interval_sec:   how often to push (default 60s)
