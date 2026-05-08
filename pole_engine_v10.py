@@ -253,16 +253,19 @@ def mtf_structure_intact(bars_1h: List[dict], bias: str, lookback_pivots: int = 
 
 
 def detect_ltf_setup(bars_5m: List[dict], bias: str,
-                       hl_pool_lookback: int = 25) -> Optional[dict]:
+                       hl_pool_lookback: int = 25):
     """Sweep + MSS + LTF OB sequence on 5m.
 
-    Returns dict with sweep, MSS, and LTF OB body/wick extremes.
+    Returns (setup_dict, drop_reason).
+    setup_dict is None when the sequence didn't form; drop_reason is a short tag
+    naming which sub-stage rejected. drop_reason is None when bars are insufficient
+    (not a logic drop, a data drop).
     """
-    if len(bars_5m) < 30: return None
+    if len(bars_5m) < 30: return None, None
     pivots = find_pivots(bars_5m, 2, 2)
-    if len(pivots) < 4: return None
+    if len(pivots) < 4: return None, 'no_pivots'
     a5 = atr(bars_5m, 14)
-    if a5 == 0: return None
+    if a5 == 0: return None, 'no_atr'
 
     if bias == 'long':
         # Find the LOWEST low in recent action (could be confirmed pivot or recent extreme)
@@ -291,7 +294,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             elif b['l'] <= ssl_price * 1.0003 and b['c'] > ssl_price:
                 # Later bar that wicked to/below SSL and closed above
                 sweep_idx = j; sweep_wick = b['l']; break
-        if sweep_idx is None: return None
+        if sweep_idx is None: return None, 'no_sweep'
 
         # Last LH = highest pivot high anywhere in the recent window
         # MSS reference = local LH of the down-move into SSL.
@@ -299,7 +302,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
         # Don't use highest pivot in entire window — that may be the pre-down-move HH,
         # which is structurally different from the LH we need MSS to break.
         local_window = bars_5m[max(0, sweep_idx - 8):sweep_idx]
-        if not local_window: return None
+        if not local_window: return None, 'no_local_window'
         last_lh = max(b['h'] for b in local_window)
 
         mss_idx = None
@@ -309,7 +312,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             if body == 0 or rng == 0: continue
             if b['c'] > last_lh and body > 0.5 * rng and body > 0.4 * a5:
                 mss_idx = j; break
-        if mss_idx is None: return None
+        if mss_idx is None: return None, 'no_mss'
 
         # LTF OB consolidation: bearish/sideways bars right before MSS impulse
         ob_window_indices = []
@@ -319,7 +322,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
                 ob_window_indices.insert(0, j)
             else:
                 break
-        if not ob_window_indices: return None
+        if not ob_window_indices: return None, 'no_ob_window'
 
         ob_bars = [bars_5m[j] for j in ob_window_indices]
         body_top = max(max(b['o'], b['c']) for b in ob_bars)
@@ -330,7 +333,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
         # Sweep wick may extend below the OB consolidation — use the lower of the two
         true_wick_bottom = min(wick_bottom, sweep_wick)
 
-        return {
+        return ({
             'side': 'BUY',
             'sweep_wick': sweep_wick, 'sweep_idx': sweep_idx,
             'mss_idx': mss_idx,
@@ -339,7 +342,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             'ob_bars': len(ob_window_indices),
             'ssl_swept': ssl_price, 'mss_break': last_lh,
             'mss_t': bars_5m[mss_idx]['t'],
-        }
+        }, None)
 
     else:  # short
         recent_window_size = min(40, len(bars_5m))
@@ -357,10 +360,10 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
                     sweep_idx = j; sweep_wick = b['h']; break
             elif b['h'] >= bsl_price * 0.9997 and b['c'] < bsl_price:
                 sweep_idx = j; sweep_wick = b['h']; break
-        if sweep_idx is None: return None
+        if sweep_idx is None: return None, 'no_sweep'
 
         local_window = bars_5m[max(0, sweep_idx - 8):sweep_idx]
-        if not local_window: return None
+        if not local_window: return None, 'no_local_window'
         last_hl = min(b['l'] for b in local_window)
 
         mss_idx = None
@@ -370,7 +373,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             if body == 0 or rng == 0: continue
             if b['c'] < last_hl and body > 0.5 * rng and body > 0.4 * a5:
                 mss_idx = j; break
-        if mss_idx is None: return None
+        if mss_idx is None: return None, 'no_mss'
 
         ob_window_indices = []
         for j in range(mss_idx - 1, max(0, mss_idx - 6), -1):
@@ -379,7 +382,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
                 ob_window_indices.insert(0, j)
             else:
                 break
-        if not ob_window_indices: return None
+        if not ob_window_indices: return None, 'no_ob_window'
 
         ob_bars = [bars_5m[j] for j in ob_window_indices]
         body_top = max(max(b['o'], b['c']) for b in ob_bars)
@@ -389,7 +392,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
 
         true_wick_top = max(wick_top, sweep_wick)
 
-        return {
+        return ({
             'side': 'SELL',
             'sweep_wick': sweep_wick, 'sweep_idx': sweep_idx,
             'mss_idx': mss_idx,
@@ -398,7 +401,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             'ob_bars': len(ob_window_indices),
             'bsl_swept': bsl_price, 'mss_break': last_hl,
             'mss_t': bars_5m[mss_idx]['t'],
-        }
+        }, None)
 
 
 def find_next_liquidity(bars_1h: List[dict], side: str, current_price: float) -> Optional[float]:
