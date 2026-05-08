@@ -56,6 +56,9 @@ state = {
     'tick_count': 0, 'last_tick_t': 0,
     'fires_total': 0,
     'qualified_setups': 0, 'wall_confluence_blocked': 0,
+    'stage_drops': {'no_4h_data':0,'no_zones':0,'no_5m_recent':0,'not_at_zone':0,
+                    'no_1h_data':0,'mtf_block':0,'no_5m_data':0,'no_ltf':0,
+                    'already_fired':0,'build_setup_fail':0},
     'log': [],
 }
 
@@ -207,43 +210,48 @@ def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, 
 
 def evaluate_coin(coin: str) -> Optional[Setup]:
     """Run full framework evaluation for one coin. Returns Setup or None."""
+    sd = state['stage_drops']
     bars_4h = get_candles_cached(coin, '4h', 60)
-    if len(bars_4h) < 30: return None
+    if len(bars_4h) < 30: sd['no_4h_data'] += 1; return None
 
-    # Stage 1: 4H zones
     zones_4h = detect_consolidation_obs(bars_4h, '4h', displacement_atr_mult=1.5,
                                           min_consol_bars=2, max_consol_bars=8)
-    if not zones_4h: return None
+    if not zones_4h: sd['no_zones'] += 1; return None
 
-    # Stage 2: price at unmitigated zone
     bars_5m_recent = get_candles_cached(coin, '5m', 1)
-    if len(bars_5m_recent) < 5: return None
+    if len(bars_5m_recent) < 5: sd['no_5m_recent'] += 1; return None
     current_price = bars_5m_recent[-1]['c']
     cur_4h_idx = len(bars_4h) - 1
     zone, bias = get_unmitigated_zone_at(zones_4h, cur_4h_idx, current_price, proximity_pct=0.005)
-    if zone is None: return None
+    if zone is None: sd['not_at_zone'] += 1; return None
 
-    # Stage 3: 1H structure
+    log(f"  STAGE2-PASS {coin} {bias} @ {zone.type} zone [{zone.body_bottom:.6f}-{zone.body_top:.6f}]")
+
     bars_1h = get_candles_cached(coin, '1h', 14)
-    if len(bars_1h) < 30: return None
-    if not mtf_structure_intact(bars_1h, bias): return None
+    if len(bars_1h) < 30: sd['no_1h_data'] += 1; return None
+    if not mtf_structure_intact(bars_1h, bias): sd['mtf_block'] += 1; return None
 
-    # Stage 4: LTF sweep + MSS + OB
+    log(f"  STAGE3-PASS {coin} MTF intact")
+
     bars_5m = get_candles_cached(coin, '5m', 7)
-    if len(bars_5m) < 30: return None
+    if len(bars_5m) < 30: sd['no_5m_data'] += 1; return None
     bars_5m_window = bars_5m[-50:]
     ltf = detect_ltf_setup(bars_5m_window, bias)
-    if ltf is None: return None
+    if ltf is None: sd['no_ltf'] += 1; return None
 
-    # Dedup: don't re-fire same OB
+    log(f"  STAGE4-PASS {coin} {ltf['side']} ob_body=[{ltf['ob_body_bottom']:.6f}-{ltf['ob_body_top']:.6f}]")
+
     if already_fired(coin, ltf['ob_body_top'], ltf['ob_body_bottom']):
-        return None
+        sd['already_fired'] += 1; return None
 
     # Stage 6: build setup (computes SL past wick + 1 tick, R:R checks)
     tick = COIN_TICKS.get(coin, 0.0001)
     setup = build_setup(coin, ltf, zone, bars_1h, bars_4h, zones_4h,
                           tick_size=tick, sl_buffer_ticks=2, sl_min_buffer_pct=0.0005, min_rr_to_tp1=2.0)
-    if setup is None: return None
+    if setup is None:
+        sd['build_setup_fail'] += 1
+        log(f"  BUILD-FAIL {coin} {ltf['side']} (R:R<2 or no TPs)")
+        return None
 
     # Stage 5: wall confluence check (after setup so we know body edges)
     state['qualified_setups'] += 1
@@ -327,6 +335,8 @@ def tick():
     log(f"━━ TICK #{state['tick_count']} ━━")
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} | "
         f"Total fires:{state['fires_total']} Qualified:{state['qualified_setups']} WallBlocked:{state['wall_confluence_blocked']}")
+    sd = state['stage_drops']
+    log(f"  Drops: zones={sd['no_zones']} not_at_zone={sd['not_at_zone']} mtf_block={sd['mtf_block']} no_ltf={sd['no_ltf']} build_fail={sd['build_setup_fail']}")
 
     coins_this_tick = coins_for_tick(state['tick_count'], COINS)
     log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick")
