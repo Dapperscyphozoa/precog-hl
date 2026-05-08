@@ -188,7 +188,7 @@ class PoleEngineV9:
                   sl_atr_mult: float = 0.5,
                   sl_buffer_pct: float = 0.0010,
                   breakout_trigger_pct: float = 0.0015,
-                  breakout_sl_inside_pct: float = 0.0050,
+                  breakout_sl_buffer_atr: float = 0.10,
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
                   min_r_pct: float = 0.0,
@@ -206,7 +206,7 @@ class PoleEngineV9:
         self.sl_atr_mult = sl_atr_mult
         self.sl_buffer_pct = sl_buffer_pct
         self.breakout_trigger_pct = breakout_trigger_pct
-        self.breakout_sl_inside_pct = breakout_sl_inside_pct
+        self.breakout_sl_buffer_atr = breakout_sl_buffer_atr
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
         self.min_r_pct = min_r_pct
@@ -289,20 +289,16 @@ class PoleEngineV9:
             tier = self.classify_tier(natural_rr)
 
             if tier != 'REJECT':
-                # Tier-specific SL + TP
-                if tier == 'HIGH':
+                # HIGH/MED keep structural TP at opposite wall.
+                # LOW = scalp: tighter SL + 1R clean sweep.
+                if tier in ('HIGH', 'MED'):
                     bounce_sl = natural_sl
-                    bounce_tp = nearest_ask.low - mid * 0.0005  # structural at opposite wall
-                elif tier == 'MED':
-                    bounce_sl = natural_sl
-                    R = bounce_limit - bounce_sl
-                    bounce_tp = bounce_limit + R  # 1R clean sweep
+                    bounce_tp = nearest_ask.low - mid * 0.0005  # structural
                 else:  # LOW
-                    # Tighter SL — half ATR/buffer
                     bounce_sl = nearest_bid.low - max(self.low_rr_sl_atr_mult * atr_v,
                                                       mid * self.low_rr_sl_buffer_pct)
                     R = bounce_limit - bounce_sl
-                    bounce_tp = bounce_limit + R  # 1R on tightened R
+                    bounce_tp = bounce_limit + R  # 1R scalp on tightened R
                 R = bounce_limit - bounce_sl
                 r_pct = R / bounce_limit if bounce_limit > 0 else 0
 
@@ -323,13 +319,21 @@ class PoleEngineV9:
                         rr = br_reward / br_risk
                     if self.min_rr_bounce <= rr <= 12:
                         # BREAKOUT: SELL trigger past bottom of bid wall
-                        # When price closes BELOW the bid wall, the wall broke down.
-                        # SL = cluster top reclaim invalidation; TP = 1R clean sweep.
+                        # SL = cluster top reclaim invalidation (structural).
+                        # TP: HIGH/MED = next bid wall below (or 1% extension);
+                        #     LOW = 1R clean sweep.
                         breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
-                        breakout_sl = nearest_bid.low * (1 + self.breakout_sl_inside_pct)
+                        breakout_sl = nearest_bid.high + self.breakout_sl_buffer_atr * atr_v
                         bo_R = breakout_sl - breakout_trigger
                         bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
-                        breakout_tp = breakout_trigger - bo_R  # 1R clean sweep
+                        if tier in ('HIGH', 'MED'):
+                            further_bids = [w for w in walls if w.side == 'bid'
+                                              and w.persistence_polls >= 3
+                                              and w.price < nearest_bid.low * 0.998]
+                            breakout_tp = (max(further_bids, key=lambda w: w.price).high
+                                            if further_bids else nearest_bid.low * 0.99)
+                        else:  # LOW
+                            breakout_tp = breakout_trigger - bo_R  # 1R clean sweep
                         if (breakout_sl > breakout_trigger > breakout_tp
                               and bo_r_pct >= self.min_r_pct
                               and not self._too_close_to_armed(coin, 'SELL', breakout_trigger, existing_armed_triggers)):
@@ -371,18 +375,14 @@ class PoleEngineV9:
             tier = self.classify_tier(natural_rr)
 
             if tier != 'REJECT':
-                if tier == 'HIGH':
+                if tier in ('HIGH', 'MED'):
                     bounce_sl = natural_sl
                     bounce_tp = nearest_bid.high + mid * 0.0005  # structural
-                elif tier == 'MED':
-                    bounce_sl = natural_sl
-                    R = bounce_sl - bounce_limit
-                    bounce_tp = bounce_limit - R  # 1R clean sweep
                 else:  # LOW
                     bounce_sl = nearest_ask.high + max(self.low_rr_sl_atr_mult * atr_v,
                                                        mid * self.low_rr_sl_buffer_pct)
                     R = bounce_sl - bounce_limit
-                    bounce_tp = bounce_limit - R  # 1R on tightened R
+                    bounce_tp = bounce_limit - R  # 1R scalp on tightened R
                 R = bounce_sl - bounce_limit
                 r_pct = R / bounce_limit if bounce_limit > 0 else 0
 
@@ -399,11 +399,21 @@ class PoleEngineV9:
                         rr = br_reward / br_risk
                         if self.min_rr_bounce <= rr <= 12:
                             # BREAKOUT: BUY trigger past top of ask wall
+                            # SL = cluster bottom reclaim invalidation (structural).
+                            # TP: HIGH/MED = next ask wall above (or 1% extension);
+                            #     LOW = 1R clean sweep.
                             breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
-                            breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
+                            breakout_sl = nearest_ask.low - self.breakout_sl_buffer_atr * atr_v
                             bo_R = breakout_trigger - breakout_sl
                             bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
-                            breakout_tp = breakout_trigger + bo_R  # 1R clean sweep
+                            if tier in ('HIGH', 'MED'):
+                                further_asks = [w for w in walls if w.side == 'ask'
+                                                  and w.persistence_polls >= 3
+                                                  and w.price > nearest_ask.high * 1.002]
+                                breakout_tp = (min(further_asks, key=lambda w: w.price).low
+                                                if further_asks else nearest_ask.high * 1.01)
+                            else:  # LOW
+                                breakout_tp = breakout_trigger + bo_R  # 1R clean sweep
                             if (breakout_sl < breakout_trigger < breakout_tp
                                   and bo_r_pct >= self.min_r_pct
                                   and not self._too_close_to_armed(coin, 'BUY', breakout_trigger, existing_armed_triggers)):

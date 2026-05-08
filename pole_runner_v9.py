@@ -30,7 +30,6 @@ from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS,
 from concurrent.futures import ThreadPoolExecutor
 from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
                               cluster_walls, Wall, BounceSetup, BreakoutTrigger)
-import trend_v9
 import funding_v9
 
 PRECOG_URL       = os.environ.get('PRECOG_URL', 'https://precog-i8c3.onrender.com')
@@ -54,7 +53,6 @@ COINS            = ([c.strip().upper() for c in COINS_OVERRIDE.split(',') if c.s
                     if COINS_OVERRIDE else list(ALL_COINS))
 SCAN_WORKERS     = int(os.environ.get('SCAN_WORKERS', '8'))
 
-TREND_FILTER_ON  = os.environ.get('TREND_FILTER_ON', '1') == '1'
 FUNDING_KILL_ON  = os.environ.get('FUNDING_KILL_ON', '1') == '1'
 
 state = {
@@ -190,10 +188,6 @@ def get_atr(coin):
     ATR_CACHE[coin] = (time.time(), a)
     return a
 
-def fetch_1h_for_trend(coin):
-    """30 days of 1h bars for pivot trend detection."""
-    return fetch_candles(coin, '1h', 30)
-
 def get_5m_close(coin):
     bars = fetch_candles(coin, '5m', 1)
     return bars[-1] if bars else None
@@ -269,8 +263,7 @@ def market_close(coin, is_buy_to_close, size, label='CLOSE'):
         log(f"  close err {coin}: {e}"); return None
 
 
-def place_bounce(s: BounceSetup, bias: str = 'neutral', wall_usd: float = 0.0,
-                  threshold_usd: float = 0.0) -> Optional[str]:
+def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0.0) -> Optional[str]:
     """Place bounce limit. Returns pkey if placed, None if skipped.
 
     Tier-specific filters (in addition to base checks):
@@ -291,20 +284,9 @@ def place_bounce(s: BounceSetup, bias: str = 'neutral', wall_usd: float = 0.0,
         log(f"  skip bounce {s.coin} {s.side} [LOW] wall=${wall_usd/1000:.0f}k < 2x threshold ${threshold_usd*2/1000:.0f}k")
         return None
 
-    # Trend handling: LOW counter-trend = SKIP. MED/HIGH counter-trend = 0.5x size.
-    is_counter_trend = TREND_FILTER_ON and bias != 'neutral' and (
-        (s.side == 'BUY' and bias == 'down') or (s.side == 'SELL' and bias == 'up'))
-    if tier == 'LOW' and is_counter_trend:
-        log(f"  skip bounce {s.coin} {s.side} [LOW] counter-trend (bias={bias}) — skipped entirely")
-        return None
-    size_mult = 0.5 if (is_counter_trend and tier in ('MED', 'HIGH')) else 1.0
-
     size, notional = calc_size(state['balance'], RISK_PCT, s.entry_price, s.sl_price)
     if size <= 0: return None
-    size *= size_mult
-    notional *= size_mult
-    if size <= 0: return None
-    log(f"PLACE-BOUNCE [{tier}] {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
+    log(f"PLACE-BOUNCE [{tier}] {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} sz={size:.6f} ${notional:.2f}")
     log(f"  notes: {s.notes}")
     is_buy = (s.side == 'BUY')
     tid = _trade_id(s.coin, s.side)
@@ -328,20 +310,12 @@ def place_bounce(s: BounceSetup, bias: str = 'neutral', wall_usd: float = 0.0,
     return pkey
 
 
-def arm_breakout(t: BreakoutTrigger, bias: str = 'neutral', wall_usd: float = 0.0,
-                  threshold_usd: float = 0.0):
+def arm_breakout(t: BreakoutTrigger, wall_usd: float = 0.0, threshold_usd: float = 0.0):
     tier = getattr(t, 'tier', 'MED')
 
     # LOW-tier wall-size filter
     if tier == 'LOW' and threshold_usd > 0 and wall_usd < threshold_usd * POLE.low_rr_size_multiplier:
         log(f"  skip arm-breakout {t.coin} {t.side} [LOW] wall=${wall_usd/1000:.0f}k < 2x threshold ${threshold_usd*2/1000:.0f}k")
-        return
-
-    # LOW counter-trend = SKIP
-    is_counter_trend = TREND_FILTER_ON and bias != 'neutral' and (
-        (t.side == 'BUY' and bias == 'down') or (t.side == 'SELL' and bias == 'up'))
-    if tier == 'LOW' and is_counter_trend:
-        log(f"  skip arm-breakout {t.coin} {t.side} [LOW] counter-trend (bias={bias})")
         return
 
     # Queue full -> evict lowest-RR if this beats it
@@ -359,14 +333,13 @@ def arm_breakout(t: BreakoutTrigger, bias: str = 'neutral', wall_usd: float = 0.
             return
     tkey = f"{t.coin}|BREAKOUT|{t.wall_id}"
     if tkey in state['triggers']: return
-    log(f"ARM-BREAKOUT [{tier}] {t.coin} {t.side} trigger@{t.trigger_price:.6f} sl={t.sl_price:.6f} tp={t.tp_price:.6f} rr={t.rr:.2f} bias={bias}")
+    log(f"ARM-BREAKOUT [{tier}] {t.coin} {t.side} trigger@{t.trigger_price:.6f} sl={t.sl_price:.6f} tp={t.tp_price:.6f} rr={t.rr:.2f}")
     log(f"  notes: {t.notes}")
     state['triggers'][tkey] = {
         'coin': t.coin, 'side': t.side, 'wall_id': t.wall_id,
         'trigger_price': t.trigger_price, 'sl': t.sl_price, 'tp': t.tp_price,
         'rr': t.rr, 'tier': tier, 'armed_t': int(time.time()*1000),
         'sibling_bounce_id': t.sibling_bounce_id,
-        'bias': bias,
     }
     state['fires_breakout_armed'] += 1
 
@@ -397,13 +370,7 @@ def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
     for tkey, t, bar in fired:
         size, notional = calc_size(state['balance'], RISK_PCT, t['trigger_price'], t['sl'])
         if size <= 0: del state['triggers'][tkey]; continue
-        # Trend-aware size on breakout fire
-        bias = t.get('bias', 'neutral')
-        size_mult = trend_v9.size_multiplier(t['side'], bias) if TREND_FILTER_ON else 1.0
-        size *= size_mult
-        notional *= size_mult
-        if size <= 0: del state['triggers'][tkey]; continue
-        log(f"TRIGGER-FIRE {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f} bias={bias}×{size_mult:.1f}")
+        log(f"TRIGGER-FIRE [{t.get('tier','MED')}] {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f}")
         is_buy = (t['side'] == 'BUY')
         tid = _trade_id(t['coin'], t['side'])
         place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
@@ -598,15 +565,14 @@ def tick():
                 'near_miss_a': len([w for w in tracked if w.side=='ask' and w.persistence_polls >= max(1, min_persistence-1)]),
             }
             atr_v = get_atr(coin)
-            if atr_v <= 0: return (coin, sm, [], [], [], None, 'neutral', 0.0)
+            if atr_v <= 0: return (coin, sm, [], [], [], None, 0.0)
             existing_armed = [t for t in state['triggers'].values() if t.get('coin') == coin]
             bounces, breakouts = POLE.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts,
                                                   min_persistence_polls=min_persistence,
                                                   existing_armed_triggers=existing_armed)
             sps = SPOOF.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts)
             last_5m = get_5m_close(coin)
-            bias = trend_v9.get_bias(coin, fetch_1h_for_trend) if TREND_FILTER_ON else 'neutral'
-            return (coin, sm, bounces, breakouts, sps, last_5m, bias, atr_v)
+            return (coin, sm, bounces, breakouts, sps, last_5m, atr_v)
         except Exception as e:
             log(f"  scan {coin} err: {e}")
             return None
@@ -617,32 +583,27 @@ def tick():
             if r is not None: scan_results.append(r)
 
     for tup in scan_results:
-        coin, sm, bounces, breakouts, sps, last_5m, bias, atr_v = tup
+        coin, sm, bounces, breakouts, sps, last_5m, atr_v = tup
         summary[coin] = sm
         threshold_usd = sm.get('min_usd', 0)
         check_triggers(coin, last_5m, atr_v)
         for b in bounces:
-            # wall_usd: lookup by wall_id in summary (nb/na)
             wall_usd = 0.0
             if sm.get('nb') and sm['nb'].wall_id == b.wall_id: wall_usd = sm['nb'].usd
             elif sm.get('na') and sm['na'].wall_id == b.wall_id: wall_usd = sm['na'].usd
-            place_bounce(b, bias=bias, wall_usd=wall_usd, threshold_usd=threshold_usd)
+            place_bounce(b, wall_usd=wall_usd, threshold_usd=threshold_usd)
         for bk in breakouts:
             wall_usd = 0.0
             base_wid = bk.wall_id.replace('|BO', '')
             if sm.get('nb') and sm['nb'].wall_id == base_wid: wall_usd = sm['nb'].usd
             elif sm.get('na') and sm['na'].wall_id == base_wid: wall_usd = sm['na'].usd
-            arm_breakout(bk, bias=bias, wall_usd=wall_usd, threshold_usd=threshold_usd)
+            arm_breakout(bk, wall_usd=wall_usd, threshold_usd=threshold_usd)
         for sp in sps:
             if sp['coin'] in state['positions']: continue
             if len(state['positions']) >= MAX_POSITIONS: continue
             size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])
             if size <= 0: continue
-            size_mult = trend_v9.size_multiplier(sp['side'], bias) if TREND_FILTER_ON else 1.0
-            size *= size_mult
-            notional *= size_mult
-            if size <= 0: continue
-            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
+            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} sz={size:.6f} ${notional:.2f}")
             log(f"  notes: {sp['notes']}")
             is_buy = (sp['side'] == 'BUY')
             tid = _trade_id(sp['coin'], sp['side'])
@@ -682,7 +643,7 @@ def main():
     log(f"  MAX_POS: {MAX_POSITIONS}, MAX_PENDING: {MAX_PENDING}, MAX_TRIGGERS: {MAX_TRIGGERS}")
     log(f"  POLL_INTERVAL_S: {POLL_INTERVAL_S}, COIN_PACE_MS: {COIN_PACE_MS}")
     log(f"  EXPIRE: bounce={BOUNCE_EXPIRE_S/3600:.1f}h trigger={TRIGGER_EXPIRE_S/3600:.1f}h")
-    log(f"  TREND_FILTER_ON: {TREND_FILTER_ON}, FUNDING_KILL_ON: {FUNDING_KILL_ON}")
+    log(f"  FUNDING_KILL_ON: {FUNDING_KILL_ON}")
     log(f"  WALLET: {WALLET[:10]+'...' if WALLET else 'NONE'}")
     load_state()
     global EXCHANGE
