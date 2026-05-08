@@ -25,8 +25,6 @@ from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
 
 PRECOG_URL       = os.environ.get('PRECOG_URL', 'https://precog-i8c3.onrender.com')
 HL_API           = 'https://api.hyperliquid.xyz/info'
-DRY_RUN          = os.environ.get('DRY_RUN', '1') == '1'
-LIVE             = os.environ.get('LIVE_TRADING', '0') == '1' and not DRY_RUN
 PRIVATE_KEY      = os.environ.get('HL_PRIVATE_KEY', '')
 WALLET           = os.environ.get('HL_ADDRESS') or os.environ.get('HYPERLIQUID_ACCOUNT', '')
 RISK_PCT         = float(os.environ.get('RISK_PCT', '0.0025'))
@@ -135,8 +133,8 @@ def get_5m_close(coin):
     return bars[-1] if bars else None
 
 def init_sdk():
-    if DRY_RUN:
-        log("SDK skipped (DRY_RUN)"); return None
+    if not PRIVATE_KEY or not WALLET:
+        raise SystemExit("FATAL: HL_PRIVATE_KEY and HL_ADDRESS env vars required for live trading")
     try:
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
@@ -146,29 +144,27 @@ def init_sdk():
         log(f"SDK initialized (LIVE), wallet {wallet.address[:10]}...")
         return ex
     except Exception as e:
-        log(f"SDK init failed: {e}"); return None
+        log(f"FATAL SDK init failed: {e}")
+        raise SystemExit(f"Cannot start without SDK: {e}")
 
 def place_limit(coin, is_buy, size, price, reduce_only=False, label=''):
-    if DRY_RUN or not LIVE or EXCHANGE is None:
-        log(f"  [DRY] LIMIT {coin} {'BUY' if is_buy else 'SELL'} sz={size:.6f} px={price:.6f} reduce={reduce_only} {label}")
-        return {'status':'ok','response':{'data':{'statuses':[{'resting':{'oid':int(time.time()*1000000)}}]}}}
+    if EXCHANGE is None:
+        log(f"  ERR no SDK, skipping {coin} {label}"); return None
     try:
         return EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':'Gtc'}}, reduce_only=reduce_only)
     except Exception as e:
         log(f"  limit err {coin}: {e}"); return None
 
 def place_market(coin, is_buy, size, slippage=0.005, label=''):
-    if DRY_RUN or not LIVE or EXCHANGE is None:
-        log(f"  [DRY] MARKET {coin} {'BUY' if is_buy else 'SELL'} sz={size:.6f} {label}")
-        return {'status':'ok'}
+    if EXCHANGE is None:
+        log(f"  ERR no SDK, skipping {coin} {label}"); return None
     try:
         return EXCHANGE.market_open(coin, is_buy, size, slippage=slippage)
     except Exception as e:
         log(f"  market err {coin}: {e}"); return None
 
 def cancel_order(coin, oid):
-    if DRY_RUN or not LIVE or EXCHANGE is None:
-        log(f"  [DRY] CANCEL {coin} oid={oid}"); return True
+    if EXCHANGE is None: return False
     try: EXCHANGE.cancel(coin, oid); return True
     except Exception as e: log(f"  cancel err: {e}"); return False
 
@@ -420,7 +416,7 @@ def main():
     log("=== POLE RUNNER V9 (BOUNCE + BREAKOUT) START ===")
     log(f"  PRECOG_URL: {PRECOG_URL}")
     log(f"  COINS: {len(COINS)}")
-    log(f"  DRY_RUN: {DRY_RUN}, LIVE: {LIVE}")
+    log(f"  MODE: LIVE TRADING (DRY_RUN removed from code)")
     log(f"  RISK_PCT: {RISK_PCT}, MAX_NOT_PCT: {MAX_NOTIONAL_PCT}, LEVERAGE: {LEVERAGE}")
     log(f"  MAX_POS: {MAX_POSITIONS}, MAX_PENDING: {MAX_PENDING}, MAX_TRIGGERS: {MAX_TRIGGERS}")
     log(f"  POLL_INTERVAL_S: {POLL_INTERVAL_S}, COIN_PACE_MS: {COIN_PACE_MS}")
