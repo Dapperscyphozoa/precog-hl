@@ -188,7 +188,7 @@ class PoleEngineV9:
                   sl_atr_mult: float = 0.5,
                   sl_buffer_pct: float = 0.0010,
                   breakout_trigger_pct: float = 0.0015,
-                  breakout_sl_buffer_atr: float = 0.10,
+                  breakout_sl_inside_pct: float = 0.0050,
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
                   min_r_pct: float = 0.0,
@@ -206,7 +206,7 @@ class PoleEngineV9:
         self.sl_atr_mult = sl_atr_mult
         self.sl_buffer_pct = sl_buffer_pct
         self.breakout_trigger_pct = breakout_trigger_pct
-        self.breakout_sl_buffer_atr = breakout_sl_buffer_atr
+        self.breakout_sl_inside_pct = breakout_sl_inside_pct
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
         self.min_r_pct = min_r_pct
@@ -323,7 +323,7 @@ class PoleEngineV9:
                         # TP: HIGH/MED = next bid wall below (or 1% extension);
                         #     LOW = 1R clean sweep.
                         breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
-                        breakout_sl = nearest_bid.high + self.breakout_sl_buffer_atr * atr_v
+                        breakout_sl = nearest_bid.low * (1 + self.breakout_sl_inside_pct)
                         bo_R = breakout_sl - breakout_trigger
                         bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
                         if tier in ('HIGH', 'MED'):
@@ -403,7 +403,7 @@ class PoleEngineV9:
                             # TP: HIGH/MED = next ask wall above (or 1% extension);
                             #     LOW = 1R clean sweep.
                             breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
-                            breakout_sl = nearest_ask.low - self.breakout_sl_buffer_atr * atr_v
+                            breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
                             bo_R = breakout_trigger - breakout_sl
                             bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
                             if tier in ('HIGH', 'MED'):
