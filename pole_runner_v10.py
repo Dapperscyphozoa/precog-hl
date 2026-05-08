@@ -185,28 +185,45 @@ def place_limit(coin, is_buy, size, price, reduce_only=False, label=''):
     except Exception as e:
         log(f"  limit err {coin}: {e}"); return None
 
-def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, side: str) -> tuple:
-    """Stage 5: verify there's a multi-venue wall at the LTF OB.
+def fetch_hl_l2(coin):
+    """Direct HL L2Book fetch for HL-native tokens not on multi-venue feed."""
+    raw = http_post(HL_API, {'type': 'l2Book', 'coin': coin})
+    if not raw or 'levels' not in raw: return None
+    levels = raw['levels']
+    if len(levels) < 2: return None
+    bids_raw, asks_raw = levels[0], levels[1]
+    # HL format: each level = {'px': '...', 'sz': '...', 'n': N}
+    bids = [{'price': float(l['px']), 'size': float(l['sz']),
+             'usd': float(l['px'])*float(l['sz'])} for l in bids_raw]
+    asks = [{'price': float(l['px']), 'size': float(l['sz']),
+             'usd': float(l['px'])*float(l['sz'])} for l in asks_raw]
+    mid = (bids[0]['price'] + asks[0]['price']) / 2 if bids and asks else 0
+    return {'mid': mid, 'bids': bids, 'asks': asks}
 
-    Returns (passed, wall_usd, notes).
-    """
+
+def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, side: str) -> tuple:
+    """Stage 5: verify there's a wall at the LTF OB (production aggregator OR HL L2 fallback)."""
     if not WALL_CONFLUENCE:
         return True, 0, 'wall confluence disabled'
     ob = fetch_orderbook(coin)
+    used_hl_fallback = False
     if not ob or not ob.get('mid'):
-        return False, 0, 'no orderbook data'
-    mid = ob['mid']
+        # Fallback: HL native L2 (for HL-only tokens like STABLE, WLFI, PURR, HYPE)
+        ob = fetch_hl_l2(coin)
+        used_hl_fallback = True
+        if not ob or not ob.get('mid'):
+            return False, 0, 'no orderbook data (prod + HL both empty)'
     bids = ob.get('bids', [])
     asks = ob.get('asks', [])
-    # For BUY setup: need a bid wall at or near OB body bottom
-    # For SELL setup: need an ask wall at or near OB body top
     target_price = ob_body_bottom if side == 'BUY' else ob_body_top
     relevant_orders = bids if side == 'BUY' else asks
-    # Cluster within 0.3% of target price
     cluster_usd = sum(o['usd'] for o in relevant_orders
                        if abs(o['price'] - target_price) / target_price < 0.003)
-    passed = cluster_usd >= MIN_WALL_USD
-    return passed, cluster_usd, f"target={target_price:.6f} cluster=${cluster_usd/1000:.0f}k"
+    # On HL fallback, use lower threshold (HL alone has less depth than aggregated)
+    threshold = MIN_WALL_USD * 0.4 if used_hl_fallback else MIN_WALL_USD
+    passed = cluster_usd >= threshold
+    src = 'HL-L2' if used_hl_fallback else 'multi-venue'
+    return passed, cluster_usd, f"{src} target={target_price:.6f} cluster=${cluster_usd/1000:.0f}k thr=${threshold/1000:.0f}k"
 
 def evaluate_coin(coin: str) -> Optional[Setup]:
     """Run full framework evaluation for one coin. Returns Setup or None."""
