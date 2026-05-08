@@ -130,6 +130,30 @@ def _boot():
     # 4. Start SMC scheduler (15min position_tick + hourly + daily)
     smc_monitors.start()
 
+    # 4b. Run orphan reaper at boot — cancel any SMC-cloid orders on HL that
+    # state.armed doesn't know about (state lost across restart when the
+    # disk isn't mounted, or on crash mid-persist). Defer to a thread so it
+    # doesn't block boot if HL is rate-limiting.
+    try:
+        import threading as _th
+        import smc_orphan_reaper, smc_execution
+        def _reap_once():
+            try:
+                smc_execution._ensure_hl()
+                if smc_execution._exchange is None:
+                    log.warning("reaper boot: _exchange not ready, skipping")
+                    return
+                addr = os.environ.get('HL_ADDRESS', '')
+                if not addr:
+                    return
+                smc_orphan_reaper.reap(smc_execution._exchange, addr)
+            except Exception as e:
+                log.exception(f"reaper boot run failed: {e}")
+        _th.Timer(20.0, _reap_once).start()  # 20s after boot, lets HL settle
+        log.info("orphan reaper armed (boot run in 20s)")
+    except Exception as e:
+        log.warning(f"orphan reaper init failed: {e}")
+
     # 5. Native SMC engine — bypass Pine, generate signals from HL WS candles
     if os.environ.get('SMC_NATIVE', '0') == '1':
         try:

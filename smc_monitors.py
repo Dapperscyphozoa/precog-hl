@@ -167,6 +167,21 @@ def heartbeat():
     )
 
 
+def reap_orphans():
+    """Periodic orphan reaper — cancel SMC-cloid orders not in state.armed."""
+    try:
+        import smc_orphan_reaper, smc_execution
+        smc_execution._ensure_hl()
+        if smc_execution._exchange is None:
+            return
+        addr = os.environ.get('HL_ADDRESS', '')
+        if not addr:
+            return
+        smc_orphan_reaper.reap(smc_execution._exchange, addr)
+    except Exception as e:
+        log.exception(f"reap_orphans failed: {e}")
+
+
 # ---------------- Scheduler ----------------
 
 def _run_scheduler():
@@ -188,6 +203,7 @@ def start():
     schedule.every().day.at("00:05").do(refresh_universe)
     schedule.every().day.at("23:55").do(nightly_rollup)
     schedule.every(5).minutes.do(heartbeat)
+    schedule.every(10).minutes.do(reap_orphans)
 
     # Run once at startup
     refresh_universe()
