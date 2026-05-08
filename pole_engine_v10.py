@@ -78,6 +78,7 @@ class Setup:
     sweep_wick: float
     sl_distance_pct: float
     notes: str = ''
+    path_label: str = '4h'   # which HTF triplet generated this setup ('4h' or '1h')
 
 
 def find_pivots(bars, left=2, right=2):
@@ -310,7 +311,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             b = bars_5m[j]
             body = abs(b['c'] - b['o']); rng = b['h'] - b['l']
             if body == 0 or rng == 0: continue
-            if b['c'] > last_lh and body > 0.5 * rng and body > 0.4 * a5:
+            if b['c'] > last_lh and body > 0.4 * rng and body > 0.3 * a5:
                 mss_idx = j; break
         if mss_idx is None: return None, 'no_mss'
 
@@ -371,7 +372,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             b = bars_5m[j]
             body = abs(b['c'] - b['o']); rng = b['h'] - b['l']
             if body == 0 or rng == 0: continue
-            if b['c'] < last_hl and body > 0.5 * rng and body > 0.4 * a5:
+            if b['c'] < last_hl and body > 0.4 * rng and body > 0.3 * a5:
                 mss_idx = j; break
         if mss_idx is None: return None, 'no_mss'
 
