@@ -217,21 +217,39 @@ def get_unmitigated_zone_at(zones: List[OBZone], current_idx: int, price: float,
     return z, ('long' if z.type == 'demand' else 'short')
 
 
-def mtf_structure_intact(bars_1h: List[dict], bias: str, lookback: int = 6) -> bool:
-    if len(bars_1h) < 30: return False
+def mtf_structure_intact(bars_1h: List[dict], bias: str, lookback_pivots: int = 12) -> bool:
+    """Soft MTF check.
+
+    The HTF unmitigated-zone check + LTF sweep+MSS together prove zone respect.
+    This MTF function only blocks the most extreme cases:
+      - Long: 1H has NO higher high anywhere in recent pivots (pure downtrend, no bullish attempt)
+      - Short: 1H has NO lower low anywhere in recent pivots (pure uptrend)
+
+    Returns True (permit) by default. Returns False only if the 1H structure is
+    monolithically against the bias (sign that the HTF zone is failing structurally).
+    """
+    if len(bars_1h) < 30: return True
     pivots = find_pivots(bars_1h, 3, 3)
     if len(pivots) < 4: return True
-    recent = pivots[-lookback:] if len(pivots) >= lookback else pivots
-    Hs = [(i, p) for i, t, p in recent if t == 'H']
-    Ls = [(i, p) for i, t, p in recent if t == 'L']
+
+    recent = pivots[-lookback_pivots:] if len(pivots) >= lookback_pivots else pivots
+
     if bias == 'long':
-        if len(Hs) >= 2 and Hs[-1][1] < Hs[-2][1] * 0.998: return False
-        if len(Ls) >= 2 and Ls[-1][1] < Ls[-2][1] * 0.998: return False
-        return True
-    else:
-        if len(Hs) >= 2 and Hs[-1][1] > Hs[-2][1] * 1.002: return False
-        if len(Ls) >= 2 and Ls[-1][1] > Ls[-2][1] * 1.002: return False
-        return True
+        # Has there been ANY higher-high attempt in recent pivots? (sign of buying pressure)
+        Hs_prices = [p for i, t, p in recent if t == 'H']
+        if len(Hs_prices) >= 2:
+            # If at least one H is higher than another → some bullish attempt has occurred
+            if max(Hs_prices) > min(Hs_prices) * 1.001:
+                return True
+        # Otherwise: monolithic downtrend, block
+        return False
+
+    else:  # short bias
+        Ls_prices = [p for i, t, p in recent if t == 'L']
+        if len(Ls_prices) >= 2:
+            if min(Ls_prices) < max(Ls_prices) * 0.999:
+                return True
+        return False
 
 
 def detect_ltf_setup(bars_5m: List[dict], bias: str,
@@ -247,28 +265,52 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
     if a5 == 0: return None
 
     if bias == 'long':
-        recent_lows = [(i, p) for i, t, p in pivots[-hl_pool_lookback:] if t == 'L']
-        if len(recent_lows) < 2: return None
-        ssl_idx, ssl_price = recent_lows[-2]
+        # Find the LOWEST low in recent action (could be confirmed pivot or recent extreme)
+        # This is what we want to see swept.
+        recent_window_size = min(40, len(bars_5m))
+        recent_bars = bars_5m[-recent_window_size:]
+        # Lowest low in this window
+        ssl_local_idx = min(range(len(recent_bars)), key=lambda i: recent_bars[i]['l'])
+        ssl_idx = len(bars_5m) - recent_window_size + ssl_local_idx
+        ssl_price = recent_bars[ssl_local_idx]['l']
 
+        # Look for a sweep: subsequent candle that goes BELOW ssl_price and closes above
+        # Sweep can also be the SSL bar itself if it has a wick below open and closes higher
         sweep_idx = None
         sweep_wick = None
-        for j in range(ssl_idx + 1, len(bars_5m)):
+        for j in range(ssl_idx, len(bars_5m)):
             b = bars_5m[j]
-            if b['l'] < ssl_price and b['c'] > ssl_price:
+            # Either this bar IS the lowest (its low = ssl_price) and it closes above the open level
+            # OR a later bar wicks below ssl_price and closes above
+            if j == ssl_idx:
+                # The SSL-creating bar — sweep counts if it closed back above its body bottom
+                # i.e., the wick down was rejected on the same bar
+                if b['c'] > b['o']:  # bullish reversal candle
+                    sweep_idx = j; sweep_wick = b['l']; break
+                # Otherwise wait for the actual sweep on a later bar
+            elif b['l'] <= ssl_price * 1.0003 and b['c'] > ssl_price:
+                # Later bar that wicked to/below SSL and closed above
                 sweep_idx = j; sweep_wick = b['l']; break
         if sweep_idx is None: return None
 
-        prior_highs = [p for i, t, p in pivots if t == 'H' and ssl_idx - 15 <= i <= sweep_idx]
-        if not prior_highs: return None
-        last_lh = max(prior_highs)
+        # Last LH = highest pivot high anywhere in the recent window
+        # MSS reference = highest pivot high BEFORE sweep (the LH of the down-move into zone)
+        prior_highs = [(i, p) for i, t, p in pivots if t == 'H' and i < sweep_idx]
+        if prior_highs:
+            # Use the MOST RECENT prior pivot high (closest to sweep)
+            last_lh = prior_highs[-1][1]
+        else:
+            # Fallback: highest high in 15 bars immediately before sweep
+            pre_sweep = bars_5m[max(0, sweep_idx-15):sweep_idx]
+            if not pre_sweep: return None
+            last_lh = max(b['h'] for b in pre_sweep)
 
         mss_idx = None
         for j in range(sweep_idx + 1, min(sweep_idx + 20, len(bars_5m))):
             b = bars_5m[j]
             body = abs(b['c'] - b['o']); rng = b['h'] - b['l']
             if body == 0 or rng == 0: continue
-            if b['c'] > last_lh and body > 0.6 * rng and body > 0.5 * a5:
+            if b['c'] > last_lh and body > 0.5 * rng and body > 0.4 * a5:
                 mss_idx = j; break
         if mss_idx is None: return None
 
@@ -303,28 +345,37 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
         }
 
     else:  # short
-        recent_highs = [(i, p) for i, t, p in pivots[-hl_pool_lookback:] if t == 'H']
-        if len(recent_highs) < 2: return None
-        bsl_idx, bsl_price = recent_highs[-2]
+        recent_window_size = min(40, len(bars_5m))
+        recent_bars = bars_5m[-recent_window_size:]
+        bsl_local_idx = max(range(len(recent_bars)), key=lambda i: recent_bars[i]['h'])
+        bsl_idx = len(bars_5m) - recent_window_size + bsl_local_idx
+        bsl_price = recent_bars[bsl_local_idx]['h']
 
         sweep_idx = None
         sweep_wick = None
-        for j in range(bsl_idx + 1, len(bars_5m)):
+        for j in range(bsl_idx, len(bars_5m)):
             b = bars_5m[j]
-            if b['h'] > bsl_price and b['c'] < bsl_price:
+            if j == bsl_idx:
+                if b['c'] < b['o']:  # bearish reversal candle
+                    sweep_idx = j; sweep_wick = b['h']; break
+            elif b['h'] >= bsl_price * 0.9997 and b['c'] < bsl_price:
                 sweep_idx = j; sweep_wick = b['h']; break
         if sweep_idx is None: return None
 
-        prior_lows = [p for i, t, p in pivots if t == 'L' and bsl_idx - 15 <= i <= sweep_idx]
-        if not prior_lows: return None
-        last_hl = min(prior_lows)
+        prior_lows = [(i, p) for i, t, p in pivots if t == 'L' and i < sweep_idx]
+        if prior_lows:
+            last_hl = prior_lows[-1][1]
+        else:
+            pre_sweep = bars_5m[max(0, sweep_idx-15):sweep_idx]
+            if not pre_sweep: return None
+            last_hl = min(b['l'] for b in pre_sweep)
 
         mss_idx = None
         for j in range(sweep_idx + 1, min(sweep_idx + 20, len(bars_5m))):
             b = bars_5m[j]
             body = abs(b['c'] - b['o']); rng = b['h'] - b['l']
             if body == 0 or rng == 0: continue
-            if b['c'] < last_hl and body > 0.6 * rng and body > 0.5 * a5:
+            if b['c'] < last_hl and body > 0.5 * rng and body > 0.4 * a5:
                 mss_idx = j; break
         if mss_idx is None: return None
 
