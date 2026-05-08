@@ -494,8 +494,8 @@ def tick():
 
             tracked = TRACKER.update(coin, bid_walls + ask_walls, mid, now_ts,
                                        last_low, last_high, decay_s=decay_s)
-            verified_b = [w for w in tracked if w.side=='bid' and w.persistence_polls >= min_persistence and w.times_tested == 0 and w.distance_pct >= POLE.min_dist_pct]
-            verified_a = [w for w in tracked if w.side=='ask' and w.persistence_polls >= min_persistence and w.times_tested == 0 and w.distance_pct >= POLE.min_dist_pct]
+            verified_b = [w for w in tracked if w.side=='bid' and w.persistence_polls >= min_persistence and w.times_tested == 0]
+            verified_a = [w for w in tracked if w.side=='ask' and w.persistence_polls >= min_persistence and w.times_tested == 0]
             nb = min(verified_b, key=lambda w: w.distance_pct, default=None)
             na = min(verified_a, key=lambda w: w.distance_pct, default=None)
             sm = {

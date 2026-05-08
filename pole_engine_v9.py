@@ -226,13 +226,12 @@ class PoleEngineV9:
         if now_ts is None: now_ts = time.time()
         if not walls or mid <= 0 or atr_v <= 0: return [], []
 
-        # Verified walls only — passed persistence + spoof defense + first-touch + min distance
+        # Verified walls only — passed persistence + spoof defense + first-touch
         min_p = min_persistence_polls if min_persistence_polls is not None else self.min_persistence
         verified = []
         for w in walls:
             if w.persistence_polls < min_p: continue
             if w.times_tested > 0: continue  # FIRST-TOUCH ONLY
-            if w.distance_pct < self.min_dist_pct: continue  # too close to mid — no setup
             shrink = tracker.shrink_pct(coin, w.side, w.price, mid, window_s=90)
             if shrink is not None and shrink >= self.spoof_filter_shrink: continue
             verified.append(w)
