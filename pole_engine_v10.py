@@ -294,16 +294,13 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
         if sweep_idx is None: return None
 
         # Last LH = highest pivot high anywhere in the recent window
-        # MSS reference = highest pivot high BEFORE sweep (the LH of the down-move into zone)
-        prior_highs = [(i, p) for i, t, p in pivots if t == 'H' and i < sweep_idx]
-        if prior_highs:
-            # Use the MOST RECENT prior pivot high (closest to sweep)
-            last_lh = prior_highs[-1][1]
-        else:
-            # Fallback: highest high in 15 bars immediately before sweep
-            pre_sweep = bars_5m[max(0, sweep_idx-15):sweep_idx]
-            if not pre_sweep: return None
-            last_lh = max(b['h'] for b in pre_sweep)
+        # MSS reference = local LH of the down-move into SSL.
+        # Use highest high in the bars IMMEDIATELY before sweep (last 8 bars).
+        # Don't use highest pivot in entire window — that may be the pre-down-move HH,
+        # which is structurally different from the LH we need MSS to break.
+        local_window = bars_5m[max(0, sweep_idx - 8):sweep_idx]
+        if not local_window: return None
+        last_lh = max(b['h'] for b in local_window)
 
         mss_idx = None
         for j in range(sweep_idx + 1, min(sweep_idx + 20, len(bars_5m))):
@@ -362,13 +359,9 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
                 sweep_idx = j; sweep_wick = b['h']; break
         if sweep_idx is None: return None
 
-        prior_lows = [(i, p) for i, t, p in pivots if t == 'L' and i < sweep_idx]
-        if prior_lows:
-            last_hl = prior_lows[-1][1]
-        else:
-            pre_sweep = bars_5m[max(0, sweep_idx-15):sweep_idx]
-            if not pre_sweep: return None
-            last_hl = min(b['l'] for b in pre_sweep)
+        local_window = bars_5m[max(0, sweep_idx - 8):sweep_idx]
+        if not local_window: return None
+        last_hl = min(b['l'] for b in local_window)
 
         mss_idx = None
         for j in range(sweep_idx + 1, min(sweep_idx + 20, len(bars_5m))):
