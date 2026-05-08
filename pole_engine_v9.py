@@ -183,23 +183,22 @@ class PoleEngineV9:
 
     def __init__(self,
                   min_persistence_polls: int = 5,
-                  min_rr_bounce: float = 1.0,
-                  min_rr_breakout: float = 1.0,
+                  min_rr_bounce: float = 1.5,
+                  min_rr_breakout: float = 1.5,
                   sl_atr_mult: float = 0.5,
                   sl_buffer_pct: float = 0.0010,
                   breakout_trigger_pct: float = 0.0015,
-                  breakout_sl_buffer_atr: float = 0.10,
+                  breakout_sl_inside_pct: float = 0.0050,
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
-                  min_r_pct: float = 0.005,
+                  min_r_pct: float = 0.0,
                   # Tiered setup thresholds — see classify_tier()
-                  high_rr_threshold: float = 2.0,    # >= this = HIGH (structural TP)
-                  med_rr_threshold: float = 1.5,     # >= this < high = MED (1R clean)
-                  # LOW-RR (1.0 <= RR < 1.5): tighter geometry + extra filters
-                  low_rr_sl_atr_mult: float = 0.2,   # half the standard ATR mult
-                  low_rr_sl_buffer_pct: float = 0.0005,  # half the standard buffer
-                  low_rr_min_persistence: int = 8,   # +60% over standard
-                  low_rr_size_multiplier: float = 2.0,  # wall must be 2x threshold
+                  high_rr_threshold: float = 2.0,
+                  med_rr_threshold: float = 1.5,
+                  low_rr_sl_atr_mult: float = 0.2,
+                  low_rr_sl_buffer_pct: float = 0.0005,
+                  low_rr_min_persistence: int = 8,
+                  low_rr_size_multiplier: float = 2.0,
                   cooldown_s: int = 4 * 3600):
         self.min_persistence = min_persistence_polls
         self.min_rr_bounce = min_rr_bounce
@@ -207,7 +206,7 @@ class PoleEngineV9:
         self.sl_atr_mult = sl_atr_mult
         self.sl_buffer_pct = sl_buffer_pct
         self.breakout_trigger_pct = breakout_trigger_pct
-        self.breakout_sl_buffer_atr = breakout_sl_buffer_atr
+        self.breakout_sl_inside_pct = breakout_sl_inside_pct
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
         self.min_r_pct = min_r_pct
@@ -218,7 +217,7 @@ class PoleEngineV9:
         self.low_rr_min_persistence = low_rr_min_persistence
         self.low_rr_size_multiplier = low_rr_size_multiplier
         self.cooldown_s = cooldown_s
-        self._fired: Dict[str, float] = {}  # wall_id → fired_t
+        self._fired: Dict[str, float] = {}
 
     def classify_tier(self, natural_rr: float) -> str:
         """HIGH / MED / LOW / REJECT based on natural wall-to-wall RR."""
@@ -327,7 +326,7 @@ class PoleEngineV9:
                         # When price closes BELOW the bid wall, the wall broke down.
                         # SL = cluster top reclaim invalidation; TP = 1R clean sweep.
                         breakout_trigger = nearest_bid.low * (1 - self.breakout_trigger_pct)
-                        breakout_sl = nearest_bid.high + self.breakout_sl_buffer_atr * atr_v
+                        breakout_sl = nearest_bid.low * (1 + self.breakout_sl_inside_pct)
                         bo_R = breakout_sl - breakout_trigger
                         bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
                         breakout_tp = breakout_trigger - bo_R  # 1R clean sweep
@@ -401,7 +400,7 @@ class PoleEngineV9:
                         if self.min_rr_bounce <= rr <= 12:
                             # BREAKOUT: BUY trigger past top of ask wall
                             breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
-                            breakout_sl = nearest_ask.low - self.breakout_sl_buffer_atr * atr_v
+                            breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
                             bo_R = breakout_trigger - breakout_sl
                             bo_r_pct = bo_R / breakout_trigger if breakout_trigger > 0 else 0
                             breakout_tp = breakout_trigger + bo_R  # 1R clean sweep
