@@ -60,6 +60,14 @@ state = {
     'stage_drops': {'no_4h_data':0,'no_zones':0,'no_5m_recent':0,'not_at_zone':0,
                     'no_1h_data':0,'mtf_block':0,'no_5m_data':0,'no_ltf':0,
                     'already_fired':0,'build_setup_fail':0},
+    # Outcome tracker (paper P&L)
+    'wins_tp1_tp2': 0,        # both TPs hit
+    'wins_tp1_be': 0,         # TP1 hit, runner stopped at breakeven (still net +)
+    'losses_sl': 0,           # full loss before TP1
+    'expired_unfilled': 0,    # entry never filled within SETUP_EXPIRE_S
+    'closed_open_eow': 0,     # filled but neither SL nor TP1 hit before tracker timeout
+    'pnl_pct_total': 0.0,     # cumulative paper PnL %, fee-adjusted
+    'recent_trades': [],      # last 20 closed trades for inspection
     'log': [],
 }
 
@@ -341,20 +349,153 @@ def place_setup(setup: Setup):
     state['fires_total'] += 1
     mark_fired(coin, setup.ltf_ob_body_top, setup.ltf_ob_body_bottom)
 
+FEE_RT = 0.0006   # round-trip fee assumption (3bp each side)
+TRACKER_TIMEOUT_S = int(os.environ.get('TRACKER_TIMEOUT_S', '86400'))  # close as 'open_eow' after 24h
+
+
+def fetch_1m_since(coin, since_ms):
+    """Pull 1m candles from since_ms to now."""
+    raw = http_post(HL_API, {'type':'candleSnapshot','req':{
+        'coin':coin,'interval':'1m','startTime':since_ms,
+        'endTime':int(time.time()*1000)
+    }})
+    if not raw: return []
+    bars = [{'t':b['t'],'o':float(b['o']),'h':float(b['h']),
+             'l':float(b['l']),'c':float(b['c']),'v':float(b['v'])} for b in raw]
+    bars.sort(key=lambda x: x['t'])
+    return bars
+
+
+def record_outcome(p, outcome, pnl_pct):
+    """Append closed trade to tracker + bump counters."""
+    counter_map = {
+        'TP1_TP2': 'wins_tp1_tp2',
+        'TP1_BE':  'wins_tp1_be',
+        'SL':      'losses_sl',
+        'EXPIRED': 'expired_unfilled',
+        'OPEN_EOW': 'closed_open_eow',
+    }
+    state[counter_map[outcome]] += 1
+    state['pnl_pct_total'] += pnl_pct
+    rec = {
+        'coin': p['coin'], 'side': p['side'],
+        'entry': p.get('entry'), 'sl': p.get('sl'),
+        'tp1': p.get('tp1'), 'tp2': p.get('tp2'),
+        'rr1': p.get('rr1'), 'sl_dist_pct': p.get('sl_dist_pct'),
+        'placed_t': p.get('placed_t'), 'fill_t': p.get('fill_t'),
+        'closed_t': int(time.time()*1000),
+        'outcome': outcome, 'pnl_pct': pnl_pct,
+    }
+    state['recent_trades'].append(rec)
+    if len(state['recent_trades']) > 20:
+        state['recent_trades'] = state['recent_trades'][-20:]
+
+
 def reconcile():
+    """Track paper trades: fills, outcomes, expiries.
+
+    Pending → Position when entry price is traversed (limit fill).
+    Position → Closed when SL/TP1/TP2 hit (walks forward in 1m candles).
+    Pending expires after SETUP_EXPIRE_S without fill.
+    Position closes as OPEN_EOW after TRACKER_TIMEOUT_S without resolution.
+    """
     acct = fetch_account()
     if acct:
         state['balance'] = float(acct['marginSummary']['accountValue'])
-    # Expire stale pending
+
     now_ms = int(time.time()*1000)
-    expired = []
+
+    # --- Step 1: pending → fill detection ---
+    pending_filled = []
+    pending_expired = []
     for pkey, p in list(state['pending'].items()):
         age_s = (now_ms - p.get('placed_t', now_ms)) / 1000
         if age_s > SETUP_EXPIRE_S:
-            expired.append(pkey)
-    for k in expired:
-        log(f"  EXPIRE-PENDING {k}")
-        del state['pending'][k]
+            pending_expired.append(pkey)
+            continue
+        # Fetch 1m bars since pending was placed
+        bars = fetch_1m_since(p['coin'], p['placed_t'])
+        if not bars: continue
+        entry = p['entry']; side = p['side']
+        for b in bars:
+            if side == 'BUY' and b['l'] <= entry:
+                p['fill_t'] = b['t']; p['fill_price'] = entry
+                pending_filled.append((pkey, p)); break
+            if side == 'SELL' and b['h'] >= entry:
+                p['fill_t'] = b['t']; p['fill_price'] = entry
+                pending_filled.append((pkey, p)); break
+
+    for pkey in pending_expired:
+        p = state['pending'][pkey]
+        log(f"  EXPIRE-PENDING {p['coin']} {p['side']} (no fill within {SETUP_EXPIRE_S}s)")
+        record_outcome(p, 'EXPIRED', 0.0)
+        del state['pending'][pkey]
+
+    for pkey, p in pending_filled:
+        log(f"  FILLED {p['coin']} {p['side']} @ {p['fill_price']:.6f}")
+        state['positions'][p['coin']] = p
+        del state['pending'][pkey]
+
+    # --- Step 2: position outcome detection ---
+    closed = []
+    for coin, p in list(state['positions'].items()):
+        age_s = (now_ms - p.get('fill_t', now_ms)) / 1000
+        bars = fetch_1m_since(coin, p['fill_t'])
+        if not bars:
+            if age_s > TRACKER_TIMEOUT_S:
+                closed.append((coin, 'OPEN_EOW', 0.0))
+            continue
+        side = p['side']; entry = p['fill_price']; sl = p['sl']
+        tp1 = p['tp1']; tp2 = p['tp2']
+        sl_idx = tp1_idx = None
+        for i, b in enumerate(bars):
+            if side == 'BUY':
+                if b['l'] <= sl and sl_idx is None: sl_idx = i
+                if b['h'] >= tp1 and tp1_idx is None: tp1_idx = i
+            else:
+                if b['h'] >= sl and sl_idx is None: sl_idx = i
+                if b['l'] <= tp1 and tp1_idx is None: tp1_idx = i
+            if sl_idx is not None or tp1_idx is not None: break
+        # SL hit first (or simultaneously) → full loss
+        if sl_idx is not None and (tp1_idx is None or sl_idx <= tp1_idx):
+            sl_pct = (sl - entry) / entry if side == 'BUY' else (entry - sl) / entry
+            closed.append((coin, 'SL', sl_pct - FEE_RT))
+            continue
+        # TP1 hit first → close 50%, runner watches for TP2 or BE-stop
+        if tp1_idx is not None:
+            tp1_pct = (tp1 - entry) / entry if side == 'BUY' else (entry - tp1) / entry
+            partial = 0.5 * (tp1_pct - FEE_RT/2)
+            outcome = None; runner_pnl = 0.0
+            for j in range(tp1_idx + 1, len(bars)):
+                b = bars[j]
+                if side == 'BUY':
+                    if b['l'] <= entry:
+                        outcome = 'TP1_BE'; runner_pnl = 0.5 * (0.0 - FEE_RT/2); break
+                    if b['h'] >= tp2:
+                        tp2_pct = (tp2 - entry) / entry
+                        outcome = 'TP1_TP2'; runner_pnl = 0.5 * (tp2_pct - FEE_RT/2); break
+                else:
+                    if b['h'] >= entry:
+                        outcome = 'TP1_BE'; runner_pnl = 0.5 * (0.0 - FEE_RT/2); break
+                    if b['l'] <= tp2:
+                        tp2_pct = (entry - tp2) / entry
+                        outcome = 'TP1_TP2'; runner_pnl = 0.5 * (tp2_pct - FEE_RT/2); break
+            if outcome is None:
+                # Runner still open — leave position in state
+                continue
+            closed.append((coin, outcome, partial + runner_pnl))
+            continue
+        # Neither SL nor TP yet — check tracker timeout
+        if age_s > TRACKER_TIMEOUT_S:
+            last = bars[-1]['c']
+            unr = (last - entry) / entry if side == 'BUY' else (entry - last) / entry
+            closed.append((coin, 'OPEN_EOW', unr - FEE_RT))
+
+    for coin, outcome, pnl_pct in closed:
+        p = state['positions'][coin]
+        record_outcome(p, outcome, pnl_pct)
+        log(f"  CLOSE {coin} {p['side']} → {outcome} pnl={pnl_pct*100:+.2f}%")
+        del state['positions'][coin]
 
 def tick():
     reconcile()
@@ -364,6 +505,13 @@ def tick():
     log(f"━━ TICK #{state['tick_count']} ━━")
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} | "
         f"Total fires:{state['fires_total']} Qualified:{state['qualified_setups']} WallBlocked:{state['wall_confluence_blocked']}")
+    # Win/loss tracker (paper)
+    wins = state['wins_tp1_tp2'] + state['wins_tp1_be']
+    losses = state['losses_sl']
+    closed_count = wins + losses + state['expired_unfilled'] + state['closed_open_eow']
+    wr = (wins / max(1, wins + losses)) * 100 if (wins + losses) else 0
+    log(f"  Tracker: closed={closed_count} (W:{state['wins_tp1_tp2']}+{state['wins_tp1_be']}/L:{state['losses_sl']}/EXP:{state['expired_unfilled']}/EOW:{state['closed_open_eow']}) "
+        f"WR={wr:.0f}% PnL%={state['pnl_pct_total']*100:+.2f}")
     sd = state['stage_drops']
     log(f"  Drops: zones={sd['no_zones']} not_at_zone={sd['not_at_zone']} mtf_block={sd['mtf_block']} no_ltf={sd['no_ltf']} build_fail={sd['build_setup_fail']}")
 
