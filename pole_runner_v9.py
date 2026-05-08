@@ -63,6 +63,10 @@ state = {
     'tick_count': 0, 'last_tick_t': 0,
     'fires_bounce': 0, 'fires_breakout_armed': 0, 'fires_breakout_triggered': 0,
     'fires_spoof': 0, 'funding_kills': 0, 'foreign_logged': 0,
+    # Closed-trade tracker (HL realized PnL via fills since opened_t)
+    'closes_total': 0, 'closes_win': 0, 'closes_loss': 0, 'closes_flat': 0,
+    'realized_pnl_total': 0.0,
+    'recent_closes': [],   # last 20 closed trades for inspection
     'log': [],
 }
 
@@ -90,6 +94,24 @@ def http_post(url, body, timeout=10):
 def fetch_orderbook(coin): return http_get(f"{PRECOG_URL}/orderbook/{coin}")
 def fetch_account(): return http_post(HL_API, {'type':'clearinghouseState','user':WALLET}) if WALLET else None
 def fetch_open_orders(): return (http_post(HL_API, {'type':'openOrders','user':WALLET}) or []) if WALLET else []
+
+def fetch_realized_pnl_since(coin, since_ms):
+    """Sum closedPnl from V9 wallet's HL fills for `coin` since `since_ms`.
+
+    Returns (pnl_usd, fill_count) or (None, 0) on error/no data.
+    HL's `closedPnl` is the per-fill realized PnL; summing across all fills since
+    the position opened gives net realized for that position cycle.
+    """
+    if not WALLET: return None, 0
+    raw = http_post(HL_API, {
+        'type': 'userFillsByTime', 'user': WALLET,
+        'startTime': int(since_ms), 'endTime': int(time.time() * 1000),
+    })
+    if not isinstance(raw, list): return None, 0
+    coin_fills = [f for f in raw if f.get('coin') == coin]
+    if not coin_fills: return None, 0
+    pnl = sum(float(f.get('closedPnl', 0) or 0) for f in coin_fills)
+    return round(pnl, 4), len(coin_fills)
 
 def fetch_candles(coin, interval='15m', days=2):
     end = int(time.time()*1000); start = end - days*86400000
@@ -453,7 +475,34 @@ def reconcile():
     foreign = ex_coins - state_coins
     if pruned:
         for coin in pruned:
-            log(f"  PRUNE {coin} — V9 closed externally (TP/SL/manual)")
+            p = state['positions'][coin]
+            opened_t = p.get('opened_t') or p.get('filled_t') or (int(time.time() * 1000) - 86400000)
+            side = p.get('side', '?')
+            pnl, n_fills = fetch_realized_pnl_since(coin, opened_t)
+            if pnl is None:
+                log(f"  PRUNE {coin} — V9 closed externally (pnl=unavailable)")
+                log(f"  CLOSE V9 {coin} {side} pnl=NA outcome=UNK fills={n_fills}")
+            else:
+                if pnl > 0.001:
+                    outcome = 'WIN'; state['closes_win'] += 1
+                elif pnl < -0.001:
+                    outcome = 'LOSS'; state['closes_loss'] += 1
+                else:
+                    outcome = 'FLAT'; state['closes_flat'] += 1
+                state['closes_total'] += 1
+                state['realized_pnl_total'] += pnl
+                # Keep last 20 closes for inspection
+                state['recent_closes'].append({
+                    'coin': coin, 'side': side, 'pnl': pnl, 'outcome': outcome,
+                    'opened_t': opened_t, 'closed_t': int(time.time() * 1000),
+                    'fills': n_fills,
+                    'entry': p.get('entry_price'), 'sl': p.get('sl'),
+                    'tp1': p.get('tp1'), 'tp2': p.get('tp2'),
+                })
+                if len(state['recent_closes']) > 20:
+                    state['recent_closes'] = state['recent_closes'][-20:]
+                log(f"  PRUNE {coin} — V9 closed externally")
+                log(f"  CLOSE V9 {coin} {side} pnl=${pnl:+.4f} outcome={outcome} fills={n_fills}")
             del state['positions'][coin]
     if foreign:
         for coin in foreign:
@@ -498,6 +547,11 @@ def tick():
     log(f"━━ TICK #{state['tick_count']} ━━")
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} Trig:{len(state['triggers'])} | "
         f"BO_armed:{state['fires_breakout_armed']} BO_fired:{state['fires_breakout_triggered']} Bounce:{state['fires_bounce']} Spoof:{state['fires_spoof']} FundKill:{state['funding_kills']} Foreign:{state['foreign_logged']}")
+    closes_total = state.get('closes_total', 0)
+    if closes_total > 0:
+        wins = state.get('closes_win', 0); losses = state.get('closes_loss', 0); flats = state.get('closes_flat', 0)
+        wr = (100 * wins / max(1, wins + losses)) if (wins + losses) else 0
+        log(f"  V9-Tracker: closed={closes_total} (W:{wins}/L:{losses}/F:{flats}) WR={wr:.0f}% RealizedPnL=${state.get('realized_pnl_total', 0):+.2f}")
 
     now_ts = time.time()
     summary = {}
