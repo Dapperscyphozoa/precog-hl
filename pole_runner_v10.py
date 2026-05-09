@@ -47,6 +47,10 @@ SCAN_WORKERS     = int(os.environ.get('SCAN_WORKERS', '6'))
 CANDLE_CACHE_S   = int(os.environ.get('CANDLE_CACHE_S', '300'))  # 5min cache for 4h/1h candles
 SETUP_EXPIRE_S   = int(os.environ.get('SETUP_EXPIRE_S', '14400'))  # 4h to fill limit
 WALL_CONFLUENCE  = os.environ.get('WALL_CONFLUENCE', '1') == '1'
+# Council #3 diagnostic: off by default. Set DIAGNOSTIC_DIR_FILTER=1 to reject SELL setups
+# when 1H EMA20 > EMA50 (bullish regime), and reject BUY setups when 1H EMA20 < EMA50 (bearish).
+# Off until n>=30 confirms a real directional bias requires defending.
+DIAGNOSTIC_DIR_FILTER = os.environ.get('DIAGNOSTIC_DIR_FILTER', '0') == '1'
 MIN_WALL_USD     = float(os.environ.get('MIN_WALL_USD', '100000'))  # min wall at LTF OB
 
 # ============================================================================
@@ -78,6 +82,9 @@ state = {
                    'no_mss':0,'no_ob_window':0},
     'build_fail_drops': {'no_tp_at_all':0,'wrong_side_tp':0,'zero_risk':0,
                           'risk_over_10pct':0,'rr_too_low':0},
+    # Diagnostic counters (Council #3)
+    'micro_samples': 0,           # count of MICRO log lines emitted
+    'build_fail_history': [],     # last 50 BUILD-FAIL records with full pricing data
     # Outcome tracker (paper P&L)
     'wins_tp1_tp2': 0,        # both TPs hit
     'wins_tp1_be': 0,         # TP1 hit, runner stopped at breakeven (still net +)
@@ -294,6 +301,7 @@ def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, 
     # spread+depth is the better proxy.
     micro = microstructure_metrics(ob)
     if micro:
+        state['micro_samples'] = state.get('micro_samples', 0) + 1
         log(f"  MICRO {coin} tier={get_tier(coin) or '?'} spread={micro['spread_bps']}bp "
             f"top_bid=${micro['top_bid_usd']:.0f} top_ask=${micro['top_ask_usd']:.0f} "
             f"depth_10bp=${micro['depth_10bp_usd']:.0f}")
@@ -346,6 +354,23 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
     if already_fired(coin, ltf['ob_body_top'], ltf['ob_body_bottom']):
         sd['already_fired'] += 1; return None
 
+    # Council #3 diagnostic: 1H trend filter (off by default). Reject side-against-regime.
+    if DIAGNOSTIC_DIR_FILTER:
+        try:
+            from pole_engine_v10 import atr  # cheap, already imported elsewhere
+        except Exception: pass
+        bars_1h_filt = get_candles_cached(coin, '1h', 7)
+        if len(bars_1h_filt) >= 50:
+            closes = [b['c'] for b in bars_1h_filt]
+            ema20 = sum(closes[-20:]) / 20
+            ema50 = sum(closes[-50:]) / 50
+            regime_bull = ema20 > ema50
+            if (ltf['side'] == 'SELL' and regime_bull) or (ltf['side'] == 'BUY' and not regime_bull):
+                state.setdefault('dir_filter_blocked', 0)
+                state['dir_filter_blocked'] = state.get('dir_filter_blocked', 0) + 1
+                log(f"  DIR-FILTER-BLOCK [{htf_label}] {coin} {ltf['side']} (regime={'bull' if regime_bull else 'bear'})")
+                return None
+
     # Stage 5: wall confluence (council Fix 1: REQUIRED when WALL_REQUIRED=1)
     state['qualified_setups'] += 1
     side_for_wall = ltf['side']
@@ -378,7 +403,7 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
                           sl_atr_mult=SL_ATR_MULT, single_tp_R=SINGLE_TP_R)
     if setup is None:
         sd['build_setup_fail'] += 1
-        # Sub-reason aggregation (council step 3+: data only, no behavior)
+        # Sub-reason aggregation
         bd = state.setdefault('build_fail_drops',
             {'no_tp_at_all':0,'wrong_side_tp':0,'zero_risk':0,'risk_over_10pct':0,'rr_too_low':0})
         if build_drop:
@@ -386,7 +411,42 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
                 bd['rr_too_low'] += 1
             elif build_drop in bd:
                 bd[build_drop] += 1
-        log(f"  BUILD-FAIL [{htf_label}] {coin} {ltf['side']} ({build_drop or 'unknown'})")
+
+        # Council #3: full pricing capture for offline analysis. Recompute the same
+        # way build_setup did using the inputs we have; no engine signature change.
+        try:
+            from pole_engine_v10 import find_next_liquidity, htf_target
+            side = ltf['side']
+            if side == 'BUY':
+                entry = ltf['ob_body_top']; wick = ltf['ob_wick_bottom']
+                buf = max(sl_ticks * tick, sl_min * wick); sl = wick - buf
+            else:
+                entry = ltf['ob_body_bottom']; wick = ltf['ob_wick_top']
+                buf = max(sl_ticks * tick, sl_min * wick); sl = wick + buf
+            tp1 = find_next_liquidity(bars_mtf, side, entry)
+            tp2_z = htf_target(zones, side, entry)
+            sl_dist_pct = abs(entry - sl) / entry if entry else 0
+            tp1_dist_pct = abs(tp1 - entry) / entry if (tp1 and entry) else 0
+            rr1 = (tp1_dist_pct / sl_dist_pct) if sl_dist_pct else 0
+            rec = {
+                'coin': coin, 'side': side, 'path': htf_label, 'tier': get_tier(coin) or '?',
+                'reason': build_drop, 'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2_z,
+                'wick': wick, 'buffer': buf,
+                'sl_dist_pct': round(sl_dist_pct*100, 3),
+                'tp1_dist_pct': round(tp1_dist_pct*100, 3),
+                'rr1': round(rr1, 2),
+                'sweep_wick': ltf.get('sweep_wick'),
+                'mss_break': ltf.get('mss_break'),
+                't': int(time.time()*1000),
+            }
+            hist = state.setdefault('build_fail_history', [])
+            hist.append(rec)
+            if len(hist) > 50:
+                state['build_fail_history'] = hist[-50:]
+            log(f"  BUILD-FAIL [{htf_label}] {coin} {side} ({build_drop or 'unknown'}) "
+                f"entry={entry:.6f} sl={sl:.6f} tp1={(tp1 or 0):.6f} sl_dist={sl_dist_pct*100:.2f}% tp1_dist={tp1_dist_pct*100:.2f}% rr1={rr1:.2f}")
+        except Exception as e:
+            log(f"  BUILD-FAIL [{htf_label}] {coin} {ltf['side']} ({build_drop or 'unknown'}) — diag err: {e}")
         return None
 
     if wall_passed:
@@ -721,6 +781,20 @@ def tick():
     bd = state.get('build_fail_drops', {})
     if any(bd.values()):
         log(f"  Build-drops: rr_low={bd.get('rr_too_low',0)} no_tp={bd.get('no_tp_at_all',0)} wrong_side={bd.get('wrong_side_tp',0)} risk_high={bd.get('risk_over_10pct',0)}")
+    # Council #3 diagnostic surfacing
+    ms = state.get('micro_samples', 0)
+    bfh = state.get('build_fail_history', [])
+    log(f"  Diagnostic: micro_samples={ms} build_fail_history={len(bfh)}/50")
+    if bfh:
+        # Quick aggregates over last-50 fails
+        rr_vals = [r['rr1'] for r in bfh if 'rr1' in r]
+        sl_vals = [r['sl_dist_pct'] for r in bfh if 'sl_dist_pct' in r]
+        tp1_vals = [r['tp1_dist_pct'] for r in bfh if 'tp1_dist_pct' in r]
+        if rr_vals:
+            avg_rr = sum(rr_vals)/len(rr_vals)
+            avg_sl = sum(sl_vals)/len(sl_vals)
+            avg_tp1 = sum(tp1_vals)/len(tp1_vals)
+            log(f"  BFH-stats: avg_rr={avg_rr:.2f} avg_sl={avg_sl:.2f}% avg_tp1={avg_tp1:.2f}% (n={len(rr_vals)})")
     # Rolling close summary: split WR/PnL by path and wall flag
     rt = state.get('recent_trades', [])
     if rt:
@@ -769,6 +843,7 @@ def main():
     log(f"  MAX_POS: {MAX_POSITIONS}, MAX_PENDING: {MAX_PENDING}")
     log(f"  POLL_INTERVAL_S: {POLL_INTERVAL_S}, SCAN_WORKERS: {SCAN_WORKERS}")
     log(f"  WALL_CONFLUENCE: {WALL_CONFLUENCE}, MIN_WALL_USD: ${MIN_WALL_USD}")
+    log(f"  DIAGNOSTIC_DIR_FILTER: {DIAGNOSTIC_DIR_FILTER}")
     log(f"  SETUP_EXPIRE_S: {SETUP_EXPIRE_S}, RUNNER_BE_TIMEOUT_S: {RUNNER_BE_TIMEOUT_S}, TRACKER_TIMEOUT_S: {TRACKER_TIMEOUT_S}")
     log(f"  STATE_FILE: {STATE_FILE}")
     log(f"  WALLET: {WALLET[:10]+'...' if WALLET else 'NONE'}")
