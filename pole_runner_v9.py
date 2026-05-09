@@ -622,10 +622,19 @@ def tick():
             state['fires_spoof'] += 1
 
     coins_with_zones = [c for c, d in summary.items() if d['nb'] and d['na']]
-    log(f"Wall map: {len(coins_with_zones)} coins with both fresh bid+ask verified walls")
-    for c in coins_with_zones[:12]:
+    coins_one_sided = [c for c, d in summary.items() if (d['nb'] or d['na']) and not (d['nb'] and d['na'])]
+    log(f"Wall map: {len(coins_with_zones)} coins both-sided, {len(coins_one_sided)} coins one-sided verified")
+    for c in coins_with_zones[:8]:
         d = summary[c]; nb = d['nb']; na = d['na']
-        log(f"  {c:6s} mid={d['mid']:>11.4f} thr=${d['min_usd']/1000:.0f}k decay={d['decay_s']:.0f}s | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
+        log(f"  [BOTH] {c:6s} mid={d['mid']:>11.4f} | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
+    for c in coins_one_sided[:8]:
+        d = summary[c]
+        if d['nb'] and not d['na']:
+            nb = d['nb']
+            log(f"  [BID-ONLY] {c:6s} mid={d['mid']:>11.4f} | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) — 1R fallback eligible")
+        elif d['na'] and not d['nb']:
+            na = d['na']
+            log(f"  [ASK-ONLY] {c:6s} mid={d['mid']:>11.4f} | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p) — 1R fallback eligible")
     near_misses = [(c, d) for c, d in summary.items() if c not in coins_with_zones and (d.get('near_miss_b', 0) > 0 or d.get('near_miss_a', 0) > 0)]
     if near_misses:
         nm_log = ', '.join(f"{c}(b={d['near_miss_b']}/a={d['near_miss_a']},thr=${d['min_usd']/1000:.0f}k)" for c, d in near_misses[:8])
