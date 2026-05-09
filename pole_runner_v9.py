@@ -30,6 +30,7 @@ from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS,
 from concurrent.futures import ThreadPoolExecutor
 from pole_engine_v9 import (PoleEngineV9, SpoofBreakoutEngine, WallTracker,
                               cluster_walls, Wall, BounceSetup, BreakoutTrigger)
+import trend_v9
 import funding_v9
 
 PRECOG_URL       = os.environ.get('PRECOG_URL', 'https://precog-i8c3.onrender.com')
@@ -129,6 +130,7 @@ def atr(bars, period=14):
     return sum(trs)/len(trs) if trs else 0.0
 
 FIXED_NOTIONAL   = float(os.environ.get('FIXED_NOTIONAL', '25.0'))
+TREND_FILTER_ON  = os.environ.get('TREND_FILTER_ON', '1') == '1'
 
 
 def calc_size(balance, risk_pct, entry, sl):
@@ -633,14 +635,17 @@ def tick():
                 'near_miss_a': len([w for w in tracked if w.side=='ask' and w.persistence_polls >= max(1, min_persistence-1)]),
             }
             atr_v = get_atr(coin)
-            if atr_v <= 0: return (coin, sm, [], [], [], None, 0.0)
+            if atr_v <= 0: return (coin, sm, [], [], [], None, 'neutral', 0.0)
             existing_armed = [t for t in state['triggers'].values() if t.get('coin') == coin]
             bounces, breakouts = POLE.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts,
                                                   min_persistence_polls=min_persistence,
                                                   existing_armed_triggers=existing_armed)
             sps = SPOOF.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts)
             last_5m = get_5m_close(coin)
-            return (coin, sm, bounces, breakouts, sps, last_5m, atr_v)
+            # 1h pivot trend bias for regime-aware routing (cached 5min/coin)
+            bias = (trend_v9.get_bias(coin, lambda c: fetch_candles(c, '1h', 30))
+                    if TREND_FILTER_ON else 'neutral')
+            return (coin, sm, bounces, breakouts, sps, last_5m, bias, atr_v)
         except Exception as e:
             log(f"  scan {coin} err: {e}")
             return None
@@ -651,22 +656,38 @@ def tick():
             if r is not None: scan_results.append(r)
 
     for tup in scan_results:
-        coin, sm, bounces, breakouts, sps, last_5m, atr_v = tup
+        coin, sm, bounces, breakouts, sps, last_5m, bias, atr_v = tup
         summary[coin] = sm
         threshold_usd = sm.get('min_usd', 0)
         check_triggers(coin, last_5m, atr_v)
+
+        # Regime routing: in trending markets, skip counter-trend setups entirely.
+        # In ranges (bias=neutral), allow all setups.
+        def _is_counter_trend(side):
+            if not TREND_FILTER_ON or bias == 'neutral': return False
+            return (side == 'BUY' and bias == 'down') or (side == 'SELL' and bias == 'up')
+
         for b in bounces:
+            if _is_counter_trend(b.side):
+                log(f"  SKIP-COUNTER-TREND bounce {coin} {b.side} bias={bias}")
+                continue
             wall_usd = 0.0
             if sm.get('nb') and sm['nb'].wall_id == b.wall_id: wall_usd = sm['nb'].usd
             elif sm.get('na') and sm['na'].wall_id == b.wall_id: wall_usd = sm['na'].usd
             place_bounce(b, wall_usd=wall_usd, threshold_usd=threshold_usd)
         for bk in breakouts:
+            if _is_counter_trend(bk.side):
+                log(f"  SKIP-COUNTER-TREND breakout {coin} {bk.side} bias={bias}")
+                continue
             wall_usd = 0.0
             base_wid = bk.wall_id.replace('|BO', '')
             if sm.get('nb') and sm['nb'].wall_id == base_wid: wall_usd = sm['nb'].usd
             elif sm.get('na') and sm['na'].wall_id == base_wid: wall_usd = sm['na'].usd
             arm_breakout(bk, wall_usd=wall_usd, threshold_usd=threshold_usd)
         for sp in sps:
+            if _is_counter_trend(sp['side']):
+                log(f"  SKIP-COUNTER-TREND spoof {coin} {sp['side']} bias={bias}")
+                continue
             if sp['coin'] in state['positions']: continue
             if len(state['positions']) >= MAX_POSITIONS: continue
             size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])

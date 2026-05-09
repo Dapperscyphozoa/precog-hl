@@ -17,10 +17,30 @@ Wall lifecycle:
   TESTED       price has touched wall once → wall is dead to us until it disappears
                 and reappears fresh
 """
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 from collections import defaultdict, deque
+
+
+def round_proximity_pct(price: float) -> float:
+    """Distance from price to nearest 'round' level, as a fraction of price.
+
+    Round = nearest multiple of (magnitude/10). For BTC at 80327, magnitude is
+    10000, step is 1000, nearest round is 80000, return 327/80327 = 0.0041.
+
+    Real orders cluster at round levels (retail/institutional anchoring,
+    liquidation triggers). Walls near rounds tend to hold; walls at random
+    prices are usually MM placeholders.
+    """
+    if price <= 0: return 1.0
+    log = math.log10(abs(price))
+    mag = 10 ** math.floor(log)
+    step = mag / 10
+    if step <= 0: return 1.0
+    nearest = round(price / step) * step
+    return abs(price - nearest) / price if price > 0 else 1.0
 
 
 @dataclass
@@ -193,6 +213,7 @@ class PoleEngineV9:
                   spoof_filter_shrink: float = 0.40,
                   min_r_pct: float = 0.0,
                   min_dist_pct: float = 0.0010,
+                  wall_penetration_factor: float = 0.30,
                   # Tiered setup thresholds — see classify_tier()
                   high_rr_threshold: float = 2.0,
                   med_rr_threshold: float = 1.5,
@@ -212,6 +233,7 @@ class PoleEngineV9:
         self.spoof_filter_shrink = spoof_filter_shrink
         self.min_r_pct = min_r_pct
         self.min_dist_pct = min_dist_pct
+        self.wall_penetration_factor = wall_penetration_factor
         self.high_rr_threshold = high_rr_threshold
         self.med_rr_threshold = med_rr_threshold
         self.low_rr_sl_atr_mult = low_rr_sl_atr_mult
@@ -289,7 +311,10 @@ class PoleEngineV9:
         # === NEAREST BID WALL ===
         if nearest_bid is not None and _can_fire(nearest_bid):
             wid = nearest_bid.wall_id
-            bounce_limit = nearest_bid.high
+            # Limit price PENETRATES into the wall (not at outer edge).
+            # Forces price to actually push through the wall before fill = real buyers, not a graze.
+            wall_size = nearest_bid.high - nearest_bid.low
+            bounce_limit = nearest_bid.high - self.wall_penetration_factor * wall_size
             natural_sl = nearest_bid.low - max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
             R_natural = bounce_limit - natural_sl
             # If opposite ask wall exists, compute natural wall-to-wall RR; else default tier=MED
@@ -302,6 +327,15 @@ class PoleEngineV9:
                 # No opposite wall — default to MED tier with 1R clean-sweep TP
                 natural_rr = 1.0
                 tier = 'MED_FALLBACK'
+
+            # Round-number tier upgrade: walls within 0.10% of a round level
+            # carry real liquidity (retail/institutional anchoring + liq triggers).
+            # Promote MED→HIGH, LOW→MED, MED_FALLBACK→HIGH (gets structural TP if opposite exists).
+            near_round = round_proximity_pct(nearest_bid.price) <= 0.0010
+            if near_round:
+                if tier == 'MED': tier = 'HIGH'
+                elif tier == 'LOW': tier = 'MED'
+                elif tier == 'MED_FALLBACK' and nearest_ask is not None: tier = 'HIGH'
 
             if tier != 'REJECT':
                 # HIGH/MED with opposite wall: structural TP
@@ -391,7 +425,8 @@ class PoleEngineV9:
         # === NEAREST ASK WALL ===
         if nearest_ask is not None and _can_fire(nearest_ask):
             wid = nearest_ask.wall_id
-            bounce_limit = nearest_ask.low
+            wall_size = nearest_ask.high - nearest_ask.low
+            bounce_limit = nearest_ask.low + self.wall_penetration_factor * wall_size
             natural_sl = nearest_ask.high + max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
             R_natural = natural_sl - bounce_limit
             if nearest_bid is not None:
@@ -402,6 +437,13 @@ class PoleEngineV9:
             else:
                 natural_rr = 1.0
                 tier = 'MED_FALLBACK'
+
+            # Round-number tier upgrade
+            near_round = round_proximity_pct(nearest_ask.price) <= 0.0010
+            if near_round:
+                if tier == 'MED': tier = 'HIGH'
+                elif tier == 'LOW': tier = 'MED'
+                elif tier == 'MED_FALLBACK' and nearest_bid is not None: tier = 'HIGH'
 
             if tier != 'REJECT':
                 if tier in ('HIGH', 'MED') and nearest_bid is not None:
