@@ -21,6 +21,12 @@ from datetime import datetime, timezone
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
+# PM Phase 2 client. No-op unless PM_CHECK_ENABLED=1. Fail-closed on PM down.
+try:
+    import pm_client
+except ImportError:
+    pm_client = None
+
 from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS, get_tier_number,
                           refresh_hl_volumes, get_volume_threshold, get_volume)
 from regime_gate import classify_regime, is_v10_allowed
@@ -488,6 +494,22 @@ def place_setup(setup: Setup):
     if size <= 0:
         log(f"  size=0 skip"); return
 
+    # PM Phase 2 pre-trade gate. Fail-closed if PM unreachable when enabled.
+    # No-op when pm_client missing or PM_CHECK_ENABLED unset (default).
+    if pm_client is not None and pm_client.PM_CHECK_ENABLED:
+        is_buy_for_check = (setup.side == 'BUY')
+        pm_resp = pm_client.check_pretrade(
+            coin=coin,
+            side='B' if is_buy_for_check else 'A',
+            notional=notional,
+            sl_distance_pct=setup.sl_distance_pct,
+            is_live=bool(LIVE),
+            engine=os.environ.get('ENGINE_NAME', 'V10'),
+        )
+        if not pm_resp.get('allow'):
+            log(f"  PM-DENIED {coin} reason={pm_resp.get('reason')} cap=${pm_resp.get('capital_remaining')}")
+            return
+
     half = size / 2.0
     log(f"PLACE {setup.side} {coin} entry={setup.entry_price:.6f} sl={setup.sl_price:.6f} "
         f"tp1={setup.tp1_price:.6f} tp2={setup.tp2_price:.6f} "
@@ -496,6 +518,18 @@ def place_setup(setup: Setup):
     log(f"  {setup.notes}")
 
     is_buy = (setup.side == 'BUY')
+    
+    # Register entry cloid with PM (best-effort) so PM can attribute the fill.
+    # Done before place_limit. SL/TP cloids would need separate registration if
+    # they're tracked individually; for now only the entry side is attributed.
+    if pm_client is not None and pm_client.PM_CHECK_ENABLED:
+        try:
+            entry_cloid = getattr(setup, 'entry_cloid', None) or f"v10sw_{coin}_{int(time.time())}"
+            pm_client.register_cloid(cloid=entry_cloid, coin=coin,
+                                       engine=os.environ.get('ENGINE_NAME', 'V10'))
+        except Exception as e:
+            log(f"  pm.register_cloid err (non-fatal): {e}")
+    
     or_res = place_limit(coin, is_buy, size, setup.entry_price, reduce_only=False, label='ENTRY')
     if not or_res: return
     entry_oid = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
