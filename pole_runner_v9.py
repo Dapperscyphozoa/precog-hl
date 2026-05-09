@@ -54,6 +54,7 @@ COINS            = ([c.strip().upper() for c in COINS_OVERRIDE.split(',') if c.s
                     if COINS_OVERRIDE else list(ALL_COINS))
 SCAN_WORKERS     = int(os.environ.get('SCAN_WORKERS', '8'))
 
+TREND_FILTER_ON  = os.environ.get('TREND_FILTER_ON', '1') == '1'
 FUNDING_KILL_ON  = os.environ.get('FUNDING_KILL_ON', '1') == '1'
 
 state = {
@@ -100,15 +101,31 @@ def fetch_realized_pnl_since(coin, since_ms):
     Returns (pnl_usd, fill_count) or (None, 0) on error/no data.
     HL's `closedPnl` is the per-fill realized PnL; summing across all fills since
     the position opened gives net realized for that position cycle.
+
+    Filters by cloid prefix `V9` (HL stores cloids as raw bytes, NOT hashed) so we
+    don't count fills from other engines (precog, precog-sa) sharing the wallet.
+    Also buffers `since_ms` back 30s to absorb placement→fill clock skew.
     """
     if not WALLET: return None, 0
     raw = http_post(HL_API, {
         'type': 'userFillsByTime', 'user': WALLET,
-        'startTime': int(since_ms), 'endTime': int(time.time() * 1000),
+        'startTime': max(0, int(since_ms) - 30_000),  # 30s buffer for placement→fill skew
+        'endTime': int(time.time() * 1000),
     })
     if not isinstance(raw, list): return None, 0
-    coin_fills = [f for f in raw if f.get('coin') == coin]
-    if not coin_fills: return None, 0
+    coin_fills = []
+    for f in raw:
+        if f.get('coin') != coin: continue
+        # Decode cloid (e.g. 0x56394152... = "V9ARB...") and require V9 prefix
+        cloid_hex = str(f.get('cloid', '') or '')
+        if cloid_hex.startswith('0x'): cloid_hex = cloid_hex[2:]
+        try:
+            cloid_str = bytes.fromhex(cloid_hex).decode('ascii', errors='ignore')
+        except Exception:
+            cloid_str = ''
+        if not cloid_str.startswith('V9'): continue   # not a V9-attributable fill
+        coin_fills.append(f)
+    if not coin_fills: return 0.0, 0    # no V9 fills found, but return 0 not None — distinguishes "looked but empty" from "couldn't query"
     pnl = sum(float(f.get('closedPnl', 0) or 0) for f in coin_fills)
     return round(pnl, 4), len(coin_fills)
 
@@ -129,63 +146,13 @@ def atr(bars, period=14):
         trs.append(tr)
     return sum(trs)/len(trs) if trs else 0.0
 
-FIXED_NOTIONAL   = float(os.environ.get('FIXED_NOTIONAL', '25.0'))
-TREND_FILTER_ON  = os.environ.get('TREND_FILTER_ON', '1') == '1'
-
-
 def calc_size(balance, risk_pct, entry, sl):
-    """Position sizer.
-
-    If FIXED_NOTIONAL > 0 (default $25): every trade uses that fixed notional.
-       size = FIXED_NOTIONAL / entry. SL distance does not affect size — risk per
-       trade scales with SL distance instead.
-    Else: legacy risk-based sizer (notional = risk_amt / sl_dist, capped).
-
-    Fixed notional is the cleanest way to compare per-trade outcomes when
-    iterating on the engine: same dollars in, same dollars out, R is the variable.
-    """
-    if entry <= 0: return 0, 0
-    if FIXED_NOTIONAL > 0:
-        notional = min(FIXED_NOTIONAL, balance * LEVERAGE)  # cap at margin ceiling
-        return notional / entry, notional
     if balance <= 0: return 0, 0
     risk_amt = balance * risk_pct
     sl_dist = abs(entry - sl) / entry
     if sl_dist <= 0: return 0, 0
     notional = min(risk_amt / sl_dist, balance * LEVERAGE, balance * MAX_NOTIONAL_PCT * LEVERAGE)
     return notional / entry, notional
-
-
-# === HL meta cache for per-coin szDecimals + pxDecimals rounding ===
-_META_CACHE = {'t': 0, 'data': {}}
-
-def fetch_meta():
-    """Hyperliquid universe meta — cached 30 min. Returns {coin: {szDecimals, ...}}."""
-    if time.time() - _META_CACHE['t'] < 1800 and _META_CACHE['data']:
-        return _META_CACHE['data']
-    raw = http_post(HL_API, {'type': 'meta'})
-    if raw and 'universe' in raw:
-        _META_CACHE['data'] = {a['name']: a for a in raw['universe']}
-        _META_CACHE['t'] = time.time()
-    return _META_CACHE['data']
-
-def round_size(coin: str, size: float) -> float:
-    """Round size to coin's szDecimals. HL rejects sizes with more decimals."""
-    meta = fetch_meta()
-    sz_dec = meta.get(coin, {}).get('szDecimals', 4)
-    return round(size, sz_dec)
-
-def round_price(coin: str, px: float) -> float:
-    """HL price tick rule: max 5 sig figs and at most (6 - szDecimals) decimals for perps."""
-    meta = fetch_meta()
-    sz_dec = meta.get(coin, {}).get('szDecimals', 4)
-    max_decs = max(0, 6 - sz_dec)
-    # Round to max_decs decimals first
-    rounded = round(px, max_decs)
-    # Then enforce 5 significant figures by going through string formatting
-    if rounded == 0: return 0.0
-    sig_str = f"{rounded:.5g}"
-    return float(sig_str)
 
 def load_state():
     try:
@@ -239,6 +206,10 @@ def get_atr(coin):
     ATR_CACHE[coin] = (time.time(), a)
     return a
 
+def fetch_1h_for_trend(coin):
+    """30 days of 1h bars for pivot trend detection."""
+    return fetch_candles(coin, '1h', 30)
+
 def get_5m_close(coin):
     bars = fetch_candles(coin, '5m', 1)
     return bars[-1] if bars else None
@@ -265,21 +236,15 @@ def _record_oid(oid):
     if len(state['v9_oids']) > 5000: state['v9_oids'] = state['v9_oids'][-5000:]
 
 
-def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=None, tif='Alo'):
-    """Place a limit order. Default tif='Alo' (post-only) — rejects if crosses spread.
-    Caller can pass tif='Gtc' for SL/TP brackets that need to be active stops."""
+def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=None):
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
-    size = round_size(coin, size)
-    price = round_price(coin, price)
-    if size <= 0:
-        log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         if cloid is not None:
-            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':tif}},
+            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':'Gtc'}},
                                   reduce_only=reduce_only, cloid=cloid)
         else:
-            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':tif}},
+            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':'Gtc'}},
                                   reduce_only=reduce_only)
         try:
             oid = res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
@@ -292,9 +257,6 @@ def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=No
 def place_market(coin, is_buy, size, slippage=0.005, label='', cloid=None):
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
-    size = round_size(coin, size)
-    if size <= 0:
-        log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         if cloid is not None:
             res = EXCHANGE.market_open(coin, is_buy, size, slippage=slippage, cloid=cloid)
@@ -316,9 +278,6 @@ def cancel_order(coin, oid):
 def market_close(coin, is_buy_to_close, size, label='CLOSE'):
     """Reduce-only market exit."""
     if EXCHANGE is None: return None
-    size = round_size(coin, size)
-    if size <= 0:
-        log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         return EXCHANGE.market_open(coin, is_buy_to_close, size, slippage=0.01,
                                      reduce_only=True)
@@ -326,7 +285,8 @@ def market_close(coin, is_buy_to_close, size, label='CLOSE'):
         log(f"  close err {coin}: {e}"); return None
 
 
-def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0.0) -> Optional[str]:
+def place_bounce(s: BounceSetup, bias: str = 'neutral', wall_usd: float = 0.0,
+                  threshold_usd: float = 0.0) -> Optional[str]:
     """Place bounce limit. Returns pkey if placed, None if skipped.
 
     Tier-specific filters (in addition to base checks):
@@ -347,9 +307,20 @@ def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0
         log(f"  skip bounce {s.coin} {s.side} [LOW] wall=${wall_usd/1000:.0f}k < 2x threshold ${threshold_usd*2/1000:.0f}k")
         return None
 
+    # Trend handling: LOW counter-trend = SKIP. MED/HIGH counter-trend = 0.5x size.
+    is_counter_trend = TREND_FILTER_ON and bias != 'neutral' and (
+        (s.side == 'BUY' and bias == 'down') or (s.side == 'SELL' and bias == 'up'))
+    if tier == 'LOW' and is_counter_trend:
+        log(f"  skip bounce {s.coin} {s.side} [LOW] counter-trend (bias={bias}) — skipped entirely")
+        return None
+    size_mult = 0.5 if (is_counter_trend and tier in ('MED', 'HIGH')) else 1.0
+
     size, notional = calc_size(state['balance'], RISK_PCT, s.entry_price, s.sl_price)
     if size <= 0: return None
-    log(f"PLACE-BOUNCE [{tier}] {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} sz={size:.6f} ${notional:.2f}")
+    size *= size_mult
+    notional *= size_mult
+    if size <= 0: return None
+    log(f"PLACE-BOUNCE [{tier}] {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
     log(f"  notes: {s.notes}")
     is_buy = (s.side == 'BUY')
     tid = _trade_id(s.coin, s.side)
@@ -357,15 +328,10 @@ def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0
                           label='ENTRY', cloid=_make_cloid(tid, 'E'))
     if not or_res: return None
     entry_oid = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
-    if not entry_oid:
-        # Post-only rejected (price crossed) OR order filled instantly. Either way, skip SL/TP brackets.
-        status = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0]
-        log(f"  SKIP-BRACKETS {s.coin} {s.side} entry didn't rest (status={status})")
-        return None
     place_limit(s.coin, not is_buy, size, s.sl_price, reduce_only=True,
-                 label='SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
+                 label='SL', cloid=_make_cloid(tid, 'S'))
     place_limit(s.coin, not is_buy, size, s.tp_price, reduce_only=True,
-                 label='TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
+                 label='TP', cloid=_make_cloid(tid, 'T'))
     pkey = f"{s.coin}|BOUNCE|{s.wall_id}"
     state['pending'][pkey] = {
         'coin': s.coin, 'side': s.side, 'kind': 'BOUNCE', 'wall_id': s.wall_id,
@@ -375,16 +341,23 @@ def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0
         'sibling_breakout_id': s.sibling_breakout_id,
     }
     state['fires_bounce'] += 1
-    POLE.mark_fired(s.wall_id, time.time())
     return pkey
 
 
-def arm_breakout(t: BreakoutTrigger, wall_usd: float = 0.0, threshold_usd: float = 0.0):
+def arm_breakout(t: BreakoutTrigger, bias: str = 'neutral', wall_usd: float = 0.0,
+                  threshold_usd: float = 0.0):
     tier = getattr(t, 'tier', 'MED')
 
     # LOW-tier wall-size filter
     if tier == 'LOW' and threshold_usd > 0 and wall_usd < threshold_usd * POLE.low_rr_size_multiplier:
         log(f"  skip arm-breakout {t.coin} {t.side} [LOW] wall=${wall_usd/1000:.0f}k < 2x threshold ${threshold_usd*2/1000:.0f}k")
+        return
+
+    # LOW counter-trend = SKIP
+    is_counter_trend = TREND_FILTER_ON and bias != 'neutral' and (
+        (t.side == 'BUY' and bias == 'down') or (t.side == 'SELL' and bias == 'up'))
+    if tier == 'LOW' and is_counter_trend:
+        log(f"  skip arm-breakout {t.coin} {t.side} [LOW] counter-trend (bias={bias})")
         return
 
     # Queue full -> evict lowest-RR if this beats it
@@ -402,16 +375,16 @@ def arm_breakout(t: BreakoutTrigger, wall_usd: float = 0.0, threshold_usd: float
             return
     tkey = f"{t.coin}|BREAKOUT|{t.wall_id}"
     if tkey in state['triggers']: return
-    log(f"ARM-BREAKOUT [{tier}] {t.coin} {t.side} trigger@{t.trigger_price:.6f} sl={t.sl_price:.6f} tp={t.tp_price:.6f} rr={t.rr:.2f}")
+    log(f"ARM-BREAKOUT [{tier}] {t.coin} {t.side} trigger@{t.trigger_price:.6f} sl={t.sl_price:.6f} tp={t.tp_price:.6f} rr={t.rr:.2f} bias={bias}")
     log(f"  notes: {t.notes}")
     state['triggers'][tkey] = {
         'coin': t.coin, 'side': t.side, 'wall_id': t.wall_id,
         'trigger_price': t.trigger_price, 'sl': t.sl_price, 'tp': t.tp_price,
         'rr': t.rr, 'tier': tier, 'armed_t': int(time.time()*1000),
         'sibling_bounce_id': t.sibling_bounce_id,
+        'bias': bias,
     }
     state['fires_breakout_armed'] += 1
-    POLE.mark_fired(t.wall_id.replace('|BO', ''), time.time())
 
 
 def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
@@ -440,55 +413,23 @@ def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
     for tkey, t, bar in fired:
         size, notional = calc_size(state['balance'], RISK_PCT, t['trigger_price'], t['sl'])
         if size <= 0: del state['triggers'][tkey]; continue
-        log(f"TRIGGER-FIRE [{t.get('tier','MED')}] {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f}")
+        # Trend-aware size on breakout fire
+        bias = t.get('bias', 'neutral')
+        size_mult = trend_v9.size_multiplier(t['side'], bias) if TREND_FILTER_ON else 1.0
+        size *= size_mult
+        notional *= size_mult
+        if size <= 0: del state['triggers'][tkey]; continue
+        log(f"TRIGGER-FIRE {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f} bias={bias}×{size_mult:.1f}")
         is_buy = (t['side'] == 'BUY')
         tid = _trade_id(t['coin'], t['side'])
-
-        # MARKET ENTRY
-        market_res = place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
-        # Read actual fill price — brackets must be relative to fill, not stale trigger.
-        actual_fill = None
-        try:
-            statuses = market_res.get('response',{}).get('data',{}).get('statuses',[])
-            for st in statuses:
-                if 'filled' in st:
-                    actual_fill = float(st['filled'].get('avgPx', 0))
-                    break
-        except Exception:
-            actual_fill = None
-
-        if not actual_fill or actual_fill <= 0:
-            log(f"  ERR breakout {t['coin']}: no fill price returned, brackets skipped")
-            del state['triggers'][tkey]
-            continue
-
-        # Slippage check: if market ran past trigger by > 1%, abort entry+brackets
-        slip_pct = abs(actual_fill - t['trigger_price']) / t['trigger_price']
-        if slip_pct > 0.01:
-            log(f"  ABORT breakout {t['coin']}: fill {actual_fill:.6f} vs trigger {t['trigger_price']:.6f} = {slip_pct*100:.2f}% slip — closing immediately")
-            # Close the position we just opened
-            market_close(t['coin'], not is_buy, size, label='SLIP-ABORT')
-            del state['triggers'][tkey]
-            continue
-
-        # Recompute brackets relative to ACTUAL fill, preserving original R distance
-        original_R = abs(t['trigger_price'] - t['sl'])
-        if is_buy:
-            new_sl = actual_fill - original_R
-            new_tp = actual_fill + original_R  # 1R clean sweep from fill
-        else:
-            new_sl = actual_fill + original_R
-            new_tp = actual_fill - original_R
-
-        log(f"  BREAKOUT-FILL {t['coin']} {t['side']} fill={actual_fill:.6f} (slip {slip_pct*100:.2f}%) → SL={new_sl:.6f} TP={new_tp:.6f}")
-
-        place_limit(t['coin'], not is_buy, size, new_sl, reduce_only=True,
-                     label='BREAKOUT-SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
-        place_limit(t['coin'], not is_buy, size, new_tp, reduce_only=True,
-                     label='BREAKOUT-TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
+        place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
+        place_limit(t['coin'], not is_buy, size, t['sl'], reduce_only=True,
+                     label='BREAKOUT-SL', cloid=_make_cloid(tid, 'S'))
+        place_limit(t['coin'], not is_buy, size, t['tp'], reduce_only=True,
+                     label='BREAKOUT-TP', cloid=_make_cloid(tid, 'T'))
         state['positions'][t['coin']] = {
             'side': t['side'], 'kind': 'BREAKOUT', 'wall_id': t['wall_id'],
-            'entry': actual_fill, 'sl': new_sl, 'tp': new_tp,
+            'entry': t['trigger_price'], 'sl': t['sl'], 'tp': t['tp'],
             'size': size, 'trade_id': tid,
             'opened_t': int(time.time()*1000),
             'filled_t': int(time.time()*1000),
@@ -680,9 +621,7 @@ def tick():
                                                   existing_armed_triggers=existing_armed)
             sps = SPOOF.evaluate(coin, tracked, TRACKER, mid, atr_v, now_ts)
             last_5m = get_5m_close(coin)
-            # 1h pivot trend bias for regime-aware routing (cached 5min/coin)
-            bias = (trend_v9.get_bias(coin, lambda c: fetch_candles(c, '1h', 30))
-                    if TREND_FILTER_ON else 'neutral')
+            bias = trend_v9.get_bias(coin, fetch_1h_for_trend) if TREND_FILTER_ON else 'neutral'
             return (coin, sm, bounces, breakouts, sps, last_5m, bias, atr_v)
         except Exception as e:
             log(f"  scan {coin} err: {e}")
@@ -698,47 +637,36 @@ def tick():
         summary[coin] = sm
         threshold_usd = sm.get('min_usd', 0)
         check_triggers(coin, last_5m, atr_v)
-
-        # Regime routing: in trending markets, skip counter-trend setups entirely.
-        # In ranges (bias=neutral), allow all setups.
-        def _is_counter_trend(side):
-            if not TREND_FILTER_ON or bias == 'neutral': return False
-            return (side == 'BUY' and bias == 'down') or (side == 'SELL' and bias == 'up')
-
         for b in bounces:
-            if _is_counter_trend(b.side):
-                log(f"  SKIP-COUNTER-TREND bounce {coin} {b.side} bias={bias}")
-                continue
+            # wall_usd: lookup by wall_id in summary (nb/na)
             wall_usd = 0.0
             if sm.get('nb') and sm['nb'].wall_id == b.wall_id: wall_usd = sm['nb'].usd
             elif sm.get('na') and sm['na'].wall_id == b.wall_id: wall_usd = sm['na'].usd
-            place_bounce(b, wall_usd=wall_usd, threshold_usd=threshold_usd)
+            place_bounce(b, bias=bias, wall_usd=wall_usd, threshold_usd=threshold_usd)
         for bk in breakouts:
-            if _is_counter_trend(bk.side):
-                log(f"  SKIP-COUNTER-TREND breakout {coin} {bk.side} bias={bias}")
-                continue
             wall_usd = 0.0
             base_wid = bk.wall_id.replace('|BO', '')
             if sm.get('nb') and sm['nb'].wall_id == base_wid: wall_usd = sm['nb'].usd
             elif sm.get('na') and sm['na'].wall_id == base_wid: wall_usd = sm['na'].usd
-            arm_breakout(bk, wall_usd=wall_usd, threshold_usd=threshold_usd)
+            arm_breakout(bk, bias=bias, wall_usd=wall_usd, threshold_usd=threshold_usd)
         for sp in sps:
-            if _is_counter_trend(sp['side']):
-                log(f"  SKIP-COUNTER-TREND spoof {coin} {sp['side']} bias={bias}")
-                continue
             if sp['coin'] in state['positions']: continue
             if len(state['positions']) >= MAX_POSITIONS: continue
             size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])
             if size <= 0: continue
-            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} sz={size:.6f} ${notional:.2f}")
+            size_mult = trend_v9.size_multiplier(sp['side'], bias) if TREND_FILTER_ON else 1.0
+            size *= size_mult
+            notional *= size_mult
+            if size <= 0: continue
+            log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
             log(f"  notes: {sp['notes']}")
             is_buy = (sp['side'] == 'BUY')
             tid = _trade_id(sp['coin'], sp['side'])
             place_market(sp['coin'], is_buy, size, label='SPOOF', cloid=_make_cloid(tid, 'E'))
             place_limit(sp['coin'], not is_buy, size, sp['sl_price'], reduce_only=True,
-                         label='SPOOF-SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
+                         label='SPOOF-SL', cloid=_make_cloid(tid, 'S'))
             place_limit(sp['coin'], not is_buy, size, sp['tp_price'], reduce_only=True,
-                         label='SPOOF-TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
+                         label='SPOOF-TP', cloid=_make_cloid(tid, 'T'))
             state['positions'][sp['coin']] = {
                 'side': sp['side'], 'kind': 'SPOOF', 'entry': sp['entry_price'],
                 'sl': sp['sl_price'], 'tp': sp['tp_price'], 'size': size,
@@ -749,19 +677,10 @@ def tick():
             state['fires_spoof'] += 1
 
     coins_with_zones = [c for c, d in summary.items() if d['nb'] and d['na']]
-    coins_one_sided = [c for c, d in summary.items() if (d['nb'] or d['na']) and not (d['nb'] and d['na'])]
-    log(f"Wall map: {len(coins_with_zones)} coins both-sided, {len(coins_one_sided)} coins one-sided verified")
-    for c in coins_with_zones[:8]:
+    log(f"Wall map: {len(coins_with_zones)} coins with both fresh bid+ask verified walls")
+    for c in coins_with_zones[:12]:
         d = summary[c]; nb = d['nb']; na = d['na']
-        log(f"  [BOTH] {c:6s} mid={d['mid']:>11.4f} | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
-    for c in coins_one_sided[:8]:
-        d = summary[c]
-        if d['nb'] and not d['na']:
-            nb = d['nb']
-            log(f"  [BID-ONLY] {c:6s} mid={d['mid']:>11.4f} | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) — 1R fallback eligible")
-        elif d['na'] and not d['nb']:
-            na = d['na']
-            log(f"  [ASK-ONLY] {c:6s} mid={d['mid']:>11.4f} | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p) — 1R fallback eligible")
+        log(f"  {c:6s} mid={d['mid']:>11.4f} thr=${d['min_usd']/1000:.0f}k decay={d['decay_s']:.0f}s | BID ${nb.usd/1000:>5.0f}k @{nb.price:>11.4f} -{nb.distance_pct*100:.2f}% ({nb.persistence_polls}p) | ASK ${na.usd/1000:>5.0f}k @{na.price:>11.4f} +{na.distance_pct*100:.2f}% ({na.persistence_polls}p)")
     near_misses = [(c, d) for c, d in summary.items() if c not in coins_with_zones and (d.get('near_miss_b', 0) > 0 or d.get('near_miss_a', 0) > 0)]
     if near_misses:
         nm_log = ', '.join(f"{c}(b={d['near_miss_b']}/a={d['near_miss_a']},thr=${d['min_usd']/1000:.0f}k)" for c, d in near_misses[:8])
@@ -779,7 +698,7 @@ def main():
     log(f"  MAX_POS: {MAX_POSITIONS}, MAX_PENDING: {MAX_PENDING}, MAX_TRIGGERS: {MAX_TRIGGERS}")
     log(f"  POLL_INTERVAL_S: {POLL_INTERVAL_S}, COIN_PACE_MS: {COIN_PACE_MS}")
     log(f"  EXPIRE: bounce={BOUNCE_EXPIRE_S/3600:.1f}h trigger={TRIGGER_EXPIRE_S/3600:.1f}h")
-    log(f"  FUNDING_KILL_ON: {FUNDING_KILL_ON}")
+    log(f"  TREND_FILTER_ON: {TREND_FILTER_ON}, FUNDING_KILL_ON: {FUNDING_KILL_ON}")
     log(f"  WALLET: {WALLET[:10]+'...' if WALLET else 'NONE'}")
     load_state()
     global EXCHANGE
