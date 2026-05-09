@@ -443,14 +443,52 @@ def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
         log(f"TRIGGER-FIRE [{t.get('tier','MED')}] {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f}")
         is_buy = (t['side'] == 'BUY')
         tid = _trade_id(t['coin'], t['side'])
-        place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
-        place_limit(t['coin'], not is_buy, size, t['sl'], reduce_only=True,
+
+        # MARKET ENTRY
+        market_res = place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
+        # Read actual fill price — brackets must be relative to fill, not stale trigger.
+        actual_fill = None
+        try:
+            statuses = market_res.get('response',{}).get('data',{}).get('statuses',[])
+            for st in statuses:
+                if 'filled' in st:
+                    actual_fill = float(st['filled'].get('avgPx', 0))
+                    break
+        except Exception:
+            actual_fill = None
+
+        if not actual_fill or actual_fill <= 0:
+            log(f"  ERR breakout {t['coin']}: no fill price returned, brackets skipped")
+            del state['triggers'][tkey]
+            continue
+
+        # Slippage check: if market ran past trigger by > 1%, abort entry+brackets
+        slip_pct = abs(actual_fill - t['trigger_price']) / t['trigger_price']
+        if slip_pct > 0.01:
+            log(f"  ABORT breakout {t['coin']}: fill {actual_fill:.6f} vs trigger {t['trigger_price']:.6f} = {slip_pct*100:.2f}% slip — closing immediately")
+            # Close the position we just opened
+            market_close(t['coin'], not is_buy, size, label='SLIP-ABORT')
+            del state['triggers'][tkey]
+            continue
+
+        # Recompute brackets relative to ACTUAL fill, preserving original R distance
+        original_R = abs(t['trigger_price'] - t['sl'])
+        if is_buy:
+            new_sl = actual_fill - original_R
+            new_tp = actual_fill + original_R  # 1R clean sweep from fill
+        else:
+            new_sl = actual_fill + original_R
+            new_tp = actual_fill - original_R
+
+        log(f"  BREAKOUT-FILL {t['coin']} {t['side']} fill={actual_fill:.6f} (slip {slip_pct*100:.2f}%) → SL={new_sl:.6f} TP={new_tp:.6f}")
+
+        place_limit(t['coin'], not is_buy, size, new_sl, reduce_only=True,
                      label='BREAKOUT-SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
-        place_limit(t['coin'], not is_buy, size, t['tp'], reduce_only=True,
+        place_limit(t['coin'], not is_buy, size, new_tp, reduce_only=True,
                      label='BREAKOUT-TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
         state['positions'][t['coin']] = {
             'side': t['side'], 'kind': 'BREAKOUT', 'wall_id': t['wall_id'],
-            'entry': t['trigger_price'], 'sl': t['sl'], 'tp': t['tp'],
+            'entry': actual_fill, 'sl': new_sl, 'tp': new_tp,
             'size': size, 'trade_id': tid,
             'opened_t': int(time.time()*1000),
             'filled_t': int(time.time()*1000),
