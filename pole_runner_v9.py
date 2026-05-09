@@ -48,6 +48,8 @@ COIN_PACE_MS     = int(os.environ.get('COIN_PACE_MS', '400'))
 TRIGGER_EXPIRE_S = int(os.environ.get('TRIGGER_EXPIRE_S', '14400'))
 BOUNCE_EXPIRE_S  = int(os.environ.get('BOUNCE_EXPIRE_S', '14400'))
 STATE_FILE       = os.environ.get('STATE_FILE', '/var/data/pole_state_v9.json')
+LIVE_TRADING     = os.environ.get('LIVE_TRADING', '1') == '1'   # gate exchange.order calls. 0 = paper/halt
+HALT_FILE        = os.environ.get('HALT_FILE', '/var/data/v9_halted')   # presence = engine halted via /halt endpoint
 ENGINE_PREFIX    = os.environ.get('ENGINE_PREFIX', 'V9')
 COINS_OVERRIDE   = os.environ.get('COINS', '').strip()
 COINS            = ([c.strip().upper() for c in COINS_OVERRIDE.split(',') if c.strip()]
@@ -236,7 +238,48 @@ def _record_oid(oid):
     if len(state['v9_oids']) > 5000: state['v9_oids'] = state['v9_oids'][-5000:]
 
 
+_HALT_SKIPS_THIS_TICK = {'count': 0, 'first_logged': False}
+
+def _is_halted() -> bool:
+    """Halt if LIVE_TRADING env is off OR halt-file exists.
+
+    LIVE_TRADING is re-read from env on EVERY check, so flipping the Render env var
+    takes effect on the next order attempt without requiring a redeploy.
+    HALT_FILE is touched/removed via Render Shell (`touch /var/data/v9_halted` to halt;
+    `rm /var/data/v9_halted` to resume) — fastest halt mechanism, works while engine runs.
+    """
+    if os.environ.get('LIVE_TRADING', '1') != '1': return True
+    try:
+        return os.path.exists(HALT_FILE)
+    except Exception:
+        return False
+
+
+def _halt_skip_log(coin: str, label: str, side: str, size, price=None, reduce_only=False):
+    """Log the first halt-skip per tick verbosely; suppress the rest to a counter."""
+    _HALT_SKIPS_THIS_TICK['count'] += 1
+    if not _HALT_SKIPS_THIS_TICK['first_logged']:
+        px_str = f"px={price} " if price is not None else ""
+        log(f"  HALTED: skip {coin} {side} {label} sz={size} {px_str}reduce_only={reduce_only}")
+        log(f"          (LIVE_TRADING={os.environ.get('LIVE_TRADING','1')}, halt_file_exists={os.path.exists(HALT_FILE)})")
+        _HALT_SKIPS_THIS_TICK['first_logged'] = True
+
+
+def _halt_skip_flush():
+    """Called at end of tick — emits a summary if multiple skips happened."""
+    n = _HALT_SKIPS_THIS_TICK['count']
+    if n > 1:
+        log(f"  HALTED: total {n} order placements skipped this tick")
+    _HALT_SKIPS_THIS_TICK['count'] = 0
+    _HALT_SKIPS_THIS_TICK['first_logged'] = False
+
+
 def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=None):
+    if _is_halted():
+        _halt_skip_log(coin, label or 'LIMIT', 'BUY' if is_buy else 'SELL', size, price, reduce_only)
+        return {"status": "skipped_halted", "would_have_placed": {
+            "coin": coin, "is_buy": is_buy, "size": size, "price": price,
+            "reduce_only": reduce_only, "label": label}}
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
     try:
@@ -255,6 +298,10 @@ def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=No
         log(f"  limit err {coin}: {e}"); return None
 
 def place_market(coin, is_buy, size, slippage=0.005, label='', cloid=None):
+    if _is_halted():
+        _halt_skip_log(coin, label or 'MARKET', 'BUY' if is_buy else 'SELL', size)
+        return {"status": "skipped_halted", "would_have_placed": {
+            "coin": coin, "is_buy": is_buy, "size": size, "slippage": slippage, "label": label}}
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
     try:
@@ -272,11 +319,13 @@ def place_market(coin, is_buy, size, slippage=0.005, label='', cloid=None):
 
 def cancel_order(coin, oid):
     if EXCHANGE is None: return False
+    # Cancels are NOT halted — admins must be able to clean up resting orders even when LIVE_TRADING=0.
+    # This matches typical exchange-shutdown patterns: stop opening, allow closing.
     try: EXCHANGE.cancel(coin, oid); return True
     except Exception as e: log(f"  cancel err: {e}"); return False
 
 def market_close(coin, is_buy_to_close, size, label='CLOSE'):
-    """Reduce-only market exit."""
+    """Reduce-only market exit. NOT gated by HALT — emergency exit must always work."""
     if EXCHANGE is None: return None
     try:
         return EXCHANGE.market_open(coin, is_buy_to_close, size, slippage=0.01,
@@ -561,6 +610,8 @@ def tick():
     state['tick_count'] += 1
     state['last_tick_t'] = int(time.time()*1000)
     log(f"━━ TICK #{state['tick_count']} ━━")
+    if _is_halted():
+        log(f"  ⚠ HALTED — LIVE_TRADING={os.environ.get('LIVE_TRADING','1')}, halt_file={os.path.exists(HALT_FILE)}. New orders will be skipped; cancels/closes still work.")
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} Trig:{len(state['triggers'])} | "
         f"BO_armed:{state['fires_breakout_armed']} BO_fired:{state['fires_breakout_triggered']} Bounce:{state['fires_bounce']} Spoof:{state['fires_spoof']} FundKill:{state['funding_kills']} Foreign:{state['foreign_logged']}")
     closes_total = state.get('closes_total', 0)
@@ -686,6 +737,7 @@ def tick():
         nm_log = ', '.join(f"{c}(b={d['near_miss_b']}/a={d['near_miss_a']},thr=${d['min_usd']/1000:.0f}k)" for c, d in near_misses[:8])
         log(f"Near-miss: {nm_log}")
 
+    _halt_skip_flush()
     save_state()
 
 
@@ -700,6 +752,7 @@ def main():
     log(f"  EXPIRE: bounce={BOUNCE_EXPIRE_S/3600:.1f}h trigger={TRIGGER_EXPIRE_S/3600:.1f}h")
     log(f"  TREND_FILTER_ON: {TREND_FILTER_ON}, FUNDING_KILL_ON: {FUNDING_KILL_ON}")
     log(f"  WALLET: {WALLET[:10]+'...' if WALLET else 'NONE'}")
+    log(f"  LIVE_TRADING: {LIVE_TRADING}, HALT_FILE: {HALT_FILE}, halted_now: {_is_halted()}")
     load_state()
     global EXCHANGE
     EXCHANGE = init_sdk()
