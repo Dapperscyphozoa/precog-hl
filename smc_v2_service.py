@@ -14,7 +14,7 @@ Exits: 50% TP1 → SL→BE → 50% TP2 (or BE-stop, or time-stop).
 
 Sizing: FIXED_NOTIONAL_USD per trade (default $25). Leverage: from leverage_map (default 10x).
 """
-import os, sys, time, json, math, hashlib, traceback
+import os, sys, time, json, math, hashlib, threading, traceback
 from datetime import datetime, timezone
 from collections import deque
 
@@ -1383,17 +1383,118 @@ _FILLS_LAST_CALL_TS = 0.0
 _FILLS_BACKOFF_UNTIL = 0.0
 _FILLS_MIN_GAP_SEC = 8.0  # min seconds between userFillsByTime calls
 _FILLS_BACKOFF_SEC = 60.0  # on 429, skip fetches this long
+_FILLS_REST_CALLS_OK = 0   # successful REST calls (for cold-start gating)
+
+# B215: WS-augmented fills feed. Subscribes to HL userFills WS channel.
+# When WS is healthy, fetch_recent_fills() drains the buffer instead of
+# hitting REST → drops smc-loose REST load to ~0 calls/min, eliminating
+# 429s on the shared Render egress IP. REST path retained as fallback
+# (cold-start backfill + WS-silent failover) — interface unchanged for
+# reconcile_positions and reconcile_phantoms.
+_FILLS_WS_INSTANCE = None
+_FILLS_WS_BUFFER = deque(maxlen=2000)
+_FILLS_WS_LOCK = threading.Lock()
+_FILLS_WS_LAST_MSG_TS = 0.0
+_FILLS_WS_BOOT_TS = 0.0
+_FILLS_WS_STATS = {'msgs': 0, 'fills_received': 0, 'subscribe_errors': 0}
+_FILLS_WS_COLD_START_GRACE_SEC = 30.0  # let REST run for first ~30s to backfill 24h
+_FILLS_WS_SILENT_FAILOVER_SEC = 120.0  # WS silent this long → fall back to REST
+
+
+def _on_user_fills_ws(msg):
+    """WS callback — runs on HL SDK's WS thread. Appends fills to buffer."""
+    global _FILLS_WS_LAST_MSG_TS
+    try:
+        _FILLS_WS_STATS['msgs'] += 1
+        _FILLS_WS_LAST_MSG_TS = time.time()
+        data = msg.get('data') if isinstance(msg, dict) else None
+        data = data or {}
+        fills = data.get('fills') or []
+        if not fills:
+            return
+        with _FILLS_WS_LOCK:
+            for f in fills:
+                if not isinstance(f, dict):
+                    continue
+                _FILLS_WS_BUFFER.append(f)
+                _FILLS_WS_STATS['fills_received'] += 1
+    except Exception as e:
+        try:
+            log(f'userFills ws handler err: {e}')
+        except Exception:
+            pass
+
+
+def init_user_fills_ws():
+    """Boot the userFills WS subscription. Idempotent. Failure → swallowed
+    silently; REST path remains the source of truth in that case."""
+    global _FILLS_WS_INSTANCE, _FILLS_WS_BOOT_TS
+    if _FILLS_WS_INSTANCE is not None:
+        return
+    _FILLS_WS_BOOT_TS = time.time()
+    try:
+        # Dedicated Info instance with WS enabled (the module-level `info`
+        # was constructed with skip_ws=True for REST-only use).
+        ws_info = Info(constants.MAINNET_API_URL)
+        ws_info.subscribe({'type': 'userFills', 'user': WALLET},
+                          _on_user_fills_ws)
+        _FILLS_WS_INSTANCE = ws_info
+        log(f'userFills WS subscribed (smc-loose, wallet={WALLET[:10]}…)')
+    except Exception as e:
+        _FILLS_WS_STATS['subscribe_errors'] += 1
+        log(f'userFills WS subscribe failed (using REST fallback): {e}')
+
+
+def _ws_fills_healthy():
+    """True if WS path is trustworthy as the primary fills source.
+    Requires: instance exists, ≥1 REST call has run (cold-start backfill
+    done), and either a recent WS msg OR we're inside boot grace."""
+    if _FILLS_WS_INSTANCE is None:
+        return False
+    if _FILLS_REST_CALLS_OK < 1:
+        return False  # need ≥1 REST sweep to seed historical fills
+    now = time.time()
+    if _FILLS_WS_LAST_MSG_TS > 0:
+        return (now - _FILLS_WS_LAST_MSG_TS) < _FILLS_WS_SILENT_FAILOVER_SEC
+    # No msg yet — trust WS only if subscription has been alive for the grace
+    # window (HL won't push fills if there are simply no events to push).
+    return (now - _FILLS_WS_BOOT_TS) > _FILLS_WS_COLD_START_GRACE_SEC
+
+
+def _drain_ws_fills(since_ms):
+    """Snapshot WS buffer → list of fills with t >= since_ms. Buffer is
+    a ring (maxlen=2000), so we keep the entries — non-destructive read."""
+    with _FILLS_WS_LOCK:
+        snap = list(_FILLS_WS_BUFFER)
+    out = []
+    for f in snap:
+        try:
+            t = int(f.get('time') or 0)
+        except (TypeError, ValueError):
+            continue
+        if t >= since_ms:
+            out.append(f)
+    return out
 
 
 def fetch_recent_fills(since_ms):
-    """Fetch user fills since since_ms via userFillsByTime endpoint.
-    Returns list of fill dicts.
+    """Fetch user fills since since_ms.
 
-    B19: throttle to one call per _FILLS_MIN_GAP_SEC; on 429, backoff for
-    _FILLS_BACKOFF_SEC. Returns None on throttle/backoff (caller distinguishes
-    from empty list — None = "no data this round, don't advance cursor").
+    Path selection:
+      WS healthy → drain buffer (zero REST cost). Returns list (possibly []).
+      WS unhealthy → existing REST path with 8s throttle + 60s 429 backoff.
+
+    B19: REST returns None on throttle/backoff (caller distinguishes from
+    empty list — None = "no data this round, don't advance cursor"). The
+    WS path always returns a list, never None — we trust the buffer.
     """
-    global _FILLS_LAST_CALL_TS, _FILLS_BACKOFF_UNTIL
+    global _FILLS_LAST_CALL_TS, _FILLS_BACKOFF_UNTIL, _FILLS_REST_CALLS_OK
+
+    # WS path — primary when healthy
+    if _ws_fills_healthy():
+        return _drain_ws_fills(since_ms)
+
+    # REST fallback — original B19 logic, untouched
     now = time.time()
     if now < _FILLS_BACKOFF_UNTIL:
         return None  # in backoff
@@ -1412,7 +1513,9 @@ def fetch_recent_fills(since_ms):
                           headers={'Content-Type': 'application/json'})
         with _ur.urlopen(req, timeout=8) as r:
             data = json.loads(r.read())
-        return data if isinstance(data, list) else []
+        result = data if isinstance(data, list) else []
+        _FILLS_REST_CALLS_OK += 1  # mark cold-start backfill as done
+        return result
     except Exception as e:
         msg = str(e)
         if '429' in msg or 'Too Many' in msg:
@@ -2545,6 +2648,15 @@ def main():
            priority=0)
     log(f'PARAMS={PARAMS}')
     log(f'BLACKLIST={sorted(BLACKLIST)}')
+
+    # B215: bring up userFills WS — REST polling drops to ~0/min once WS
+    # is healthy. Failure here is non-fatal; fetch_recent_fills() falls
+    # back to the existing REST path.
+    try:
+        init_user_fills_ws()
+    except Exception as _ws_e:
+        log(f'init_user_fills_ws failed (REST fallback active): {_ws_e}')
+
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')
 
