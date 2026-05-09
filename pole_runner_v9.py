@@ -173,18 +173,20 @@ def load_state():
                 loaded = json.load(f)
                 state.update({k: v for k, v in loaded.items() if k in state})
                 log(f"Loaded state: pos={len(state['positions'])} pend={len(state['pending'])} trig={len(state['triggers'])} v9_oids={len(state.get('v9_oids',[]))}")
-                # Stale-tracker reset: if closes_flat is large but recent_closes is empty, the FLAT
-                # records were fictional (legacy bug from before cloid-attribution worked correctly).
-                # Wipe the close counters and start fresh — recent_closes is the ground truth.
-                stale_flat = state.get('closes_flat', 0)
-                actual_recent = len(state.get('recent_closes', []))
-                if stale_flat > 50 and actual_recent == 0:
-                    log(f"  Stale-tracker reset: detected {stale_flat} fictional FLAT records (no matching recent_closes). Resetting close counters.")
+                # Tracker wipe: env-driven one-shot. Operator sets RESET_TRACKER_ONCE=1 in Render
+                # env to clear historical fictional FLAT records (legacy bug from before cloid
+                # attribution worked). Operator must set the env back to 0 after the next deploy
+                # to prevent re-wiping on every restart.
+                if os.environ.get('RESET_TRACKER_ONCE', '0') == '1':
+                    log(f"  RESET_TRACKER_ONCE=1: wiping closes_total={state.get('closes_total',0)} closes_flat={state.get('closes_flat',0)} realized_pnl_total={state.get('realized_pnl_total',0):+.2f}")
                     state['closes_total'] = 0
                     state['closes_win'] = 0
                     state['closes_loss'] = 0
                     state['closes_flat'] = 0
                     state['realized_pnl_total'] = 0.0
+                    state['recent_closes'] = []
+                    save_state()
+                    log(f"  RESET complete. SET RESET_TRACKER_ONCE=0 BEFORE NEXT DEPLOY to prevent re-wipe.")
     except Exception as e: log(f"load_state err: {e}")
 
 def save_state():
