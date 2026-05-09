@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS, get_tier_number,
                           refresh_hl_volumes, get_volume_threshold, get_volume)
+from regime_gate import classify_regime, is_v10_allowed
 from pole_engine_v10 import (
     detect_consolidation_obs, get_unmitigated_zone_at, mtf_structure_intact,
     detect_ltf_setup, build_setup, OBZone, Setup, atr,
@@ -47,6 +48,14 @@ CANDLE_CACHE_S   = int(os.environ.get('CANDLE_CACHE_S', '300'))  # 5min cache fo
 SETUP_EXPIRE_S   = int(os.environ.get('SETUP_EXPIRE_S', '14400'))  # 4h to fill limit
 WALL_CONFLUENCE  = os.environ.get('WALL_CONFLUENCE', '1') == '1'
 MIN_WALL_USD     = float(os.environ.get('MIN_WALL_USD', '100000'))  # min wall at LTF OB
+
+# ============================================================================
+# Council Fixes 1-4 (validated 180d backtest: WR 24.9% → 34.1%, PF 0.6 → 1.72)
+# ============================================================================
+WALL_REQUIRED      = os.environ.get('WALL_REQUIRED', '1') == '1'        # Fix 1
+SINGLE_TP_R        = float(os.environ.get('SINGLE_TP_R', '3.5'))        # Fix 2: 0=disabled, >0=single target at this R
+REGIME_GATE        = os.environ.get('REGIME_GATE', '1') == '1'           # Fix 3
+SL_ATR_MULT        = float(os.environ.get('SL_ATR_MULT', '0.5'))        # Fix 4: SL buffer = max(ticks, this × ATR_5m)
 COINS_OVERRIDE   = os.environ.get('COINS', '').strip()
 COINS            = ([c.strip().upper() for c in COINS_OVERRIDE.split(',') if c.strip()]
                     if COINS_OVERRIDE else list(ALL_COINS))
@@ -337,7 +346,7 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
     if already_fired(coin, ltf['ob_body_top'], ltf['ob_body_bottom']):
         sd['already_fired'] += 1; return None
 
-    # Stage 5: wall confluence — ADDITIVE, never blocks
+    # Stage 5: wall confluence (council Fix 1: REQUIRED when WALL_REQUIRED=1)
     state['qualified_setups'] += 1
     side_for_wall = ltf['side']
     wall_passed, wall_usd, wall_notes = wall_confluence_check(
@@ -349,6 +358,9 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
     else:
         state['wall_absent'] += 1
         log(f"  WALL-ABSENT  [{htf_label}] {coin} {side_for_wall} ({wall_notes})")
+        if WALL_REQUIRED:
+            sd['wall_required_block'] = sd.get('wall_required_block', 0) + 1
+            return None
 
     # Stage 6: build setup. For Path B (1H htf), TP2 comes from 1H zones, not 4H.
     tick = COIN_TICKS.get(coin, 0.0001)
@@ -362,7 +374,8 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
     else:                     # micro / illiquid
         sl_ticks, sl_min = 6, 0.0020
     setup, build_drop = build_setup(coin, ltf, zone, bars_mtf, bars_htf, zones,
-                          tick_size=tick, sl_buffer_ticks=sl_ticks, sl_min_buffer_pct=sl_min, min_rr_to_tp1=1.5)
+                          tick_size=tick, sl_buffer_ticks=sl_ticks, sl_min_buffer_pct=sl_min, min_rr_to_tp1=1.5,
+                          sl_atr_mult=SL_ATR_MULT, single_tp_R=SINGLE_TP_R)
     if setup is None:
         sd['build_setup_fail'] += 1
         # Sub-reason aggregation (council step 3+: data only, no behavior)
@@ -428,8 +441,13 @@ def place_setup(setup: Setup):
     entry_oid = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
 
     sl_res  = place_limit(coin, not is_buy, size, setup.sl_price,  reduce_only=True, label='SL')
-    tp1_res = place_limit(coin, not is_buy, half, setup.tp1_price, reduce_only=True, label='TP1')
-    tp2_res = place_limit(coin, not is_buy, half, setup.tp2_price, reduce_only=True, label='TP2')
+    if SINGLE_TP_R > 0:
+        # Council Fix 2: single all-or-nothing target. tp1 == tp2; place ONE order at full size.
+        tp1_res = place_limit(coin, not is_buy, size, setup.tp1_price, reduce_only=True, label='TP')
+        tp2_res = tp1_res  # alias so existing bracket-failure logic doesn't break
+    else:
+        tp1_res = place_limit(coin, not is_buy, half, setup.tp1_price, reduce_only=True, label='TP1')
+        tp2_res = place_limit(coin, not is_buy, half, setup.tp2_price, reduce_only=True, label='TP2')
 
     # Atomic bracket guarantee — only meaningful in LIVE mode
     if LIVE and EXCHANGE is not None:
@@ -672,6 +690,19 @@ def tick():
     refresh_hl_volumes()  # volume-driven wall threshold; rate-limited internally
     state['tick_count'] += 1
     state['last_tick_t'] = int(time.time()*1000)
+
+    # Council Fix 3: regime gate. Classify once per tick from BTC 5m bars.
+    # V10 SMC framework only fires in non-trend regimes (range/chop).
+    cur_regime = 'chop'
+    if REGIME_GATE:
+        try:
+            btc_bars = get_candles_cached('BTC', '5m', 7)
+            if len(btc_bars) >= 200:
+                cur_regime = classify_regime(btc_bars)
+        except Exception as e:
+            log(f"  regime classify err: {e}")
+    state['regime'] = cur_regime
+
     log(f"━━ TICK #{state['tick_count']} ━━")
     log(f"Bal:${state['balance']:.2f} Pos:{len(state['positions'])} Pend:{len(state['pending'])} | "
         f"Total fires:{state['fires_total']} (4h:{state.get('fires_path_4h',0)} 1h:{state.get('fires_path_1h',0)}) "
@@ -709,7 +740,14 @@ def tick():
             f"{bucket(lambda t: t.get('side')=='SELL', 'SELL')}")
 
     coins_this_tick = coins_for_tick(state['tick_count'], COINS)
-    log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick")
+    log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick (regime={state.get('regime','?')})")
+
+    # Council Fix 3: skip framework if BTC is in trend regime — SMC's mean-reversion premise breaks
+    if REGIME_GATE and not is_v10_allowed(state.get('regime', 'chop')):
+        log(f"  REGIME-BLOCK: regime={state.get('regime')} — V10 only fires in range/chop")
+        state['regime_blocks'] = state.get('regime_blocks', 0) + 1
+        save_state()
+        return
 
     setups = []
     with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as ex:

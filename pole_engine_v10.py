@@ -343,6 +343,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             'ob_bars': len(ob_window_indices),
             'ssl_swept': ssl_price, 'mss_break': last_lh,
             'mss_t': bars_5m[mss_idx]['t'],
+            'atr_5m': a5,
         }, None)
 
     else:  # short
@@ -402,6 +403,7 @@ def detect_ltf_setup(bars_5m: List[dict], bias: str,
             'ob_bars': len(ob_window_indices),
             'bsl_swept': bsl_price, 'mss_break': last_hl,
             'mss_t': bars_5m[mss_idx]['t'],
+            'atr_5m': a5,
         }, None)
 
 
@@ -435,33 +437,50 @@ def build_setup(coin: str, ltf: dict, htf_zone: OBZone,
                   tick_size: float = 0.0001,
                   sl_buffer_ticks: int = 2,
                   sl_min_buffer_pct: float = 0.0005,
-                  min_rr_to_tp1: float = 2.0) -> Optional[Setup]:
+                  min_rr_to_tp1: float = 2.0,
+                  sl_atr_mult: float = 0.0,
+                  single_tp_R: float = 0.0) -> Optional[Setup]:
     """Construct a Setup with SL past OB wick extreme.
 
-    SL placement: wick_extreme ± max(sl_buffer_ticks × tick_size, sl_min_buffer_pct × wick).
-    Whichever is larger. Absorbs spread + 2 ticks of noise. Visual-equivalent of
-    "just past the wick" without false precision.
+    SL placement: wick_extreme ± max(sl_buffer_ticks × tick_size, sl_min_buffer_pct × wick, sl_atr_mult × ATR_5m).
+    Whichever is largest. Council Fix 4: sl_atr_mult=0.5 widens SL past stop-hunt zone.
 
-    BUY:  sl = wick_bottom - max(2 × tick_size, 0.0005 × wick_bottom)
-    SELL: sl = wick_top + max(2 × tick_size, 0.0005 × wick_top)
+    BUY:  sl = wick_bottom - max(2 × tick_size, 0.0005 × wick_bottom, 0.5 × ATR_5m)
+    SELL: sl = wick_top + max(2 × tick_size, 0.0005 × wick_top, 0.5 × ATR_5m)
+
+    single_tp_R: if > 0, override TP1 and TP2 with a single target at this R multiple.
     """
     side = ltf['side']
+    atr_5m_val = ltf.get('atr_5m', 0.0)  # passed in from detect_ltf_setup
     if side == 'BUY':
         entry = ltf['ob_body_top']
         wick = ltf['ob_wick_bottom']
-        buffer = max(sl_buffer_ticks * tick_size, sl_min_buffer_pct * wick)
+        buffer = max(sl_buffer_ticks * tick_size,
+                     sl_min_buffer_pct * wick,
+                     sl_atr_mult * atr_5m_val)
         sl = wick - buffer
     else:
         entry = ltf['ob_body_bottom']
         wick = ltf['ob_wick_top']
-        buffer = max(sl_buffer_ticks * tick_size, sl_min_buffer_pct * wick)
+        buffer = max(sl_buffer_ticks * tick_size,
+                     sl_min_buffer_pct * wick,
+                     sl_atr_mult * atr_5m_val)
         sl = wick + buffer
 
-    tp1 = find_next_liquidity(bars_1h, side, entry)
-    tp2 = htf_target(zones_4h, side, entry)
-    if tp1 is None and tp2 is None: return None, 'no_tp_at_all'
-    if tp1 is None: tp1 = tp2
-    if tp2 is None: tp2 = tp1
+    if single_tp_R > 0:
+        # Council Fix 2: single all-or-nothing target at single_tp_R × risk
+        risk_abs = abs(entry - sl)
+        if side == 'BUY':
+            tp1 = entry + single_tp_R * risk_abs
+        else:
+            tp1 = entry - single_tp_R * risk_abs
+        tp2 = tp1
+    else:
+        tp1 = find_next_liquidity(bars_1h, side, entry)
+        tp2 = htf_target(zones_4h, side, entry)
+        if tp1 is None and tp2 is None: return None, 'no_tp_at_all'
+        if tp1 is None: tp1 = tp2
+        if tp2 is None: tp2 = tp1
 
     if side == 'BUY' and (tp1 <= entry or tp2 <= entry): return None, 'wrong_side_tp'
     if side == 'SELL' and (tp1 >= entry or tp2 >= entry): return None, 'wrong_side_tp'
