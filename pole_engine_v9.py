@@ -224,6 +224,8 @@ class PoleEngineV9:
         If we stamped cooldown at proposal time and the SDK rejected the order,
         the wall would be locked out for 4h on a system error — bad."""
         self._fired[wall_id] = ts
+
+    def classify_tier(self, natural_rr: float) -> str:
         """HIGH / MED / LOW / REJECT based on natural wall-to-wall RR."""
         if natural_rr >= self.high_rr_threshold: return 'HIGH'
         if natural_rr >= self.med_rr_threshold:  return 'MED'
