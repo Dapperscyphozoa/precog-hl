@@ -121,7 +121,10 @@ def fetch_realized_pnl_since(coin, since_ms):
     })
     if not isinstance(raw, list): return None, 0
     coin_fills = [f for f in raw if f.get('coin') == coin]
-    if not coin_fills: return 0.0, 0   # looked but empty
+    if not coin_fills:
+        # No fills at all in the window → phantom position (placed but never filled,
+        # or filled+closed before reconcile noticed). Return None to flag UNK rather than FLAT.
+        return None, 0
     # Need at least one V9-anchored fill before counting any
     has_v9_anchor = False
     for f in coin_fills:
