@@ -19,7 +19,7 @@ SMC_CONFIG = {
     'btc_trend_lookback_4h_bars': 40,
     'funding_max_adverse_per_hour': 0.00005,
     'dedupe_window_seconds': 300,
-    'force_notional_usd': 50,
+    'force_notional_usd': 25,
     'max_concurrent_positions': 20,
     'order_type': 'taker_aggressive',  # was 'maker_only' — fix 0% fill rate
     'taker_fallback': True,            # was False

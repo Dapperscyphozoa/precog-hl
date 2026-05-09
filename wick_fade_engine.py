@@ -118,15 +118,40 @@ class WickFadeDetector:
         if self.long_only and not is_long:
             return None
 
-        # Conviction flag: volume climax. Backtest showed this is the ONE
-        # context flag that genuinely lifts WR (+7.4pp) and per-trade PnL
-        # (3×). Other flags (cascade, RSI extreme, ATR-extension) were
-        # noise or counter-indicators on HL alts and are intentionally
-        # NOT included in the payload.
+        # Conviction flag #1: volume climax. Backtest showed this is the ONE
+        # context flag from the candle data that genuinely lifts WR (+7.4pp).
         avg_vol_20 = sum(vols[-20:]) / 20 if len(vols) >= 20 else 0
         cur_vol = vols[-1] if vols else 0
         vol_climax = bool(avg_vol_20 > 0 and cur_vol > self.vol_climax_mult * avg_vol_20)
         vol_mult_actual = (cur_vol / avg_vol_20) if avg_vol_20 > 0 else 0.0
+
+        # Conviction flag #2: confirmed liquidation cascade on this coin
+        # within the last 5 minutes. Direct evidence from Binance forceOrder
+        # feed that the wick we're fading is real liquidation flow, not noise.
+        # When liq cascade direction matches our fade direction (long fade =
+        # we want to BUY = a long_liq cascade because shorts are now short
+        # squeezing), we have higher conviction.
+        liq_aligned = False
+        liq_usd = 0
+        try:
+            import liquidation_ws
+            casc = liquidation_ws.get_cascade(self.coin, max_age_sec=300)
+            if casc:
+                # casc['fade_direction'] is the direction TO TRADE (already inverted)
+                wanted_side = 'BUY' if is_long else 'SELL'
+                if casc.get('fade_direction') == wanted_side:
+                    liq_aligned = True
+                    liq_usd = casc.get('total_usd', 0)
+        except Exception:
+            pass
+
+        # Size scaling: 2× when EITHER conviction signal is present, 3× when BOTH.
+        if vol_climax and liq_aligned:
+            size_mult = 3.0
+        elif vol_climax or liq_aligned:
+            size_mult = 2.0
+        else:
+            size_mult = 1.0
 
         # Entry on next-bar open behaviour: handler enters at submit price.
         # We use current close as the reference entry (live engine submits
@@ -167,8 +192,10 @@ class WickFadeDetector:
             'rr_to_tp2': rr,
             'mss_close_ms': ts,
             'alert_id': f"wkf-{self.coin}-{ts}-{'LONG' if is_long else 'SHORT'}",
-            # Conviction layer — execution may scale notional when vol_climax=True
+            # Conviction layer — execution may scale notional [1.0, 3.0]
             'vol_climax': vol_climax,
             'vol_mult': round(vol_mult_actual, 2),
-            'size_mult': 2.0 if vol_climax else 1.0,
+            'liq_aligned': liq_aligned,
+            'liq_usd': round(liq_usd, 0),
+            'size_mult': size_mult,
         }

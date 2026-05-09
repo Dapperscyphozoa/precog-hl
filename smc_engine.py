@@ -51,6 +51,50 @@ def _funding_rate_for(coin: str) -> float:
     return float(cache.get('rate_per_hour', 0) or 0)
 
 
+def _btcd_regime_ok(payload: dict) -> bool:
+    """BTCD regime gate: skip wick longs when BTC outperforming alts (BTCD rising).
+    Backtest: WR 65% in slope < -0.3 bucket vs 27% in slope > +1.0 bucket."""
+    try:
+        import btcd_regime
+    except ImportError:
+        return True   # module missing → fail open
+    slope = btcd_regime.get_slope()
+    if slope is None:
+        return True   # data stale → fail open (don't halt trading on missing data)
+    side = payload.get('side', 'BUY')
+    # Long entries: only when alts mildly outperforming or stronger (slope < -0.3)
+    if side == 'BUY':
+        return slope < -0.3
+    # Short entries (when ever enabled): only when BTC outperforming
+    return slope > 0.3
+
+
+def _daily_loss_ok() -> bool:
+    try:
+        import risk_caps
+        import smc_pl_compat
+        equity = smc_pl_compat.get_equity()
+        ok, reason = risk_caps.daily_dd_check(equity)
+        if not ok:
+            log.warning(f"smc_engine gate 15 daily_loss FAIL: {reason}")
+        return ok
+    except Exception as e:
+        log.warning(f"daily_loss check error (fail open): {e}")
+        return True
+
+
+def _corr_cap_ok() -> bool:
+    try:
+        import risk_caps
+        ok, reason = risk_caps.corr_check()
+        if not ok:
+            log.info(f"smc_engine gate 16 corr_cap FAIL: {reason}")
+        return ok
+    except Exception as e:
+        log.warning(f"corr_cap check error (fail open): {e}")
+        return True
+
+
 def dedupe_check(alert_id: str) -> bool:
     """Return True if alert_id was seen within dedupe_window. Records seen ts."""
     now = _now_ms()
@@ -163,6 +207,9 @@ def handle_smc_alert(payload: dict):
         (11, 'position_cap',   lambda: _smc_position_count() < SMC_CONFIG['max_concurrent_positions']),
         (12, 'coin_open',      lambda: payload['coin'] not in state.positions),
         (13, 'coin_armed',     lambda: not _coin_armed(payload['coin'])),
+        (14, 'btcd_regime',    lambda: _btcd_regime_ok(payload)),
+        (15, 'daily_loss',     lambda: _daily_loss_ok()),
+        (16, 'corr_cap',       lambda: _corr_cap_ok()),
     ]
 
     for num, name, check in gates:

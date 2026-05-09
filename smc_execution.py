@@ -110,8 +110,8 @@ def submit_smc_trade(payload: dict, ctx: dict):
     # vol_climax fires — backtest showed +60% PnL improvement vs flat sizing).
     # SMC engine doesn't set size_mult so default 1.0 keeps existing behaviour.
     size_mult = float(payload.get('size_mult') or 1.0)
-    # Cap at 2× to avoid runaway sizing on future engines.
-    size_mult = max(0.5, min(size_mult, 2.0))
+    # Cap at 3× to allow stacked conviction (vol_climax + liq_aligned).
+    size_mult = max(0.5, min(size_mult, 3.0))
     notional = base_notional * size_mult
     # Pre-round prices to HL tick size (HL float_to_wire is strict on precision)
     ob_top = round_price(coin, float(payload['ob_top']))
@@ -229,6 +229,11 @@ def submit_smc_trade(payload: dict, ctx: dict):
     fill_px = result.get('fill_px')
 
     state.armed[trade_id] = armed
+    try:
+        import risk_caps
+        risk_caps.record_open()
+    except Exception as e:
+        log.warning(f"risk_caps.record_open failed: {e}")
     try:
         state_persist()
     except Exception:

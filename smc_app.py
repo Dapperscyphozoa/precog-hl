@@ -130,6 +130,24 @@ def _boot():
     # 4. Start SMC scheduler (15min position_tick + hourly + daily)
     smc_monitors.start()
 
+    # 4a. Start BTCD regime tracker (refreshes every 5min)
+    try:
+        import btcd_regime
+        btcd_regime.start()
+        log.info("btcd_regime tracker started")
+    except Exception as e:
+        log.warning(f"btcd_regime start failed: {e}")
+
+    # 4b. Start Binance liquidation feed (used as Wick Fade conviction layer).
+    # Subscribes to !forceOrder@arr — every forced liquidation across all
+    # Binance futures pairs, mapped to HL coin via BIN_TO_HL.
+    try:
+        import liquidation_ws
+        liquidation_ws.start()
+        log.info("liquidation_ws started (Binance !forceOrder@arr)")
+    except Exception as e:
+        log.warning(f"liquidation_ws start failed: {e}")
+
     # 4b. Run orphan reaper at boot — cancel any SMC-cloid orders on HL that
     # state.armed doesn't know about (state lost across restart when the
     # disk isn't mounted, or on crash mid-persist). Defer to a thread so it
@@ -1035,7 +1053,15 @@ def status():
         'ws_fresh': _ws_fresh(),
         'last_alert_ms': state.last_alert_ms,
         'equity': equity,
+        'btcd': _safe_call(lambda: __import__('btcd_regime').get_status()),
+        'liq_feed': _safe_call(lambda: __import__('liquidation_ws').status()),
+        'risk_caps': _safe_call(lambda: __import__('risk_caps').status()),
     })
+
+
+def _safe_call(fn):
+    try: return fn()
+    except Exception as e: return {'error': str(e)[:100]}
 
 
 @app.route('/smc/positions', methods=['GET'])
