@@ -99,10 +99,23 @@ def submit_smc_trade(payload: dict, ctx: dict):
     if _exchange is None:
         return {'status': 'no_exchange', 'error': 'HL_PRIVATE_KEY not set'}, 500
 
-    # SMC v1: taker-aggressive entry to fix 0% fill rate. Retest fills are
-    # detected on bar close, by which point price has already crossed ob_top.
-    # Alo refuses to cross spread → 0% fills. Force Ioc with 0.5% slip cap.
-    os.environ['ENTRY_TIF'] = 'Ioc'
+    # A/B harness: alternate maker (Alo) vs taker (Ioc) by alert_id hash parity.
+    # Goal: measure whether maker rebate ($0.030/trade saved at $25 notional)
+    # is offset by lower fill rate. Hypothesis from prior incident:
+    # Alo @ ob_top got 0% fills because price had just crossed ob_top. We
+    # mitigate here by submitting INSIDE the spread (5bps favorable), so the
+    # limit rests in front of price not behind it. After 200 trades compare
+    # branches by net PnL including fees.
+    import hashlib
+    alert_id = payload.get('alert_id') or ''
+    branch_int = int(hashlib.md5(alert_id.encode()).hexdigest()[:4], 16) % 2
+    use_maker = (branch_int == 0)
+    if use_maker:
+        os.environ['ENTRY_TIF'] = 'Alo'
+        ab_branch = 'A_maker'
+    else:
+        os.environ['ENTRY_TIF'] = 'Ioc'
+        ab_branch = 'B_taker'
 
     coin = _coin_upper(payload.get('coin') or '')
     base_notional = SMC_CONFIG['force_notional_usd']
@@ -118,12 +131,23 @@ def submit_smc_trade(payload: dict, ctx: dict):
     sl_px = round_price(coin, float(payload['sl_price']))
     tp_px = round_price(coin, float(payload['tp2']))
 
+    # If maker branch, shift submit price 5bps INSIDE the spread (favorable to fill).
+    # Long: submit below current price (price needs to drop 5bps to fill).
+    # Short: submit above current price.
+    # This trades a slightly worse entry for a much higher Alo fill rate.
+    if use_maker:
+        side = payload.get('side', 'BUY')
+        shift = 0.0005   # 5 bps
+        if side == 'BUY':
+            ob_top = round_price(coin, ob_top * (1 - shift))
+        else:
+            ob_top = round_price(coin, ob_top * (1 + shift))
+
     raw_size = notional / ob_top
     size = round_size(coin, raw_size)
 
-    if size_mult != 1.0:
-        log.info(f"smc_execution: {coin} size_mult={size_mult} → notional=${notional} "
-                 f"(engine={payload.get('engine','?')} vol_climax={payload.get('vol_climax')})")
+    log.info(f"smc_execution: {coin} ab={ab_branch} size_mult={size_mult} notional=${notional:.2f} "
+             f"(engine={payload.get('engine','?')} vol_climax={payload.get('vol_climax')} liq={payload.get('liq_aligned')})")
 
     # Reject below HL min notional
     if size * ob_top < 10:
@@ -196,6 +220,9 @@ def submit_smc_trade(payload: dict, ctx: dict):
         'submit_ms': submit_ms,
         'submitted_at_ms': submit_ms,
         'expires_at_ms': submit_ms + SMC_CONFIG['limit_expiry_minutes'] * 60_000,
+        'ab_branch': ab_branch,
+        'ab_tif': os.environ.get('ENTRY_TIF', 'Ioc'),
+        'ab_submit_px': ob_top,
     }
 
     if not result.get('success'):

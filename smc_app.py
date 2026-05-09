@@ -1123,6 +1123,72 @@ def smc_native_status():
         return jsonify({'enabled': False, 'error': str(e)}), 500
 
 
+@app.route('/smc/ab', methods=['GET'])
+def smc_ab_status():
+    """Maker (Alo) vs Taker (Ioc) A/B test aggregate stats from trade log."""
+    try:
+        import smc_trade_log
+        all_events = smc_trade_log.tail(10000)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+    # Walk events, pair ARMED with later CLOSED by trade_id, infer branch
+    armed_by_id = {}
+    for e in all_events:
+        if e.get('event') == 'ARMED':
+            tid = e.get('trade_id')
+            if tid:
+                armed_by_id[tid] = {
+                    'branch': e.get('ab_branch') or 'B_taker',  # legacy default
+                    'tif': e.get('ab_tif') or 'Ioc',
+                    'coin': e.get('coin'),
+                    'engine': e.get('engine', 'SMC'),
+                }
+
+    branches = {'A_maker': {'armed': 0, 'filled': 0, 'tp': 0, 'sl': 0, 'expired': 0, 'pnl': 0.0},
+                'B_taker': {'armed': 0, 'filled': 0, 'tp': 0, 'sl': 0, 'expired': 0, 'pnl': 0.0}}
+
+    for tid, meta in armed_by_id.items():
+        b = meta['branch']
+        if b not in branches: continue
+        branches[b]['armed'] += 1
+
+    for e in all_events:
+        tid = e.get('trade_id')
+        if not tid or tid not in armed_by_id:
+            continue
+        b = armed_by_id[tid]['branch']
+        if b not in branches:
+            continue
+        ev = e.get('event', '')
+        if ev == 'FILLED':
+            branches[b]['filled'] += 1
+        elif ev == 'CLOSED_TP' or ev == 'CLOSED' and e.get('exit_reason', '').startswith('tp'):
+            branches[b]['tp'] += 1
+            branches[b]['pnl'] += float(e.get('net_pnl_usd', 0) or 0)
+        elif ev == 'CLOSED_SL' or ev == 'CLOSED' and e.get('exit_reason', '').startswith('sl'):
+            branches[b]['sl'] += 1
+            branches[b]['pnl'] += float(e.get('net_pnl_usd', 0) or 0)
+        elif ev == 'EXPIRED':
+            branches[b]['expired'] += 1
+
+    for b, s in branches.items():
+        s['fill_rate'] = round(s['filled'] / max(s['armed'], 1) * 100, 1)
+        s['wr'] = round(s['tp'] / max(s['tp'] + s['sl'], 1) * 100, 1)
+        s['avg_pnl'] = round(s['pnl'] / max(s['tp'] + s['sl'], 1), 4)
+
+    return jsonify({
+        'description': 'A_maker = Alo (post-only) at 5bps inside spread. B_taker = Ioc (cross spread).',
+        'A_maker': branches['A_maker'],
+        'B_taker': branches['B_taker'],
+        'recommendation': (
+            'A wins'  if branches['A_maker']['pnl'] > branches['B_taker']['pnl'] + 1
+            else 'B wins' if branches['B_taker']['pnl'] > branches['A_maker']['pnl'] + 1
+            else 'tied / insufficient data'
+        ),
+    })
+
+
 # Catch-all: any unknown path falls back to landing page (no more 404/405)
 @app.route('/<path:_anything>', methods=['GET'])
 def _catchall(_anything):
