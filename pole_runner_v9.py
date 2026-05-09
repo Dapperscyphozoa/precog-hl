@@ -101,33 +101,43 @@ def fetch_realized_pnl_since(coin, since_ms):
     """Sum closedPnl from V9 wallet's HL fills for `coin` since `since_ms`.
 
     Returns (pnl_usd, fill_count) or (None, 0) on error/no data.
-    HL's `closedPnl` is the per-fill realized PnL; summing across all fills since
-    the position opened gives net realized for that position cycle.
 
-    Filters by cloid prefix `V9` (HL stores cloids as raw bytes, NOT hashed) so we
-    don't count fills from other engines (precog, precog-sa) sharing the wallet.
-    Also buffers `since_ms` back 30s to absorb placement→fill clock skew.
+    Attribution logic (corrected): a position is "V9-attributable" if there exists
+    AT LEAST ONE fill in the window whose decoded cloid starts with V9. Once that
+    anchor is found, ALL subsequent fills on the same coin within the window are
+    attributed to V9 — including close-leg fills that lost their cloid in HL's
+    fill records (which happens intermittently for resting RO orders).
+
+    This is correct because the runner only tracks ONE V9 position per coin at a
+    time. If V9 has an open position recorded internally, every fill on that coin
+    in the window between opened_t and now is by-construction part of that
+    position's lifecycle.
     """
     if not WALLET: return None, 0
     raw = http_post(HL_API, {
         'type': 'userFillsByTime', 'user': WALLET,
-        'startTime': max(0, int(since_ms) - 30_000),  # 30s buffer for placement→fill skew
+        'startTime': max(0, int(since_ms) - 30_000),  # 30s back-buffer for placement→fill skew
         'endTime': int(time.time() * 1000),
     })
     if not isinstance(raw, list): return None, 0
-    coin_fills = []
-    for f in raw:
-        if f.get('coin') != coin: continue
-        # Decode cloid (e.g. 0x56394152... = "V9ARB...") and require V9 prefix
+    coin_fills = [f for f in raw if f.get('coin') == coin]
+    if not coin_fills: return 0.0, 0   # looked but empty
+    # Need at least one V9-anchored fill before counting any
+    has_v9_anchor = False
+    for f in coin_fills:
         cloid_hex = str(f.get('cloid', '') or '')
         if cloid_hex.startswith('0x'): cloid_hex = cloid_hex[2:]
         try:
             cloid_str = bytes.fromhex(cloid_hex).decode('ascii', errors='ignore')
         except Exception:
             cloid_str = ''
-        if not cloid_str.startswith('V9'): continue   # not a V9-attributable fill
-        coin_fills.append(f)
-    if not coin_fills: return 0.0, 0    # no V9 fills found, but return 0 not None — distinguishes "looked but empty" from "couldn't query"
+        if cloid_str.startswith('V9'):
+            has_v9_anchor = True; break
+    if not has_v9_anchor:
+        # Position recorded as V9 internally but no V9 fill in window → not V9-attributable
+        # (could be a foreign engine that took over the coin; safer to report unknown)
+        return None, 0
+    # Sum closedPnl across ALL coin fills (open legs are 0 anyway; close legs contribute)
     pnl = sum(float(f.get('closedPnl', 0) or 0) for f in coin_fills)
     return round(pnl, 4), len(coin_fills)
 
@@ -163,6 +173,18 @@ def load_state():
                 loaded = json.load(f)
                 state.update({k: v for k, v in loaded.items() if k in state})
                 log(f"Loaded state: pos={len(state['positions'])} pend={len(state['pending'])} trig={len(state['triggers'])} v9_oids={len(state.get('v9_oids',[]))}")
+                # Stale-tracker reset: if closes_flat is large but recent_closes is empty, the FLAT
+                # records were fictional (legacy bug from before cloid-attribution worked correctly).
+                # Wipe the close counters and start fresh — recent_closes is the ground truth.
+                stale_flat = state.get('closes_flat', 0)
+                actual_recent = len(state.get('recent_closes', []))
+                if stale_flat > 50 and actual_recent == 0:
+                    log(f"  Stale-tracker reset: detected {stale_flat} fictional FLAT records (no matching recent_closes). Resetting close counters.")
+                    state['closes_total'] = 0
+                    state['closes_win'] = 0
+                    state['closes_loss'] = 0
+                    state['closes_flat'] = 0
+                    state['realized_pnl_total'] = 0.0
     except Exception as e: log(f"load_state err: {e}")
 
 def save_state():
