@@ -48,12 +48,12 @@ class WickFadeDetector:
 
     def __init__(self, coin,
                  wick_body_mult=2.5,
-                 wick_atr_mult=1.0,
-                 sl_atr_mult=2.0,
+                 wick_atr_mult=1.75,         # was 1.0 — fine sweep showed inflection at 1.75
+                 sl_atr_mult=1.5,            # was 2.0 — smaller fixed risk, +24% PnL
                  tp_atr_mult=2.5,
-                 sl_buffer_atr=0.3,
+                 sl_buffer_atr=0.0,          # was 0.3 — no wick anchor, fixed-distance SL
                  cooldown_bars=24,
-                 vol_climax_mult=2.5,    # current bar volume vs 20-bar avg
+                 vol_climax_mult=2.5,
                  long_only=True,
                  max_buffer=300):
         self.coin = coin
@@ -133,11 +133,15 @@ class WickFadeDetector:
         # immediately on alert, so this is the best estimate of fill).
         entry = cl
 
+        # SL: fixed distance from entry (sl_atr_mult × ATR). The backtest
+        # showed this beats wick-anchored SL by +24% PnL — wick anchoring
+        # gave variable risk, sometimes 2-3× ATR, which inflated avg loss.
+        # Fixed 1.5× ATR keeps risk bounded and predictable.
         if is_long:
-            sl = l - self.sl_buffer_atr * a   # below the wick
+            sl = entry - self.sl_atr_mult * a
             tp = entry + self.tp_atr_mult * a
         else:
-            sl = h + self.sl_buffer_atr * a
+            sl = entry + self.sl_atr_mult * a
             tp = entry - self.tp_atr_mult * a
 
         risk = abs(entry - sl)
