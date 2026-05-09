@@ -610,7 +610,8 @@ def reconcile():
     for coin, outcome, pnl_pct in closed:
         p = state['positions'][coin]
         record_outcome(p, outcome, pnl_pct)
-        log(f"  CLOSE {coin} {p['side']} → {outcome} pnl={pnl_pct*100:+.2f}%")
+        log(f"  CLOSE {coin} {p['side']} [{p.get('path_label','?')}] wall={'+' if p.get('wall_present') else '-'} "
+            f"→ {outcome} pnl={pnl_pct*100:+.2f}% rr1={p.get('rr1',0):.2f}")
         del state['positions'][coin]
 
 def tick():
@@ -633,6 +634,23 @@ def tick():
     log(f"  Drops: zones={sd['no_zones']} not_at_zone={sd['not_at_zone']} mtf_block={sd['mtf_block']} no_ltf={sd['no_ltf']} build_fail={sd['build_setup_fail']}")
     ld = state['ltf_drops']
     log(f"  LTF-drops: piv={ld['no_pivots']} atr={ld['no_atr']} sweep={ld['no_sweep']} window={ld['no_local_window']} mss={ld['no_mss']} ob={ld['no_ob_window']}")
+    # Rolling close summary: split WR/PnL by path and wall flag
+    rt = state.get('recent_trades', [])
+    if rt:
+        def bucket(filtfn, label):
+            sub = [t for t in rt if filtfn(t)]
+            if not sub: return f"{label}:0"
+            wins = sum(1 for t in sub if t['pnl_pct'] > 0)
+            wr = round(100*wins/len(sub))
+            pnl = sum(t['pnl_pct'] for t in sub)*100
+            return f"{label}:{len(sub)}({wr}%, {pnl:+.2f}%)"
+        log(f"  Recent({len(rt)}): "
+            f"{bucket(lambda t: t.get('path_label')=='4h', '4h')} "
+            f"{bucket(lambda t: t.get('path_label')=='1h', '1h')} | "
+            f"{bucket(lambda t: t.get('wall_present'), 'W+')} "
+            f"{bucket(lambda t: not t.get('wall_present'), 'W-')} | "
+            f"{bucket(lambda t: t.get('side')=='BUY', 'BUY')} "
+            f"{bucket(lambda t: t.get('side')=='SELL', 'SELL')}")
 
     coins_this_tick = coins_for_tick(state['tick_count'], COINS)
     log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick")
