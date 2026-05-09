@@ -652,6 +652,15 @@ def tick():
             f"{bucket(lambda t: t.get('side')=='BUY', 'BUY')} "
             f"{bucket(lambda t: t.get('side')=='SELL', 'SELL')}")
 
+    # Forensic dump: full record for each closed trade + live pos/pend (OB body, wick, sweep, SL placement)
+    # Lets us audit whether SL was inside or outside the OB, whether OB was actually valid.
+    for tr in rt:
+        log(f"  TRADE-DUMP {json.dumps(tr, default=str)[:1000]}")
+    for coin, p in state['positions'].items():
+        log(f"  POS-DUMP {coin} {json.dumps({k:v for k,v in p.items() if k!='log'}, default=str)[:1000]}")
+    for pkey, p in state['pending'].items():
+        log(f"  PEND-DUMP {pkey} {json.dumps({k:v for k,v in p.items() if k!='log'}, default=str)[:1000]}")
+
     coins_this_tick = coins_for_tick(state['tick_count'], COINS)
     log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick")
 
