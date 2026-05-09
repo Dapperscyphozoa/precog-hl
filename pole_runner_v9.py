@@ -349,6 +349,7 @@ def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0
         'sibling_breakout_id': s.sibling_breakout_id,
     }
     state['fires_bounce'] += 1
+    POLE.mark_fired(s.wall_id, time.time())
     return pkey
 
 
@@ -384,6 +385,7 @@ def arm_breakout(t: BreakoutTrigger, wall_usd: float = 0.0, threshold_usd: float
         'sibling_bounce_id': t.sibling_bounce_id,
     }
     state['fires_breakout_armed'] += 1
+    POLE.mark_fired(t.wall_id.replace('|BO', ''), time.time())
 
 
 def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):

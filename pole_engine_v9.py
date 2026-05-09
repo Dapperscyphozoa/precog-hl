@@ -219,7 +219,11 @@ class PoleEngineV9:
         self.cooldown_s = cooldown_s
         self._fired: Dict[str, float] = {}
 
-    def classify_tier(self, natural_rr: float) -> str:
+    def mark_fired(self, wall_id: str, ts: float):
+        """Runner calls this AFTER the order is confirmed placed.
+        If we stamped cooldown at proposal time and the SDK rejected the order,
+        the wall would be locked out for 4h on a system error — bad."""
+        self._fired[wall_id] = ts
         """HIGH / MED / LOW / REJECT based on natural wall-to-wall RR."""
         if natural_rr >= self.high_rr_threshold: return 'HIGH'
         if natural_rr >= self.med_rr_threshold:  return 'MED'
@@ -377,7 +381,7 @@ class PoleEngineV9:
                                     bid_breakout.sibling_bounce_id = wid
                                     bounces.append(bid_bounce)
                                     breakouts.append(bid_breakout)
-                                    self._fired[wid] = now_ts
+                                    # cooldown stamped by runner via mark_fired() on confirmed placement
 
         # === NEAREST ASK WALL ===
         if nearest_ask is not None and _can_fire(nearest_ask):
@@ -465,7 +469,7 @@ class PoleEngineV9:
                                         ask_breakout.sibling_bounce_id = wid
                                         bounces.append(ask_bounce)
                                         breakouts.append(ask_breakout)
-                                        self._fired[wid] = now_ts
+                                        # cooldown stamped by runner via mark_fired() on confirmed placement
 
         return bounces, breakouts
 
