@@ -246,7 +246,9 @@ def _record_oid(oid):
     if len(state['v9_oids']) > 5000: state['v9_oids'] = state['v9_oids'][-5000:]
 
 
-def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=None):
+def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=None, tif='Alo'):
+    """Place a limit order. Default tif='Alo' (post-only) — rejects if crosses spread.
+    Caller can pass tif='Gtc' for SL/TP brackets that need to be active stops."""
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
     size = round_size(coin, size)
@@ -255,10 +257,10 @@ def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=No
         log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         if cloid is not None:
-            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':'Gtc'}},
+            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':tif}},
                                   reduce_only=reduce_only, cloid=cloid)
         else:
-            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':'Gtc'}},
+            res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':tif}},
                                   reduce_only=reduce_only)
         try:
             oid = res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
@@ -336,10 +338,15 @@ def place_bounce(s: BounceSetup, wall_usd: float = 0.0, threshold_usd: float = 0
                           label='ENTRY', cloid=_make_cloid(tid, 'E'))
     if not or_res: return None
     entry_oid = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0].get('resting',{}).get('oid')
+    if not entry_oid:
+        # Post-only rejected (price crossed) OR order filled instantly. Either way, skip SL/TP brackets.
+        status = or_res.get('response',{}).get('data',{}).get('statuses',[{}])[0]
+        log(f"  SKIP-BRACKETS {s.coin} {s.side} entry didn't rest (status={status})")
+        return None
     place_limit(s.coin, not is_buy, size, s.sl_price, reduce_only=True,
-                 label='SL', cloid=_make_cloid(tid, 'S'))
+                 label='SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
     place_limit(s.coin, not is_buy, size, s.tp_price, reduce_only=True,
-                 label='TP', cloid=_make_cloid(tid, 'T'))
+                 label='TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
     pkey = f"{s.coin}|BOUNCE|{s.wall_id}"
     state['pending'][pkey] = {
         'coin': s.coin, 'side': s.side, 'kind': 'BOUNCE', 'wall_id': s.wall_id,
@@ -419,9 +426,9 @@ def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
         tid = _trade_id(t['coin'], t['side'])
         place_market(t['coin'], is_buy, size, label='BREAKOUT', cloid=_make_cloid(tid, 'E'))
         place_limit(t['coin'], not is_buy, size, t['sl'], reduce_only=True,
-                     label='BREAKOUT-SL', cloid=_make_cloid(tid, 'S'))
+                     label='BREAKOUT-SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
         place_limit(t['coin'], not is_buy, size, t['tp'], reduce_only=True,
-                     label='BREAKOUT-TP', cloid=_make_cloid(tid, 'T'))
+                     label='BREAKOUT-TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
         state['positions'][t['coin']] = {
             'side': t['side'], 'kind': 'BREAKOUT', 'wall_id': t['wall_id'],
             'entry': t['trigger_price'], 'sl': t['sl'], 'tp': t['tp'],
@@ -653,9 +660,9 @@ def tick():
             tid = _trade_id(sp['coin'], sp['side'])
             place_market(sp['coin'], is_buy, size, label='SPOOF', cloid=_make_cloid(tid, 'E'))
             place_limit(sp['coin'], not is_buy, size, sp['sl_price'], reduce_only=True,
-                         label='SPOOF-SL', cloid=_make_cloid(tid, 'S'))
+                         label='SPOOF-SL', cloid=_make_cloid(tid, 'S'), tif='Gtc')
             place_limit(sp['coin'], not is_buy, size, sp['tp_price'], reduce_only=True,
-                         label='SPOOF-TP', cloid=_make_cloid(tid, 'T'))
+                         label='SPOOF-TP', cloid=_make_cloid(tid, 'T'), tif='Gtc')
             state['positions'][sp['coin']] = {
                 'side': sp['side'], 'kind': 'SPOOF', 'entry': sp['entry_price'],
                 'sl': sp['sl_price'], 'tp': sp['tp_price'], 'size': size,
