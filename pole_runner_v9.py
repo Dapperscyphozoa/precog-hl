@@ -128,7 +128,24 @@ def atr(bars, period=14):
         trs.append(tr)
     return sum(trs)/len(trs) if trs else 0.0
 
+FIXED_NOTIONAL   = float(os.environ.get('FIXED_NOTIONAL', '25.0'))
+
+
 def calc_size(balance, risk_pct, entry, sl):
+    """Position sizer.
+
+    If FIXED_NOTIONAL > 0 (default $25): every trade uses that fixed notional.
+       size = FIXED_NOTIONAL / entry. SL distance does not affect size — risk per
+       trade scales with SL distance instead.
+    Else: legacy risk-based sizer (notional = risk_amt / sl_dist, capped).
+
+    Fixed notional is the cleanest way to compare per-trade outcomes when
+    iterating on the engine: same dollars in, same dollars out, R is the variable.
+    """
+    if entry <= 0: return 0, 0
+    if FIXED_NOTIONAL > 0:
+        notional = min(FIXED_NOTIONAL, balance * LEVERAGE)  # cap at margin ceiling
+        return notional / entry, notional
     if balance <= 0: return 0, 0
     risk_amt = balance * risk_pct
     sl_dist = abs(entry - sl) / entry
