@@ -285,3 +285,25 @@ class DepthBaseline:
             'volume_24h_usd': vol,
             'effective_threshold': eff,
         }
+
+
+# ============================================================================
+# Tier NUMBER lookup (1-6) — distinct from get_tier() which returns (threshold, persistence)
+# Used by SL buffer scaling in pole_runner_v10.py
+# ============================================================================
+THRESHOLD_TO_TIER_NUMBER = {
+    500000: 1,   # mega
+    250000: 2,   # large
+    100000: 3,   # mid
+     50000: 4,   # small
+     25000: 5,   # micro
+     10000: 6,   # illiquid
+}
+
+def get_tier_number(coin: str) -> int:
+    """Return tier number 1-6. Defaults to 6 (noisiest) for unknown coins."""
+    cfg = COIN_TIERS.get(coin.upper())
+    if cfg is None:
+        return 6
+    threshold = cfg[0]
+    return THRESHOLD_TO_TIER_NUMBER.get(threshold, 6)

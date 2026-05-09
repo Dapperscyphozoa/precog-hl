@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 
-from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS,
+from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS, get_tier_number,
                           refresh_hl_volumes, get_volume_threshold, get_volume)
 from pole_engine_v10 import (
     detect_consolidation_obs, get_unmitigated_zone_at, mtf_structure_intact,
@@ -354,7 +354,7 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
     tick = COIN_TICKS.get(coin, 0.0001)
     # 3-tier SL buffer scaling (council-approved). Tighter coins get tighter stops; noisy coins
     # get wider buffers to survive normal wick-hunting on illiquid books.
-    coin_tier = get_tier(coin) or 6   # default to noisiest tier if unknown
+    coin_tier = get_tier_number(coin)   # default to noisiest tier if unknown
     if coin_tier <= 2:        # BTC, ETH, HYPE, SOL, TON, ZEC
         sl_ticks, sl_min = 2, 0.0005
     elif coin_tier <= 4:      # mid + small cap
