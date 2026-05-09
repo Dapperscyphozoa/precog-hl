@@ -261,11 +261,11 @@ class PoleEngineV9:
         bids = sorted([w for w in verified if w.side == 'bid'], key=lambda w: -w.price)
         asks = sorted([w for w in verified if w.side == 'ask'], key=lambda w: w.price)
 
-        # Need both sides for proper TP targeting
-        if not bids or not asks: return [], []
+        # Need at least ONE side; opposite wall is optional (used for structural TP).
+        if not bids and not asks: return [], []
 
-        nearest_bid = bids[0]
-        nearest_ask = asks[0]
+        nearest_bid = bids[0] if bids else None
+        nearest_ask = asks[0] if asks else None
 
         bounces = []
         breakouts = []
@@ -278,22 +278,32 @@ class PoleEngineV9:
             return True
 
         # === NEAREST BID WALL ===
-        if _can_fire(nearest_bid):
+        if nearest_bid is not None and _can_fire(nearest_bid):
             wid = nearest_bid.wall_id
             bounce_limit = nearest_bid.high
-            # Compute natural wall-to-wall RR first to classify tier
             natural_sl = nearest_bid.low - max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
-            natural_reward = nearest_ask.low - bounce_limit
-            natural_risk = bounce_limit - natural_sl
-            natural_rr = natural_reward / natural_risk if natural_risk > 0 else 0
-            tier = self.classify_tier(natural_rr)
+            R_natural = bounce_limit - natural_sl
+            # If opposite ask wall exists, compute natural wall-to-wall RR; else default tier=MED
+            if nearest_ask is not None:
+                natural_reward = nearest_ask.low - bounce_limit
+                natural_risk = R_natural
+                natural_rr = natural_reward / natural_risk if natural_risk > 0 else 0
+                tier = self.classify_tier(natural_rr)
+            else:
+                # No opposite wall — default to MED tier with 1R clean-sweep TP
+                natural_rr = 1.0
+                tier = 'MED_FALLBACK'
 
             if tier != 'REJECT':
-                # HIGH/MED keep structural TP at opposite wall.
-                # LOW = scalp: tighter SL + 1R clean sweep.
-                if tier in ('HIGH', 'MED'):
+                # HIGH/MED with opposite wall: structural TP
+                # MED_FALLBACK / LOW: 1R clean sweep
+                if tier in ('HIGH', 'MED') and nearest_ask is not None:
                     bounce_sl = natural_sl
                     bounce_tp = nearest_ask.low - mid * 0.0005  # structural
+                elif tier == 'MED_FALLBACK':
+                    bounce_sl = natural_sl
+                    R = bounce_limit - bounce_sl
+                    bounce_tp = bounce_limit + R  # 1R fallback (no opposite wall)
                 else:  # LOW
                     bounce_sl = nearest_bid.low - max(self.low_rr_sl_atr_mult * atr_v,
                                                       mid * self.low_rr_sl_buffer_pct)
@@ -317,7 +327,10 @@ class PoleEngineV9:
                     br_reward = bounce_tp - bounce_limit
                     if br_risk > 0:
                         rr = br_reward / br_risk
-                    if self.min_rr_bounce <= rr <= 12:
+                    # Tier-aware RR floor: HIGH/MED need >= min_rr (structural).
+                    # MED_FALLBACK / LOW use 1R clean sweep → accept rr ~1.0.
+                    rr_floor = self.min_rr_bounce if tier in ('HIGH', 'MED') else 0.95
+                    if rr_floor <= rr <= 12:
                         # BREAKOUT: SELL trigger past bottom of bid wall
                         # SL = cluster top reclaim invalidation (structural).
                         # TP: HIGH/MED = next bid wall below (or 1% extension);
@@ -341,7 +354,8 @@ class PoleEngineV9:
                             bo_reward = bo_R
                             if bo_risk > 0:
                                 bo_rr = bo_reward / bo_risk
-                                if self.min_rr_breakout <= bo_rr <= 12:
+                                bo_rr_floor = self.min_rr_breakout if tier in ('HIGH', 'MED') else 0.95
+                                if bo_rr_floor <= bo_rr <= 12:
                                     bid_breakout = BreakoutTrigger(
                                         coin=coin, wall_id=wid + '|BO',
                                         side='SELL', trigger_price=breakout_trigger,
@@ -349,13 +363,15 @@ class PoleEngineV9:
                                         armed_t=now_ts,
                                         notes=f"BID-BREAK ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}"
                                     )
+                                    ask_note = (f"→ ASK ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}"
+                                                  if nearest_ask is not None else "(no opposite wall — 1R fallback)")
                                     bid_bounce = BounceSetup(
                                         coin=coin, wall_id=wid,
                                         side='BUY', entry_price=bounce_limit,
                                         sl_price=bounce_sl, tp_price=bounce_tp, rr=rr,
                                         tier=tier,
                                         sibling_breakout_id=bid_breakout.wall_id,
-                                        notes=f"BID-BOUNCE [{tier}] ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}({nearest_bid.persistence_polls}p) natRR={natural_rr:.2f} → ASK ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}"
+                                        notes=f"BID-BOUNCE [{tier}] ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}({nearest_bid.persistence_polls}p) natRR={natural_rr:.2f} {ask_note}"
                                     )
                                     bid_breakout.tier = tier
                                     bid_breakout.sibling_bounce_id = wid
@@ -364,20 +380,28 @@ class PoleEngineV9:
                                     self._fired[wid] = now_ts
 
         # === NEAREST ASK WALL ===
-        if _can_fire(nearest_ask):
+        if nearest_ask is not None and _can_fire(nearest_ask):
             wid = nearest_ask.wall_id
             bounce_limit = nearest_ask.low
-            # Compute natural wall-to-wall RR first to classify tier
             natural_sl = nearest_ask.high + max(self.sl_atr_mult * atr_v, mid * self.sl_buffer_pct)
-            natural_reward = bounce_limit - nearest_bid.high
-            natural_risk = natural_sl - bounce_limit
-            natural_rr = natural_reward / natural_risk if natural_risk > 0 else 0
-            tier = self.classify_tier(natural_rr)
+            R_natural = natural_sl - bounce_limit
+            if nearest_bid is not None:
+                natural_reward = bounce_limit - nearest_bid.high
+                natural_risk = R_natural
+                natural_rr = natural_reward / natural_risk if natural_risk > 0 else 0
+                tier = self.classify_tier(natural_rr)
+            else:
+                natural_rr = 1.0
+                tier = 'MED_FALLBACK'
 
             if tier != 'REJECT':
-                if tier in ('HIGH', 'MED'):
+                if tier in ('HIGH', 'MED') and nearest_bid is not None:
                     bounce_sl = natural_sl
                     bounce_tp = nearest_bid.high + mid * 0.0005  # structural
+                elif tier == 'MED_FALLBACK':
+                    bounce_sl = natural_sl
+                    R = bounce_sl - bounce_limit
+                    bounce_tp = bounce_limit - R  # 1R fallback (no opposite wall)
                 else:  # LOW
                     bounce_sl = nearest_ask.high + max(self.low_rr_sl_atr_mult * atr_v,
                                                        mid * self.low_rr_sl_buffer_pct)
@@ -397,11 +421,9 @@ class PoleEngineV9:
                     br_reward = bounce_limit - bounce_tp
                     if br_risk > 0:
                         rr = br_reward / br_risk
-                        if self.min_rr_bounce <= rr <= 12:
+                        rr_floor = self.min_rr_bounce if tier in ('HIGH', 'MED') else 0.95
+                        if rr_floor <= rr <= 12:
                             # BREAKOUT: BUY trigger past top of ask wall
-                            # SL = cluster bottom reclaim invalidation (structural).
-                            # TP: HIGH/MED = next ask wall above (or 1% extension);
-                            #     LOW = 1R clean sweep.
                             breakout_trigger = nearest_ask.high * (1 + self.breakout_trigger_pct)
                             breakout_sl = nearest_ask.high * (1 - self.breakout_sl_inside_pct)
                             bo_R = breakout_trigger - breakout_sl
@@ -412,7 +434,7 @@ class PoleEngineV9:
                                                   and w.price > nearest_ask.high * 1.002]
                                 breakout_tp = (min(further_asks, key=lambda w: w.price).low
                                                 if further_asks else nearest_ask.high * 1.01)
-                            else:  # LOW
+                            else:  # MED_FALLBACK or LOW
                                 breakout_tp = breakout_trigger + bo_R  # 1R clean sweep
                             if (breakout_sl < breakout_trigger < breakout_tp
                                   and bo_r_pct >= self.min_r_pct
@@ -421,7 +443,8 @@ class PoleEngineV9:
                                 bo_reward = bo_R
                                 if bo_risk > 0:
                                     bo_rr = bo_reward / bo_risk
-                                    if self.min_rr_breakout <= bo_rr <= 12:
+                                    bo_rr_floor = self.min_rr_breakout if tier in ('HIGH', 'MED') else 0.95
+                                    if bo_rr_floor <= bo_rr <= 12:
                                         ask_breakout = BreakoutTrigger(
                                             coin=coin, wall_id=wid + '|BO',
                                             side='BUY', trigger_price=breakout_trigger,
@@ -429,13 +452,15 @@ class PoleEngineV9:
                                             tier=tier, armed_t=now_ts,
                                             notes=f"ASK-BREAK [{tier}] ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}"
                                         )
+                                        bid_note = (f"→ BID ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}"
+                                                      if nearest_bid is not None else "(no opposite wall — 1R fallback)")
                                         ask_bounce = BounceSetup(
                                             coin=coin, wall_id=wid,
                                             side='SELL', entry_price=bounce_limit,
                                             sl_price=bounce_sl, tp_price=bounce_tp, rr=rr,
                                             tier=tier,
                                             sibling_breakout_id=ask_breakout.wall_id,
-                                            notes=f"ASK-BOUNCE [{tier}] ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}({nearest_ask.persistence_polls}p) natRR={natural_rr:.2f} → BID ${nearest_bid.usd/1000:.0f}k@{nearest_bid.price:.6f}"
+                                            notes=f"ASK-BOUNCE [{tier}] ${nearest_ask.usd/1000:.0f}k@{nearest_ask.price:.6f}({nearest_ask.persistence_polls}p) natRR={natural_rr:.2f} {bid_note}"
                                         )
                                         ask_breakout.sibling_bounce_id = wid
                                         bounces.append(ask_bounce)
