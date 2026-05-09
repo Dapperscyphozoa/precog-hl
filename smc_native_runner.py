@@ -78,10 +78,17 @@ class NativeSMCRunner:
                 'long_only':          SMC_CONFIG.get('long_only', True),
             }
             self.detectors = {c: SMCDetector(c, **det_kwargs) for c in self.universe}
+
+            # 2b. Build parallel wick-fade detectors. Same coins, separate state.
+            from wick_fade_engine import WickFadeDetector
+            self.wick_detectors = {c: WickFadeDetector(c) for c in self.universe}
+            self.on_log(f"native_runner: built {len(self.wick_detectors)} wick-fade detectors")
             
             # 3. Bootstrap candle history (this takes ~217/5 = 43 seconds throttled)
             self.on_log("native_runner: bootstrapping candle history…")
-            warmup_detectors(self.detectors, throttle_per_sec=3, on_log=self.on_log)
+            warmup_detectors(self.detectors, throttle_per_sec=3,
+                             on_log=self.on_log,
+                             also=[self.wick_detectors])
             
             # 4. Wrap callback to inject secret (so handle_smc_alert gate 1 passes)
             secret = os.environ.get('WEBHOOK_SECRET', '')
@@ -98,6 +105,7 @@ class NativeSMCRunner:
             # 5. Start feed (pass pre-warmed detectors so live candles continue from warmup state)
             self.feed = CandleFeed(
                 detectors=self.detectors,    # use pre-warmed detectors from step 3
+                wick_detectors=self.wick_detectors,
                 interval='15m',
                 on_setup=wrapped_setup,
                 on_log=self.on_log,

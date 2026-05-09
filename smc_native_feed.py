@@ -20,9 +20,13 @@ HL_WS_URL = 'wss://api.hyperliquid.xyz/ws'
 
 class CandleFeed:
     def __init__(self, coins=None, detectors=None, interval='15m', on_setup=None,
-                 detector_kwargs=None, on_log=None):
+                 detector_kwargs=None, on_log=None, wick_detectors=None):
         """Either pass `coins` (will create fresh detectors) OR `detectors` (use pre-built).
         Pre-built is needed when bootstrap has already warmed detectors with history.
+
+        wick_detectors: optional dict {coin: WickFadeDetector}. When provided, every
+        bar close is fed to BOTH the SMC detector and the wick detector, so a single
+        WS feed drives two parallel signal generators.
         """
         self.detector_kwargs = detector_kwargs or {}
         self.log = on_log or log.info
@@ -34,6 +38,8 @@ class CandleFeed:
             assert coins is not None, "Must pass either coins or detectors"
             self.coins = list(coins)
             self.detectors = {c: SMCDetector(c, **self.detector_kwargs) for c in self.coins}
+
+        self.wick_detectors = wick_detectors or {}
         
         self.interval = interval
         self.on_setup = on_setup or (lambda s: log.info(f"setup: {s}"))
@@ -42,6 +48,7 @@ class CandleFeed:
         
         self.stats = {
             'msgs': 0, 'closes_processed': 0, 'setups_fired': 0,
+            'wick_setups_fired': 0,
             'last_msg_ts': 0, 'reconnects': 0, 'errors': 0,
         }
         
@@ -103,6 +110,7 @@ class CandleFeed:
             self.last_close_t[coin] = closed_bar['t']
             self.stats['closes_processed'] += 1
             
+            # SMC detector
             try:
                 detector = self.detectors[coin]
                 setup = detector.on_close(closed_bar)
@@ -120,6 +128,26 @@ class CandleFeed:
             except Exception as e:
                 self.stats['errors'] += 1
                 log.exception(f"detector.on_close raised for {coin}: {e}")
+
+            # Wick fade detector (parallel signal)
+            wd = self.wick_detectors.get(coin)
+            if wd is not None:
+                try:
+                    wsetup = wd.on_close(closed_bar)
+                    if wsetup:
+                        self.stats['wick_setups_fired'] += 1
+                        self.log(
+                            f"smc_native_feed: WICK_SETUP {coin} {wsetup['side']} "
+                            f"entry={wsetup['ob_top']:.6f} sl={wsetup['sl_price']:.6f} "
+                            f"tp2={wsetup['tp2']:.6f} rr={wsetup['rr_to_tp2']:.2f}"
+                        )
+                        try:
+                            self.on_setup(wsetup)
+                        except Exception as e:
+                            log.exception(f"on_setup (wick) callback raised: {e}")
+                except Exception as e:
+                    self.stats['errors'] += 1
+                    log.exception(f"wick_detector.on_close raised for {coin}: {e}")
         
         self.current_bar[coin] = new_bar
     
@@ -176,6 +204,7 @@ class CandleFeed:
                 'msgs': self.stats['msgs'],
                 'closes_processed': self.stats['closes_processed'],
                 'setups_fired': self.stats['setups_fired'],
+                'wick_setups_fired': self.stats.get('wick_setups_fired', 0),
                 'last_msg_age_sec': (time.time() - self.stats['last_msg_ts']) if self.stats['last_msg_ts'] else None,
                 'reconnects': self.stats['reconnects'],
                 'errors': self.stats['errors'],

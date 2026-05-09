@@ -45,13 +45,19 @@ def candles_snapshot(info, coin, interval='15m', n_bars=50):
 
 
 def warmup_detectors(detectors, info=None, interval='15m', n_bars=50,
-                     throttle_per_sec=5, on_log=None):
+                     throttle_per_sec=5, on_log=None, also=None):
     """Backfill all detectors. detectors: {coin: SMCDetector}.
+    
+    `also` (optional): list of additional {coin: detector} dicts that should
+    receive the same bars. Use this to warm wick_fade or other parallel
+    detectors without re-fetching candles.
+    
     Returns dict {coin: bars_loaded}.
     """
     log_fn = on_log or log.info
     if info is None:
         info = Info(constants.MAINNET_API_URL, skip_ws=True)
+    also = also or []
     
     interval_sec = 1.0 / throttle_per_sec
     out = {}
@@ -65,6 +71,14 @@ def warmup_detectors(detectors, info=None, interval='15m', n_bars=50,
             closed_bars = [b for b in bars if (b['t'] + interval_ms) < now_ms]
             for b in closed_bars:
                 detector.on_close(b)
+                # Feed parallel detectors too
+                for other_dict in also:
+                    od = other_dict.get(coin)
+                    if od is not None:
+                        try:
+                            od.on_close(b)
+                        except Exception as e:
+                            log.warning(f"warmup: parallel detector {coin} raised: {e}")
             out[coin] = len(closed_bars)
         else:
             out[coin] = 0
