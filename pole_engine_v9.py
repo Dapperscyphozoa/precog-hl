@@ -192,6 +192,7 @@ class PoleEngineV9:
                   require_body_close: bool = True,
                   spoof_filter_shrink: float = 0.40,
                   min_r_pct: float = 0.0,
+                  min_dist_pct: float = 0.0010,
                   # Tiered setup thresholds — see classify_tier()
                   high_rr_threshold: float = 2.0,
                   med_rr_threshold: float = 1.5,
@@ -210,6 +211,7 @@ class PoleEngineV9:
         self.require_body_close = require_body_close
         self.spoof_filter_shrink = spoof_filter_shrink
         self.min_r_pct = min_r_pct
+        self.min_dist_pct = min_dist_pct
         self.high_rr_threshold = high_rr_threshold
         self.med_rr_threshold = med_rr_threshold
         self.low_rr_sl_atr_mult = low_rr_sl_atr_mult
@@ -254,12 +256,13 @@ class PoleEngineV9:
         if now_ts is None: now_ts = time.time()
         if not walls or mid <= 0 or atr_v <= 0: return [], []
 
-        # Verified walls only — passed persistence + spoof defense + first-touch
+        # Verified walls only — passed persistence + spoof defense + first-touch + min distance
         min_p = min_persistence_polls if min_persistence_polls is not None else self.min_persistence
         verified = []
         for w in walls:
             if w.persistence_polls < min_p: continue
             if w.times_tested > 0: continue  # FIRST-TOUCH ONLY
+            if w.distance_pct < self.min_dist_pct: continue  # too close to mid = BBO, not structural
             shrink = tracker.shrink_pct(coin, w.side, w.price, mid, window_s=90)
             if shrink is not None and shrink >= self.spoof_filter_shrink: continue
             verified.append(w)
