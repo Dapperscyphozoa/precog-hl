@@ -136,6 +136,38 @@ def calc_size(balance, risk_pct, entry, sl):
     notional = min(risk_amt / sl_dist, balance * LEVERAGE, balance * MAX_NOTIONAL_PCT * LEVERAGE)
     return notional / entry, notional
 
+
+# === HL meta cache for per-coin szDecimals + pxDecimals rounding ===
+_META_CACHE = {'t': 0, 'data': {}}
+
+def fetch_meta():
+    """Hyperliquid universe meta — cached 30 min. Returns {coin: {szDecimals, ...}}."""
+    if time.time() - _META_CACHE['t'] < 1800 and _META_CACHE['data']:
+        return _META_CACHE['data']
+    raw = http_post(HL_API, {'type': 'meta'})
+    if raw and 'universe' in raw:
+        _META_CACHE['data'] = {a['name']: a for a in raw['universe']}
+        _META_CACHE['t'] = time.time()
+    return _META_CACHE['data']
+
+def round_size(coin: str, size: float) -> float:
+    """Round size to coin's szDecimals. HL rejects sizes with more decimals."""
+    meta = fetch_meta()
+    sz_dec = meta.get(coin, {}).get('szDecimals', 4)
+    return round(size, sz_dec)
+
+def round_price(coin: str, px: float) -> float:
+    """HL price tick rule: max 5 sig figs and at most (6 - szDecimals) decimals for perps."""
+    meta = fetch_meta()
+    sz_dec = meta.get(coin, {}).get('szDecimals', 4)
+    max_decs = max(0, 6 - sz_dec)
+    # Round to max_decs decimals first
+    rounded = round(px, max_decs)
+    # Then enforce 5 significant figures by going through string formatting
+    if rounded == 0: return 0.0
+    sig_str = f"{rounded:.5g}"
+    return float(sig_str)
+
 def load_state():
     try:
         if os.path.exists(STATE_FILE):
@@ -217,6 +249,10 @@ def _record_oid(oid):
 def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=None):
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
+    size = round_size(coin, size)
+    price = round_price(coin, price)
+    if size <= 0:
+        log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         if cloid is not None:
             res = EXCHANGE.order(coin, is_buy, size, price, {'limit':{'tif':'Gtc'}},
@@ -235,6 +271,9 @@ def place_limit(coin, is_buy, size, price, reduce_only=False, label='', cloid=No
 def place_market(coin, is_buy, size, slippage=0.005, label='', cloid=None):
     if EXCHANGE is None:
         log(f"  ERR no SDK, skipping {coin} {label}"); return None
+    size = round_size(coin, size)
+    if size <= 0:
+        log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         if cloid is not None:
             res = EXCHANGE.market_open(coin, is_buy, size, slippage=slippage, cloid=cloid)
@@ -256,6 +295,9 @@ def cancel_order(coin, oid):
 def market_close(coin, is_buy_to_close, size, label='CLOSE'):
     """Reduce-only market exit."""
     if EXCHANGE is None: return None
+    size = round_size(coin, size)
+    if size <= 0:
+        log(f"  ERR rounded size 0 {coin} {label}"); return None
     try:
         return EXCHANGE.market_open(coin, is_buy_to_close, size, slippage=0.01,
                                      reduce_only=True)
