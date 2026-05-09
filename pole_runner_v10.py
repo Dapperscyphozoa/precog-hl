@@ -67,6 +67,8 @@ state = {
     # Stage 4 (LTF) sub-drop instrumentation
     'ltf_drops': {'no_pivots':0,'no_atr':0,'no_sweep':0,'no_local_window':0,
                    'no_mss':0,'no_ob_window':0},
+    'build_fail_drops': {'no_tp_at_all':0,'wrong_side_tp':0,'zero_risk':0,
+                          'risk_over_10pct':0,'rr_too_low':0},
     # Outcome tracker (paper P&L)
     'wins_tp1_tp2': 0,        # both TPs hit
     'wins_tp1_be': 0,         # TP1 hit, runner stopped at breakeven (still net +)
@@ -359,11 +361,19 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
         sl_ticks, sl_min = 4, 0.0010
     else:                     # micro / illiquid
         sl_ticks, sl_min = 6, 0.0020
-    setup = build_setup(coin, ltf, zone, bars_mtf, bars_htf, zones,
+    setup, build_drop = build_setup(coin, ltf, zone, bars_mtf, bars_htf, zones,
                           tick_size=tick, sl_buffer_ticks=sl_ticks, sl_min_buffer_pct=sl_min, min_rr_to_tp1=1.5)
     if setup is None:
         sd['build_setup_fail'] += 1
-        log(f"  BUILD-FAIL [{htf_label}] {coin} {ltf['side']} (R:R<2 or no TPs)")
+        # Sub-reason aggregation (council step 3+: data only, no behavior)
+        bd = state.setdefault('build_fail_drops',
+            {'no_tp_at_all':0,'wrong_side_tp':0,'zero_risk':0,'risk_over_10pct':0,'rr_too_low':0})
+        if build_drop:
+            if build_drop.startswith('rr_too_low'):
+                bd['rr_too_low'] += 1
+            elif build_drop in bd:
+                bd[build_drop] += 1
+        log(f"  BUILD-FAIL [{htf_label}] {coin} {ltf['side']} ({build_drop or 'unknown'})")
         return None
 
     if wall_passed:
@@ -677,6 +687,9 @@ def tick():
     log(f"  Drops: zones={sd['no_zones']} not_at_zone={sd['not_at_zone']} mtf_block={sd['mtf_block']} no_ltf={sd['no_ltf']} build_fail={sd['build_setup_fail']}")
     ld = state['ltf_drops']
     log(f"  LTF-drops: piv={ld['no_pivots']} atr={ld['no_atr']} sweep={ld['no_sweep']} window={ld['no_local_window']} mss={ld['no_mss']} ob={ld['no_ob_window']}")
+    bd = state.get('build_fail_drops', {})
+    if any(bd.values()):
+        log(f"  Build-drops: rr_low={bd.get('rr_too_low',0)} no_tp={bd.get('no_tp_at_all',0)} wrong_side={bd.get('wrong_side_tp',0)} risk_high={bd.get('risk_over_10pct',0)}")
     # Rolling close summary: split WR/PnL by path and wall flag
     rt = state.get('recent_trades', [])
     if rt:
