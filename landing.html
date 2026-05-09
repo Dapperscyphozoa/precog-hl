@@ -6,7 +6,7 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>PRECOG // CYBER PSYCHO</title>
+<title>PSYCHO PM TERMINAL</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;800&family=Cormorant+Garamond:ital,wght@0,300;0,600;1,400&display=swap" rel="stylesheet">
 <style>
 :root {
@@ -223,7 +223,9 @@ body::after {
 </head>
 <body>
 
-<div class="container">
+<div class="pm-layout">
+<div class="pm-main">
+<div class="container" style="max-width:none;padding:0;">
 
 <!-- HEADER -->
 <div class="header">
@@ -245,8 +247,8 @@ body::after {
             </svg>
         </div>
         <div>
-            <div class="logo-text">PRECOG</div>
-            <div class="logo-sub">CYBER · PSYCHO · v8.28</div>
+            <div class="logo-text">PSYCHO PM</div>
+            <div class="logo-sub">TERMINAL · CYBER · v8.28</div>
         </div>
     </div>
     <div class="status-cluster">
@@ -268,6 +270,203 @@ body::after {
 .precog-nav .nav-sep{flex:1}
 .precog-nav .nav-tag{font-size:9px;color:#64748b;letter-spacing:0.25em;opacity:0.6;padding-left:6px}
 @media(max-width:700px){.precog-nav{padding:8px 10px;gap:4px}.precog-nav .nav-brand{font-size:13px;width:100%;padding:0 0 6px 0;margin:0 0 4px 0;border-right:none;border-bottom:1px solid rgba(200,204,212,0.1)}.precog-nav a{padding:5px 7px;font-size:9px;letter-spacing:0.15em}.precog-nav .nav-tag{width:100%;padding:6px 0 0 0;text-align:center}}
+
+/* ═══ PSYCHO PM TERMINAL — 2-COL LAYOUT WITH RHS ENGINE RAIL ═══ */
+.pm-layout {
+  position: relative;
+  z-index: 2;
+  max-width: 1900px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 24px;
+  padding: 32px 40px;
+}
+.pm-main { min-width: 0; }
+.pm-engine-rail {
+  position: sticky;
+  top: 80px;
+  height: calc(100vh - 100px);
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--carbon) 0%, rgba(13,14,17,0.96) 100%);
+  border: 1px solid var(--line);
+  border-radius: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pm-rail-head {
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(184,255,47,0.04);
+}
+.pm-rail-title {
+  font-family: 'Cormorant Garamond', serif;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--bone);
+  text-transform: uppercase;
+}
+.pm-rail-sub {
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  color: var(--acid);
+  opacity: 0.7;
+  margin-top: 2px;
+  text-transform: uppercase;
+}
+.pm-rail-counts {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--chrome);
+}
+.pm-rail-count strong { font-weight: 600; }
+.pm-rail-count.live strong { color: var(--acid); }
+.pm-rail-count.paper strong { color: var(--cyan); }
+.pm-rail-count.research strong { color: var(--oxide); }
+.pm-rail-count.halted strong { color: var(--blood); animation: flicker 1.5s infinite; }
+
+.pm-rail-scroll {
+  flex: 1;
+  overflow-y: auto;
+  scroll-behavior: smooth;
+}
+.pm-rail-scroll::-webkit-scrollbar { width: 4px; }
+.pm-rail-scroll::-webkit-scrollbar-track { background: var(--void); }
+.pm-rail-scroll::-webkit-scrollbar-thumb { background: var(--steel); }
+
+/* Auto-cycle scroll: when JS detects content overflow, animate scroll */
+@keyframes pm-rail-cycle {
+  0%, 8% { transform: translateY(0); }
+  50%, 58% { transform: translateY(calc(-100% + var(--rail-h, 100vh))); }
+  100% { transform: translateY(0); }
+}
+.pm-rail-scroll.cycling .pm-rail-list {
+  animation: pm-rail-cycle var(--rail-cycle, 30s) ease-in-out infinite;
+}
+
+.pm-engine-row {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  position: relative;
+}
+.pm-engine-row:hover { background: rgba(184,255,47,0.04); }
+.pm-engine-row.halted { background: rgba(193,39,45,0.08); border-left: 2px solid var(--blood); }
+.pm-engine-row.live-stage::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
+  background: var(--acid);
+}
+
+.pm-engine-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.pm-engine-name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: var(--bone);
+  font-family: 'JetBrains Mono', monospace;
+}
+.pm-engine-stage {
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+.pm-engine-stage.full { color: var(--acid); border-color: rgba(184,255,47,0.4); }
+.pm-engine-stage.canary, .pm-engine-stage.small { color: var(--oxide); border-color: rgba(217,119,6,0.4); }
+.pm-engine-stage.paper { color: var(--cyan); border-color: rgba(0,229,255,0.3); }
+.pm-engine-stage.research { color: var(--chrome); border-color: rgba(200,204,212,0.2); }
+
+.pm-engine-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  color: var(--chrome);
+  opacity: 0.75;
+  flex-wrap: wrap;
+}
+.pm-engine-meta span.dot {
+  width: 6px; height: 6px; border-radius: 50%; display: inline-block;
+  margin-right: 4px; vertical-align: middle;
+}
+.pm-engine-meta .dot.up { background: var(--acid); box-shadow: 0 0 6px var(--glow); }
+.pm-engine-meta .dot.down { background: var(--blood); }
+.pm-engine-meta .dot.waking { background: var(--oxide); animation: flicker 1s infinite; }
+.pm-engine-meta .dot.unknown { background: var(--steel); }
+
+.pm-engine-bar {
+  margin-top: 6px;
+  height: 3px;
+  background: var(--steel);
+  position: relative;
+  overflow: hidden;
+}
+.pm-engine-bar-fill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  background: linear-gradient(90deg, var(--acid), var(--oxide));
+}
+
+.pm-engine-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 4px;
+}
+.pm-engine-btn {
+  flex: 1;
+  padding: 4px 6px;
+  font-size: 8px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--chrome);
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  transition: all 0.12s ease;
+}
+.pm-engine-btn.halt { color: var(--blood); border-color: rgba(193,39,45,0.3); }
+.pm-engine-btn.halt:hover { background: var(--blood); color: var(--void); }
+.pm-engine-btn.resume { color: var(--acid); border-color: rgba(184,255,47,0.3); }
+.pm-engine-btn.resume:hover { background: var(--acid); color: var(--void); }
+.pm-engine-btn.detail:hover { border-color: var(--bone); color: var(--bone); }
+
+.pm-rail-foot {
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--chrome);
+  opacity: 0.6;
+  display: flex;
+  justify-content: space-between;
+}
+.pm-rail-foot a { color: var(--acid); text-decoration: none; }
+
+@media(max-width: 1200px) {
+  .pm-layout { grid-template-columns: 1fr; padding: 16px 20px; }
+  .pm-engine-rail {
+    position: relative;
+    top: 0;
+    height: auto;
+    max-height: 600px;
+    margin-top: 24px;
+  }
+}
 </style>
 <nav class="precog-nav">
 <a href="/" class="nav-brand">PRECOG</a>
@@ -286,16 +485,16 @@ body::after {
 <!-- HERO -->
 <div class="hero">
     <div class="hero-text">
-        <div class="hero-kicker">// automated perpetuals execution</div>
+        <div class="hero-kicker">// portfolio manager · multi-engine terminal</div>
         <h1 class="hero-title">
-            machine<br>
-            <em>made</em> of<br>
-            <span class="blood">hunger</span>
+            psycho<br>
+            <em>pm</em><br>
+            <span class="blood">terminal</span>
         </h1>
         <p class="hero-lede">
-            Five signal engines. Nine guards. Six-venue orderbook aggregation.
-            Confidence scoring drives adaptive sizing. Liquidation, whale, and news feeds.
-            No human in the loop.
+            Nine engines under one wallet. Cross-venue orderbook aggregation, whale tape,
+            liquidation cascades, news regime, funding map. Cross-engine attribution and risk.
+            Bloomberg's rival, built for one wallet — yours.
         </p>
         <div class="hero-stats">
             <div>
@@ -643,10 +842,10 @@ body::after {
         <div id="news"></div>
     </div>
 
-    <!-- ENGINES -->
+    <!-- ENGINES (legacy precog gates — full multi-engine list lives in RHS rail) -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Multi-Gate · Engine Stack</div>
+            <div class="panel-title">Precog · Internal Gates</div>
             <div class="panel-meta">8 signal · 9 guard · 6 venue · 1 sizing</div>
         </div>
 
@@ -661,6 +860,8 @@ body::after {
 
         <div style="font-size:10px;letter-spacing:0.2em;color:var(--blood);opacity:0.7;margin:12px 0 8px">// SIZING</div>
         <div class="engine-grid" id="eng-sizing"></div>
+
+        <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--line);font-size:9px;letter-spacing:0.2em;color:var(--chrome);opacity:0.6;text-transform:uppercase;">// portfolio-wide engines → see RHS rail</div>
     </div>
 </div>
 
@@ -829,11 +1030,36 @@ body::after {
 
 <!-- FOOTER -->
 <div class="footer">
-    <div>PRECOG // CYBER·PSYCHO // HYPERLIQUID</div>
+    <div>PSYCHO PM TERMINAL // CYBER·PSYCHO // HYPERLIQUID</div>
     <div id="foot-updated">Updated —</div>
 </div>
 
 </div>
+</div><!-- /pm-main -->
+
+<!-- ═══ RHS ENGINE RAIL — vertical rolling bar ═══ -->
+<aside class="pm-engine-rail">
+  <div class="pm-rail-head">
+    <div class="pm-rail-title">Engines</div>
+    <div class="pm-rail-sub">// live + paper + research</div>
+    <div class="pm-rail-counts">
+      <span class="pm-rail-count live">live <strong id="rail-c-live">—</strong></span>
+      <span class="pm-rail-count paper">paper <strong id="rail-c-paper">—</strong></span>
+      <span class="pm-rail-count halted">halted <strong id="rail-c-halted">0</strong></span>
+    </div>
+  </div>
+  <div class="pm-rail-scroll" id="pm-rail-scroll">
+    <div class="pm-rail-list" id="pm-rail-list">
+      <div style="padding:24px 14px;font-size:10px;letter-spacing:0.2em;color:var(--chrome);opacity:0.5;text-transform:uppercase;">// loading engines…</div>
+    </div>
+  </div>
+  <div class="pm-rail-foot">
+    <span id="rail-foot-ts">—</span>
+    <a href="https://portfolio-manager-7df2.onrender.com/engines" target="_blank">PM</a>
+  </div>
+</aside>
+
+</div><!-- /pm-layout -->
 
 <!-- TICKER -->
 <div class="ticker">
@@ -1488,8 +1714,209 @@ function poll(name, fn, intervalMs, offsetMs) {
     setTimeout(() => { tick(); setInterval(tick, intervalMs); }, offsetMs || 0);
 }
 
+// ═══ PSYCHO PM TERMINAL — RHS engine rail ═══
+// Pulls 9-engine list from PM /engines (cross-engine source of truth) and
+// merges precog's own /all_systems data for engines that overlap (so we
+// see precog/precog-sa/smc-loose internal stats too). Falls back to PM
+// data only when /all_systems hasn't fired yet.
+const PM_BASE_URL = 'https://portfolio-manager-7df2.onrender.com';
+const HALT_BRIDGE_URL = 'https://quant-halt-bridge.onrender.com';
+
+// Endpoints engines expose for live state. has_full_api flag matches the
+// dashboard's registry — only these accept GET /halt and /pnl.
+const ENGINE_FULL_API = {
+  'vol-squeeze-fade':       'https://vol-squeeze-fade.onrender.com',
+  'vol-squeeze-breakout-v1':'https://vol-squeeze-breakout-v1.onrender.com',
+  'pairs-engine-v1':        'https://pairs-engine-v1.onrender.com',
+  'dirmom-v1':              'https://dirmom-v1.onrender.com',
+};
+// V9 halts via the bridge (no public engine URL of its own)
+const ENGINE_HALT_BRIDGE = {
+  'V9': HALT_BRIDGE_URL + '/halt/V9',
+};
+
+async function _fetchJSON(url, timeoutMs = 8000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
+    if (!r.ok) return { __err: 'HTTP ' + r.status };
+    return await r.json();
+  } catch (e) {
+    return { __err: e.name === 'AbortError' ? 'timeout' : (e.message || 'fetch_err') };
+  } finally { clearTimeout(t); }
+}
+
+async function loadPMRail() {
+  const list = document.getElementById('pm-rail-list');
+  if (!list) return;
+  const pmResp = await _fetchJSON(PM_BASE_URL + '/engines');
+  if (pmResp.__err || !pmResp.engines) {
+    list.innerHTML = '<div style="padding:24px 14px;font-size:10px;letter-spacing:0.2em;color:var(--blood);text-transform:uppercase;">// pm unreachable<br>'
+      + (pmResp.__err || 'no_data') + '</div>';
+    return;
+  }
+
+  // Optionally pull live state from each full-API engine in parallel
+  const liveStates = {};
+  const fetches = [];
+  for (const [name, url] of Object.entries(ENGINE_FULL_API)) {
+    if (pmResp.engines[name]) {
+      fetches.push(
+        _fetchJSON(url + '/halt', 6000).then(r => liveStates[name] = { halt: r })
+      );
+    }
+  }
+  // V9 via bridge
+  if (pmResp.engines['V9']) {
+    fetches.push(
+      _fetchJSON(ENGINE_HALT_BRIDGE['V9'], 6000).then(r => liveStates['V9'] = { halt: r })
+    );
+  }
+  await Promise.all(fetches);
+
+  // Sort: live stages first, then paper, then research; alphabetic within
+  const ORDER = { full: 0, canary: 1, small: 2, paper: 3, research: 4 };
+  const STAGE_LABEL = { full: 'live', canary: 'canary', small: 'small', paper: 'paper', research: 'rsrch' };
+
+  const entries = Object.entries(pmResp.engines).map(([name, e]) => ({
+    name, ...e,
+    _stage: e.lifecycle_stage || 'unknown',
+  })).sort((a, b) => {
+    const oa = ORDER[a._stage] ?? 99, ob = ORDER[b._stage] ?? 99;
+    if (oa !== ob) return oa - ob;
+    return a.name.localeCompare(b.name);
+  });
+
+  // Counts
+  let countLive = 0, countPaper = 0, countResearch = 0, countHalted = 0;
+  for (const e of entries) {
+    if (['full', 'canary', 'small'].includes(e._stage)) countLive++;
+    else if (e._stage === 'paper') countPaper++;
+    else if (e._stage === 'research') countResearch++;
+    const hs = liveStates[e.name]?.halt;
+    if (hs && !hs.__err && hs.active === true) countHalted++;
+  }
+  document.getElementById('rail-c-live').textContent = countLive;
+  document.getElementById('rail-c-paper').textContent = countPaper;
+  document.getElementById('rail-c-halted').textContent = countHalted;
+
+  // Render rows
+  const html = entries.map(e => {
+    const live = liveStates[e.name];
+    const halt = live?.halt;
+    const halted = halt && !halt.__err && halt.active === true;
+    const reachable = live && (!live.halt?.__err);
+    const dotCls = halted ? 'down' : (reachable ? 'up' : (live?.halt?.__err === 'timeout' ? 'waking' : 'unknown'));
+
+    const stageCls = e._stage;
+    const stageLbl = STAGE_LABEL[e._stage] || e._stage;
+
+    const isLiveStage = ['full', 'canary', 'small'].includes(e._stage);
+    const rowCls = ['pm-engine-row', halted ? 'halted' : '', isLiveStage ? 'live-stage' : ''].filter(Boolean).join(' ');
+
+    const cap = (e.capital_fraction || 0) * 100;
+    const className = (e.class || 'unknown').replace(/_/g, ' ');
+
+    // Halt-button visibility: only if engine has a halt mechanism
+    const hasHalt = Boolean(ENGINE_FULL_API[e.name] || ENGINE_HALT_BRIDGE[e.name]);
+    const haltBtn = hasHalt
+      ? (halted
+          ? `<button class="pm-engine-btn resume" data-engine="${e.name}" data-action="resume">resume</button>`
+          : `<button class="pm-engine-btn halt" data-engine="${e.name}" data-action="halt">halt</button>`)
+      : `<button class="pm-engine-btn detail" disabled style="opacity:0.3;cursor:not-allowed;" title="No halt API">no halt</button>`;
+
+    return `
+    <div class="${rowCls}" data-engine="${e.name}">
+      <div class="pm-engine-row-head">
+        <div class="pm-engine-name">${e.name}</div>
+        <div class="pm-engine-stage ${stageCls}">${stageLbl}</div>
+      </div>
+      <div class="pm-engine-meta">
+        <span><span class="dot ${dotCls}"></span>${halted ? 'halted' : (reachable ? 'live' : (e._stage === 'full' ? 'no-api' : '—'))}</span>
+        <span>${cap.toFixed(0)}% cap</span>
+        <span>${className}</span>
+      </div>
+      <div class="pm-engine-bar"><div class="pm-engine-bar-fill" style="width:${Math.min(100, cap*4)}%;"></div></div>
+      <div class="pm-engine-actions">
+        <button class="pm-engine-btn detail" data-engine="${e.name}" data-action="detail">detail</button>
+        ${haltBtn}
+      </div>
+    </div>`;
+  }).join('');
+  list.innerHTML = html;
+
+  // Wire up halt/resume/detail buttons
+  list.querySelectorAll('.pm-engine-btn').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const engine = btn.dataset.engine;
+      const action = btn.dataset.action;
+      if (action === 'detail') {
+        // Could open a modal; for now scroll to systems panel
+        const sysMap = { 'precog': 'sa', 'precog-sa': 'sc', 'smc-loose': 'se' };
+        const sysId = sysMap[engine];
+        if (sysId) {
+          const el = document.querySelector(`[id^="${sysId}-"]`);
+          if (el) el.closest('.panel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        return;
+      }
+      if (action === 'halt' || action === 'resume') {
+        if (!confirm(`${action.toUpperCase()} ${engine}?`)) return;
+        const url = ENGINE_HALT_BRIDGE[engine]
+          ? (HALT_BRIDGE_URL + '/' + (action === 'halt' ? 'halt' : 'resume') + '/' + engine)
+          : (ENGINE_FULL_API[engine] + '/' + (action === 'halt' ? 'halt' : 'resume'));
+        btn.disabled = true; btn.textContent = '...';
+        try {
+          const r = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: 'pm_terminal_' + action }),
+          });
+          const j = await r.json();
+          if (r.ok) {
+            btn.style.color = 'var(--acid)';
+            btn.textContent = '✓';
+            setTimeout(loadPMRail, 1500);
+          } else {
+            btn.style.color = 'var(--blood)';
+            btn.textContent = j.error || ('HTTP ' + r.status);
+          }
+        } catch (e) {
+          btn.style.color = 'var(--blood)';
+          btn.textContent = 'fail';
+        }
+        setTimeout(() => btn.disabled = false, 3000);
+      }
+    });
+  });
+
+  // Update timestamp
+  const now = new Date();
+  const ts = now.toISOString().slice(11, 19);
+  const el = document.getElementById('rail-foot-ts');
+  if (el) el.textContent = ts + 'Z';
+
+  // Detect overflow + apply auto-cycle if content is taller than viewport
+  const scroll = document.getElementById('pm-rail-scroll');
+  if (scroll) {
+    const overflow = list.scrollHeight > scroll.clientHeight + 24;
+    if (overflow) {
+      scroll.classList.add('cycling');
+      const ratio = list.scrollHeight / scroll.clientHeight;
+      // ~6s per "screen" of content, minimum 24s, max 60s
+      const cycleDur = Math.max(24, Math.min(60, ratio * 12)) + 's';
+      scroll.style.setProperty('--rail-cycle', cycleDur);
+      scroll.style.setProperty('--rail-h', scroll.clientHeight + 'px');
+    } else {
+      scroll.classList.remove('cycling');
+    }
+  }
+}
+
 // Initial paint — immediate but no setInterval bursts at t=0
-loadDash(); loadMacroStrip(); loadEngines();
+loadDash(); loadMacroStrip(); loadEngines(); loadPMRail();
 
 // Staggered offsets keep concurrent fetches small
 poll('clock',     updateClock,     1000,   0);
@@ -1502,6 +1929,7 @@ poll('news',      loadNews,        60000,  1600);
 poll('macro',     loadMacroStrip,  6000,   1900);
 poll('engines',   loadEngines,     8000,   2200);
 poll('systems',   loadSystems,     12000,  2500);
+poll('pmrail',    loadPMRail,      15000,  2800);
 
 // Refresh immediately when tab becomes visible again
 document.addEventListener('visibilitychange', () => {
@@ -1509,6 +1937,7 @@ document.addEventListener('visibilitychange', () => {
         Object.values(_polls).forEach(p => { p.running = false; });
         loadDash(); loadSignals(); loadWhales();
         loadMacroStrip(); loadSystems(); loadEngines();
+        loadPMRail();
     }
 });
 </script>
