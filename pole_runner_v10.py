@@ -221,6 +221,29 @@ def fetch_hl_l2(coin):
     return {'mid': mid, 'bids': bids, 'asks': asks}
 
 
+def microstructure_metrics(ob: dict) -> dict:
+    """Compute spread_bps + top-of-book depth for noise-floor study (Step 3, logged not used).
+
+    Returns: {spread_bps, top_bid_usd, top_ask_usd, depth_10bp_usd}
+    depth_10bp_usd = sum of bid+ask USD within 10bp of mid (proxy for thin/thick books).
+    """
+    if not ob or not ob.get('bids') or not ob.get('asks'): return {}
+    top_bid = ob['bids'][0]['price']
+    top_ask = ob['asks'][0]['price']
+    mid = (top_bid + top_ask) / 2
+    if mid <= 0: return {}
+    spread_bps = ((top_ask - top_bid) / mid) * 10000
+    band = mid * 0.001  # 10 bps either side
+    depth_10bp = (sum(b['usd'] for b in ob['bids'] if b['price'] >= mid - band) +
+                   sum(a['usd'] for a in ob['asks'] if a['price'] <= mid + band))
+    return {
+        'spread_bps': round(spread_bps, 2),
+        'top_bid_usd': round(ob['bids'][0]['usd'], 0),
+        'top_ask_usd': round(ob['asks'][0]['usd'], 0),
+        'depth_10bp_usd': round(depth_10bp, 0),
+    }
+
+
 def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, side: str) -> tuple:
     """Stage 5: verify there's a wall at the LTF OB (production aggregator OR HL L2 fallback).
 
@@ -253,6 +276,17 @@ def wall_confluence_check(coin: str, ob_body_top: float, ob_body_bottom: float, 
     src = 'HL-L2' if used_hl_fallback else 'multi-venue'
     vol = get_volume(coin)
     vol_str = f"vol=${(vol or 0)/1e6:.1f}M" if vol else "vol=?"
+
+    # Step 3 (council): noise-floor instrumentation. Logged but NOT acted upon.
+    # Goal: 7-day data set of (coin, tier, spread_bps, depth_10bp_usd) per qualified setup
+    # so we can later validate whether tier/cap actually predicts noise floor or whether
+    # spread+depth is the better proxy.
+    micro = microstructure_metrics(ob)
+    if micro:
+        log(f"  MICRO {coin} tier={get_tier(coin) or '?'} spread={micro['spread_bps']}bp "
+            f"top_bid=${micro['top_bid_usd']:.0f} top_ask=${micro['top_ask_usd']:.0f} "
+            f"depth_10bp=${micro['depth_10bp_usd']:.0f}")
+
     return passed, cluster_usd, f"{src} {vol_str} target={target_price:.6f} cluster=${cluster_usd/1000:.0f}k thr=${threshold/1000:.0f}k"
 
 def _evaluate_path(coin: str, htf_label: str, htf_days: int,
@@ -316,8 +350,17 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
 
     # Stage 6: build setup. For Path B (1H htf), TP2 comes from 1H zones, not 4H.
     tick = COIN_TICKS.get(coin, 0.0001)
+    # 3-tier SL buffer scaling (council-approved). Tighter coins get tighter stops; noisy coins
+    # get wider buffers to survive normal wick-hunting on illiquid books.
+    coin_tier = get_tier(coin) or 6   # default to noisiest tier if unknown
+    if coin_tier <= 2:        # BTC, ETH, HYPE, SOL, TON, ZEC
+        sl_ticks, sl_min = 2, 0.0005
+    elif coin_tier <= 4:      # mid + small cap
+        sl_ticks, sl_min = 4, 0.0010
+    else:                     # micro / illiquid
+        sl_ticks, sl_min = 6, 0.0020
     setup = build_setup(coin, ltf, zone, bars_mtf, bars_htf, zones,
-                          tick_size=tick, sl_buffer_ticks=2, sl_min_buffer_pct=0.0005, min_rr_to_tp1=1.5)
+                          tick_size=tick, sl_buffer_ticks=sl_ticks, sl_min_buffer_pct=sl_min, min_rr_to_tp1=1.5)
     if setup is None:
         sd['build_setup_fail'] += 1
         log(f"  BUILD-FAIL [{htf_label}] {coin} {ltf['side']} (R:R<2 or no TPs)")
@@ -651,15 +694,6 @@ def tick():
             f"{bucket(lambda t: not t.get('wall_present'), 'W-')} | "
             f"{bucket(lambda t: t.get('side')=='BUY', 'BUY')} "
             f"{bucket(lambda t: t.get('side')=='SELL', 'SELL')}")
-
-    # Forensic dump: full record for each closed trade + live pos/pend (OB body, wick, sweep, SL placement)
-    # Lets us audit whether SL was inside or outside the OB, whether OB was actually valid.
-    for tr in rt:
-        log(f"  TRADE-DUMP {json.dumps(tr, default=str)[:1000]}")
-    for coin, p in state['positions'].items():
-        log(f"  POS-DUMP {coin} {json.dumps({k:v for k,v in p.items() if k!='log'}, default=str)[:1000]}")
-    for pkey, p in state['pending'].items():
-        log(f"  PEND-DUMP {pkey} {json.dumps({k:v for k,v in p.items() if k!='log'}, default=str)[:1000]}")
 
     coins_this_tick = coins_for_tick(state['tick_count'], COINS)
     log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick")
