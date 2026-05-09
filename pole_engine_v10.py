@@ -459,19 +459,19 @@ def build_setup(coin: str, ltf: dict, htf_zone: OBZone,
 
     tp1 = find_next_liquidity(bars_1h, side, entry)
     tp2 = htf_target(zones_4h, side, entry)
-    if tp1 is None and tp2 is None: return None
+    if tp1 is None and tp2 is None: return None, 'no_tp_at_all'
     if tp1 is None: tp1 = tp2
     if tp2 is None: tp2 = tp1
 
-    if side == 'BUY' and (tp1 <= entry or tp2 <= entry): return None
-    if side == 'SELL' and (tp1 >= entry or tp2 >= entry): return None
+    if side == 'BUY' and (tp1 <= entry or tp2 <= entry): return None, 'wrong_side_tp'
+    if side == 'SELL' and (tp1 >= entry or tp2 >= entry): return None, 'wrong_side_tp'
 
     risk_pct = abs(entry - sl) / entry
-    if risk_pct == 0: return None
+    if risk_pct == 0: return None, 'zero_risk'
     rr1 = abs(tp1 - entry) / entry / risk_pct
     rr2 = abs(tp2 - entry) / entry / risk_pct
-    if rr1 < min_rr_to_tp1: return None
-    if risk_pct > 0.10: return None  # cap risk per setup at 10% (alts can have wide OBs, but 10% is the ceiling)
+    if rr1 < min_rr_to_tp1: return None, f'rr_too_low_{rr1:.2f}'
+    if risk_pct > 0.10: return None, 'risk_over_10pct'
 
     return Setup(
         coin=coin, side=side, entry_price=entry, sl_price=sl,
@@ -483,4 +483,4 @@ def build_setup(coin: str, ltf: dict, htf_zone: OBZone,
         sweep_wick=ltf['sweep_wick'],
         sl_distance_pct=risk_pct,
         notes=f"LTF-OB body[{ltf['ob_body_bottom']:.6f}-{ltf['ob_body_top']:.6f}] wick[{ltf['ob_wick_bottom']:.6f}-{ltf['ob_wick_top']:.6f}] {ltf['ob_bars']}bars",
-    )
+    ), None
