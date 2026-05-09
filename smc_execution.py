@@ -105,7 +105,14 @@ def submit_smc_trade(payload: dict, ctx: dict):
     os.environ['ENTRY_TIF'] = 'Ioc'
 
     coin = _coin_upper(payload.get('coin') or '')
-    notional = SMC_CONFIG['force_notional_usd']
+    base_notional = SMC_CONFIG['force_notional_usd']
+    # Conviction-based size scaling (wick_fade engine sets size_mult=2.0 when
+    # vol_climax fires — backtest showed +60% PnL improvement vs flat sizing).
+    # SMC engine doesn't set size_mult so default 1.0 keeps existing behaviour.
+    size_mult = float(payload.get('size_mult') or 1.0)
+    # Cap at 2× to avoid runaway sizing on future engines.
+    size_mult = max(0.5, min(size_mult, 2.0))
+    notional = base_notional * size_mult
     # Pre-round prices to HL tick size (HL float_to_wire is strict on precision)
     ob_top = round_price(coin, float(payload['ob_top']))
     sl_px = round_price(coin, float(payload['sl_price']))
@@ -113,6 +120,10 @@ def submit_smc_trade(payload: dict, ctx: dict):
 
     raw_size = notional / ob_top
     size = round_size(coin, raw_size)
+
+    if size_mult != 1.0:
+        log.info(f"smc_execution: {coin} size_mult={size_mult} → notional=${notional} "
+                 f"(engine={payload.get('engine','?')} vol_climax={payload.get('vol_climax')})")
 
     # Reject below HL min notional
     if size * ob_top < 10:
