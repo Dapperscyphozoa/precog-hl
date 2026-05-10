@@ -5264,6 +5264,105 @@ def cancel_stale_makers():
         return jsonify({'err': str(e)}), 500
 
 
+@app.route('/cancel_orphans', methods=['GET', 'POST'])
+def cancel_orphans():
+    """Cancel orphaned reduce-only / trigger orders — orders sitting on the
+    books for a coin that has no current position. They can't fire today
+    (reduce-only on no position) but become a hazard if the coin is re-entered:
+    a stale orphan SL would fire against the new entry at the wrong price.
+
+    Args:
+      ?secret=    required
+      ?coin=X     optional, restrict to one coin
+      ?dryrun=1   report what WOULD be cancelled, no action
+    """
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    coin_filter = (flask_request.args.get('coin') or '').upper() or None
+    dryrun = flask_request.args.get('dryrun') == '1'
+    try:
+        us = _cached_user_state()
+        # coin → abs position size
+        pos_by_coin = {}
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            sz = abs(float(p.get('szi', 0)))
+            if sz > 0:
+                pos_by_coin[p.get('coin', '').upper()] = sz
+
+        fo = _cached_frontend_orders()
+        cancelled = []
+        skipped = []
+        for o in fo:
+            c = (o.get('coin') or '').upper()
+            if coin_filter and c != coin_filter:
+                continue
+            # Orphan = reduce-only OR isTrigger, AND coin has no live position.
+            is_reduce = bool(o.get('reduceOnly'))
+            is_trigger = bool(o.get('isTrigger'))
+            if not (is_reduce or is_trigger):
+                continue
+            if c in pos_by_coin:
+                continue  # has live position — not an orphan
+            oid = o.get('oid')
+            info = {
+                'coin': c, 'oid': oid,
+                'side': o.get('side'),
+                'px': o.get('limitPx'),
+                'trigger_px': o.get('triggerPx'),
+                'sz': o.get('sz'),
+                'order_type': o.get('orderType', ''),
+                'reason': 'orphan_no_position',
+            }
+            if dryrun:
+                skipped.append(info)
+                continue
+            try:
+                r = exchange.cancel(c, oid)
+                status = (r or {}).get('response', {}).get('data', {}).get('statuses', [{}])[0] if r else {}
+                info['hl_response'] = status
+                cancelled.append(info)
+                log(f"ORPHAN CANCELLED {c} oid={oid} px={o.get('limitPx')} type={o.get('orderType','')}")
+            except Exception as e:
+                info['err'] = str(e)
+                cancelled.append(info)
+                log(f"ORPHAN CANCEL ERR {c} oid={oid}: {e}")
+        return jsonify({
+            'status': 'done',
+            'dryrun': dryrun,
+            'cancelled': cancelled,
+            'would_cancel': skipped,
+            'count_cancelled': len(cancelled),
+            'count_would_cancel': len(skipped),
+        })
+    except Exception as e:
+        log(f"CANCEL_ORPHANS ERR: {e}")
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/cancel_oid', methods=['GET', 'POST'])
+def cancel_one_oid():
+    """Cancel a single order by oid. ?secret= required, ?coin=X&oid=N.
+    Use for surgical clean-up (e.g. abandoned LIMIT entries that haven't filled)."""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    coin = (flask_request.args.get('coin') or '').upper()
+    try:
+        oid = int(flask_request.args.get('oid', '0'))
+    except Exception:
+        return jsonify({'err': 'oid_invalid'}), 400
+    if not coin or not oid:
+        return jsonify({'err': 'coin_and_oid_required'}), 400
+    try:
+        r = exchange.cancel(coin, oid)
+        status = (r or {}).get('response', {}).get('data', {}).get('statuses', [{}])[0] if r else {}
+        log(f"CANCEL_OID {coin} oid={oid} → {status}")
+        return jsonify({'status': 'done', 'coin': coin, 'oid': oid, 'hl_response': status})
+    except Exception as e:
+        log(f"CANCEL_OID ERR {coin} {oid}: {e}")
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/protect_sl/<coin>', methods=['GET', 'POST'])
 def protect_sl_endpoint(coin):
     """Place a native SL on an existing HL position that lacks one.
