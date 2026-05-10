@@ -13430,6 +13430,47 @@ def dash_json():
                 pos_rec['engine'] = engine
     except Exception:
         pass
+
+    # Fallback: pull SL/TP directly from HL's open trigger orders for any
+    # position still missing values. The bot's state['positions'] tracker
+    # only has tp_pct/sl_pct for trades it opened with that flow — older
+    # positions and trades opened via legacy paths leave sl=None even
+    # though a real SL trigger order is sitting on HL.
+    try:
+        fo = _cached_frontend_orders()
+        triggers_by_coin = {}
+        for o in fo:
+            c = (o.get('coin') or '').upper()
+            ot = o.get('orderType') or ''
+            tpx = o.get('triggerPx')
+            if not c or tpx is None:
+                continue
+            try:
+                tpx_f = float(tpx)
+            except (TypeError, ValueError):
+                continue
+            if 'Stop' in ot or 'Take' in ot:
+                kind = 'sl' if 'Stop' in ot else 'tp'
+                # If multiple SL/TP orders exist for one coin, prefer the
+                # one closest to entry — nearest stop is the binding one.
+                existing = triggers_by_coin.get(c, {}).get(kind)
+                triggers_by_coin.setdefault(c, {})[kind] = tpx_f if existing is None else (
+                    tpx_f if abs(tpx_f) < abs(existing) else existing  # tiebreak: smaller magnitude
+                )
+
+        for pos_rec in positions:
+            c = (pos_rec.get('coin') or '').upper()
+            t = triggers_by_coin.get(c, {})
+            # Only fill if missing — don't overwrite tracker-derived values
+            if pos_rec.get('sl') is None and 'sl' in t:
+                pos_rec['sl'] = t['sl']
+                pos_rec['sl_source'] = 'hl_trigger'
+            if pos_rec.get('tp') is None and 'tp' in t:
+                pos_rec['tp'] = t['tp']
+                pos_rec['tp_source'] = 'hl_trigger'
+    except Exception:
+        pass
+
     try: news = news_filter.get_state()
     except Exception: news = {}
     try: ladder = risk_ladder.get_state()
