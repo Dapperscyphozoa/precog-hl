@@ -49,6 +49,9 @@ LEVERAGE         = int(os.environ.get('LEVERAGE', '5'))
 MAX_POSITIONS    = int(os.environ.get('MAX_POSITIONS', '6'))
 MAX_PENDING      = int(os.environ.get('MAX_PENDING_LIMITS', '12'))
 MAX_NOTIONAL_PCT = float(os.environ.get('MAX_NOTIONAL_PCT', '0.20'))
+# Fixed-notional override. When > 0, calc_size() returns exactly this dollar
+# notional per trade, bypassing risk-based sizing. Capped by leverage only.
+FIXED_NOTIONAL_USD = float(os.environ.get('FIXED_NOTIONAL_USD', '0'))
 POLL_INTERVAL_S  = int(os.environ.get('POLL_INTERVAL_S', '60'))  # slower than V9, framework needs less frequency
 SCAN_WORKERS     = int(os.environ.get('SCAN_WORKERS', '6'))
 CANDLE_CACHE_S   = int(os.environ.get('CANDLE_CACHE_S', '300'))  # 5min cache for 4h/1h candles
@@ -181,7 +184,13 @@ def mark_fired(coin, ob_body_top, ob_body_bottom):
         state['fired_obs'][coin] = lst[-50:]
 
 def calc_size(balance, entry, sl):
-    if balance <= 0: return 0, 0
+    if balance <= 0 or entry <= 0: return 0, 0
+    # FIXED_NOTIONAL_USD override: every trade is exactly this dollar notional,
+    # capped only by available leverage. Skips RISK_PCT / sl_dist computation.
+    if FIXED_NOTIONAL_USD > 0:
+        notional_cap_lev = balance * LEVERAGE
+        notional = min(FIXED_NOTIONAL_USD, notional_cap_lev)
+        return notional / entry, notional
     risk_amt = balance * RISK_PCT
     sl_dist = abs(entry - sl) / entry
     if sl_dist <= 0: return 0, 0
@@ -969,6 +978,7 @@ def main():
     log(f"  COINS: {len(COINS)}")
     log(f"  DRY_RUN: {DRY_RUN}, LIVE: {LIVE}")
     log(f"  RISK_PCT: {RISK_PCT}, MAX_NOT_PCT: {MAX_NOTIONAL_PCT}, LEVERAGE: {LEVERAGE}")
+    log(f"  FIXED_NOTIONAL_USD: ${FIXED_NOTIONAL_USD} {'(active — bypasses RISK_PCT)' if FIXED_NOTIONAL_USD > 0 else '(disabled)'}")
     log(f"  MAX_POS: {MAX_POSITIONS}, MAX_PENDING: {MAX_PENDING}")
     log(f"  POLL_INTERVAL_S: {POLL_INTERVAL_S}, SCAN_WORKERS: {SCAN_WORKERS}")
     log(f"  WALL_CONFLUENCE: {WALL_CONFLUENCE}, MIN_WALL_USD: ${MIN_WALL_USD}")
