@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreCog v8.28 — 50-coin universe + 48 MT4 tickers
+"""PreCog V1.0 — 50-coin universe + 48 MT4 tickers
 
 Dual signal engine:
   1. Internal BOS/pivot/RSI → per-ticker gated (73 configs)
@@ -2546,7 +2546,7 @@ PRECOG_NAV = '''<style>
 <a href="/enforce" data-page="enforce">Enforce</a>
 <a href="/experiment" data-page="experiment">Experiment</a>
 <div class="nav-sep"></div>
-<span class="nav-tag">v8.28 · phase 1</span>
+<span class="nav-tag">V1.0 · phase 1</span>
 </nav>
 <script>(function(){var p=location.pathname,c="";if(p==="/"||p==="")c="dashboard";else if(p.indexOf("/violations")===0||p==="/audit")c="violations";else if(p.indexOf("/audit/deep")===0)c="deep";else if(p.indexOf("/audit/elasticity")===0)c="elasticity";else if(p.indexOf("/shadow")===0)c="shadow";else if(p.indexOf("/enforce")===0)c="enforce";else if(p.indexOf("/experiment")===0)c="experiment";document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.getAttribute("data-page")===c)a.classList.add("current")})})();</script>
 '''
@@ -3208,7 +3208,7 @@ def health():
                     'pause_reason': ('wr' if _wr_fail else ('ev' if _ev_fail else None)) if _paused else None,
                 }
         except Exception: pass
-    return jsonify({'status':'ok','version':'v8.28',
+    return jsonify({'status':'ok','version':'V1.0',
                     'commit_live': _commit_short,
                     'disabled_engines': _disabled_engines_live() or None,
                     'webhook_security': {
@@ -11213,7 +11213,7 @@ state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
 
 def main():
     global state, _LAST_OPEN_TS
-    log(f"PreCog v8.28 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
+    log(f"PreCog V1.0 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
 
     # SURVIVAL GUARDS bootstrap: load per-coin WR from trades.csv
     try:
@@ -13336,7 +13336,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.28',
+        'equity': eq, 'version': 'V1.0',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
