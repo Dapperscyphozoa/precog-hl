@@ -27,6 +27,7 @@ try:
 except ImportError:
     pm_client = None
 
+import v10_blacklist  # 5-consec-loss runtime blacklist
 from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS, get_tier_number,
                           refresh_hl_volumes, get_volume_threshold, get_volume)
 from regime_gate import classify_regime, is_v10_allowed
@@ -643,6 +644,13 @@ def record_outcome(p, outcome, pnl_pct):
     if len(state['recent_trades']) > 20:
         state['recent_trades'] = state['recent_trades'][-20:]
     save_state()  # persist immediately so a mid-tick crash doesn't lose the outcome
+    # 5-consec-loss blacklist: track per-coin loss streaks. Loss = pnl_pct <= 0.
+    # When a coin hits BLACKLIST_LOSS_THRESHOLD (default 5) it is dropped from
+    # subsequent ticks until manually reset. Sticky across restarts.
+    try:
+        v10_blacklist.record_outcome(p['coin'], pnl_pct, outcome=outcome)
+    except Exception as _e:
+        log(f"  blacklist hook err: {_e}")
 
 
 def reconcile():
@@ -783,6 +791,13 @@ def tick():
     reconcile()
     refresh_hl_volumes()  # volume-driven wall threshold; rate-limited internally
     state['tick_count'] += 1
+    # Periodic blacklist visibility — log every 20 ticks
+    if state['tick_count'] % 20 == 1:
+        bl = v10_blacklist.get_state_snapshot()
+        if bl['blacklisted_count'] or bl['consec_losses']:
+            log(f"  blacklist: threshold={bl['threshold']} "
+                f"blacklisted={bl['blacklisted_count']} "
+                f"consec_losses={bl['consec_losses']}")
     state['last_tick_t'] = int(time.time()*1000)
 
     # Council Fix 3: regime gate. Classify once per tick from BTC 5m bars.
@@ -847,8 +862,13 @@ def tick():
             f"{bucket(lambda t: t.get('side')=='BUY', 'BUY')} "
             f"{bucket(lambda t: t.get('side')=='SELL', 'SELL')}")
 
-    coins_this_tick = coins_for_tick(state['tick_count'], COINS)
-    log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick (regime={state.get('regime','?')})")
+    coins_this_tick_raw = coins_for_tick(state['tick_count'], COINS)
+    coins_this_tick = v10_blacklist.filter_universe(coins_this_tick_raw)
+    blacklisted = v10_blacklist.get_blacklisted()
+    skipped = len(coins_this_tick_raw) - len(coins_this_tick)
+    log(f"Scanning {len(coins_this_tick)}/{len(COINS)} coins this tick "
+        f"(regime={state.get('regime','?')}, blacklisted={len(blacklisted)}"
+        f"{' skipped:'+str(skipped) if skipped else ''})")
 
     # Council Fix 3: skip framework if BTC is in trend regime — SMC's mean-reversion premise breaks
     if REGIME_GATE and not is_v10_allowed(state.get('regime', 'chop')):
