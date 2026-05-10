@@ -575,13 +575,114 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
         <a href="/experiment">Experiment · Promotion</a>
     </div>
 </div>
-<div class="subpage-placeholder macro">
-    <h2>MACRO</h2>
-    <p>// daily macro economic report — internal · national · global</p>
-    <div class="links">
-        <a href="#" style="opacity:0.5;pointer-events:none">MER backend not yet wired (placeholder)</a>
+<!-- MACRO PAGE — renders MER from portfolio-manager /mer/today -->
+<div class="subpage-placeholder macro" id="macro-page">
+    <h2 style="margin-bottom:8px">MACRO</h2>
+    <p style="margin-bottom:24px">// daily macro economic report — internal · national · global</p>
+    <div id="mer-meta" style="font-size:11px; opacity:0.5; letter-spacing:0.2em; margin-bottom:24px"></div>
+    <div id="mer-next-event" style="margin-bottom:32px"></div>
+    <div class="mer-grid">
+        <div class="mer-section">
+            <div class="mer-cat">INTERNAL</div>
+            <div id="mer-internal" class="mer-list">loading…</div>
+        </div>
+        <div class="mer-section">
+            <div class="mer-cat">NATIONAL</div>
+            <div id="mer-national" class="mer-list">loading…</div>
+        </div>
+        <div class="mer-section">
+            <div class="mer-cat">GLOBAL</div>
+            <div id="mer-global" class="mer-list">loading…</div>
+        </div>
     </div>
 </div>
+<style>
+.mer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 1200px; margin: 0 auto; text-align: left; }
+.mer-section { background: rgba(13,14,17,0.5); border: 1px solid var(--line); padding: 20px; }
+.mer-cat { font-family: 'JetBrains Mono', monospace; font-size: 10px; letter-spacing: 0.4em; color: var(--cyan); padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.mer-list { font-size: 12px; line-height: 1.5; }
+.mer-item { padding: 10px 0; border-bottom: 1px dashed rgba(200,204,212,0.08); }
+.mer-item:last-child { border-bottom: none; }
+.mer-item-title { color: var(--bone); font-weight: 400; margin-bottom: 4px; }
+.mer-item-title a { color: var(--bone); text-decoration: none; }
+.mer-item-title a:hover { color: var(--cyan); }
+.mer-item-meta { font-size: 10px; opacity: 0.5; letter-spacing: 0.1em; }
+.mer-item-summary { font-size: 11px; opacity: 0.7; margin-top: 4px; }
+.mer-internal-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed rgba(200,204,212,0.08); font-size: 12px; }
+.mer-internal-row:last-child { border-bottom: none; }
+.mer-internal-row .lbl { opacity: 0.6; }
+.mer-internal-row .val { color: var(--bone); }
+.mer-empty { opacity: 0.4; font-style: italic; padding: 20px 0; font-size: 11px; text-align: center; }
+.next-event-card { display: inline-flex; align-items: center; gap: 14px; padding: 12px 20px; border: 1px solid var(--cyan); background: rgba(0,229,255,0.04); font-size: 11px; letter-spacing: 0.18em; }
+.next-event-card .badge { color: var(--cyan); font-weight: 600; }
+.next-event-card .blackout { color: var(--loss); border-color: var(--loss); }
+@media (max-width: 900px) { .mer-grid { grid-template-columns: 1fr; } }
+</style>
+<script>
+(function(){
+    if (!document.body.matches('[data-view="macro"]')) return;
+    var PM_URL = (window.location.hostname.indexOf('localhost') !== -1) ?
+                 'http://localhost:10000' :
+                 'https://portfolio-manager-7df2.onrender.com';
+    function timeAgo(ms){
+        if (!ms) return '';
+        var diff = (Date.now() - ms) / 1000;
+        if (diff < 60) return Math.round(diff)+'s ago';
+        if (diff < 3600) return Math.round(diff/60)+'m ago';
+        if (diff < 86400) return Math.round(diff/3600)+'h ago';
+        return Math.round(diff/86400)+'d ago';
+    }
+    function renderInternal(items, el){
+        if (!items || !items.length) { el.innerHTML = '<div class="mer-empty">// no internal data</div>'; return; }
+        el.innerHTML = items.map(function(it){
+            return '<div class="mer-internal-row"><span class="lbl">'+it.label+'</span><span class="val">'+it.value+'</span></div>';
+        }).join('');
+    }
+    function renderNews(items, el){
+        if (!items || !items.length) { el.innerHTML = '<div class="mer-empty">// no items in window</div>'; return; }
+        el.innerHTML = items.map(function(it){
+            var meta = (it.source||'')+' · '+timeAgo(it.ts_ms);
+            var titleHtml = it.link ?
+                '<a href="'+it.link+'" target="_blank" rel="noopener">'+escapeHtml(it.title)+'</a>' :
+                escapeHtml(it.title);
+            var summaryHtml = it.summary ? '<div class="mer-item-summary">'+escapeHtml(it.summary)+'</div>' : '';
+            return '<div class="mer-item"><div class="mer-item-title">'+titleHtml+'</div><div class="mer-item-meta">'+meta+'</div>'+summaryHtml+'</div>';
+        }).join('');
+    }
+    function escapeHtml(s){ if (!s) return ''; return s.replace(/[&<>"']/g, function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+    function renderNextEvent(ne, el, blackout){
+        if (blackout && blackout.active) {
+            var ev = blackout.active_event || {};
+            el.innerHTML = '<div class="next-event-card blackout"><span class="badge">⛔ MACRO BLACKOUT</span><span>'+escapeHtml(ev.currency||'')+' · '+escapeHtml(ev.title||'')+' · ends in '+(ev.ends_min_from_now||'?')+' min</span></div>';
+            return;
+        }
+        if (!ne) { el.innerHTML = ''; return; }
+        var inHrs = ne.in_hours != null ? ne.in_hours.toFixed(1)+'h' : ne.in_min+'m';
+        el.innerHTML = '<div class="next-event-card"><span class="badge">NEXT TIER-1</span><span>'+escapeHtml(ne.currency||'')+' · '+escapeHtml(ne.title||'')+' · in '+inHrs+'</span></div>';
+    }
+    function load(){
+        Promise.all([
+            fetch(PM_URL+'/mer/today').then(function(r){return r.json();}).catch(function(){return null;}),
+            fetch(PM_URL+'/macro_blackout').then(function(r){return r.json();}).catch(function(){return null;}),
+        ]).then(function(results){
+            var snap = results[0], bl = results[1];
+            if (!snap || snap.error) {
+                document.getElementById('mer-meta').textContent = 'MER unavailable: '+(snap && snap.error || 'PM unreachable');
+                return;
+            }
+            document.getElementById('mer-meta').textContent =
+                'snapshot for '+snap.day+' · generated '+(snap.generated_ts ? timeAgo(snap.generated_ts) : '?');
+            renderNextEvent(snap.next_event, document.getElementById('mer-next-event'), bl);
+            renderInternal(snap.internal, document.getElementById('mer-internal'));
+            renderNews(snap.national, document.getElementById('mer-national'));
+            renderNews(snap.global, document.getElementById('mer-global'));
+        });
+    }
+    load();
+    // Refresh every 5 minutes while page is open
+    setInterval(load, 5 * 60 * 1000);
+})();
+</script>
 
 <!-- HERO -->
 <div class="hero">
@@ -957,8 +1058,10 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
 </div>
 
 <!-- ═══ SYSTEMS A–F · MOVED UP ═══ -->
-<!-- SYSTEMS A–F — UNIFORM PANELS -->
-<div data-section="engines" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
+<!-- SYSTEMS A–F — UNIFORM PANELS
+     Default hidden inline (display:none); CSS rule on body[data-view="engines"]
+     re-shows with display:grid !important. Prevents bleed onto dashboard view. -->
+<div data-section="engines" style="display: none; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
 
     <!-- SYSTEM A · PRECOG (multi-gate) -->
     <div class="panel">
@@ -1215,8 +1318,19 @@ async function loadDash() {
                 <div>Funding arb: <strong style="color:var(--oxide)">${d.funding_arb?.hl_coins||0}</strong></div>
             </div>`;
 
-        // Ticker
-        const tickerData = sorted.slice(0,8).map(p => {
+        // Ticker — dedupe by coin (multi-engine attribution can produce
+        // duplicate rows for the same coin; show one entry per coin with
+        // the worst loss / best gain row preserved)
+        const seen = new Set();
+        const tickerRows = [];
+        for (const p of sorted) {
+            const k = (p.coin || '') + '|' + (p.side || '');
+            if (seen.has(k)) continue;
+            seen.add(k);
+            tickerRows.push(p);
+            if (tickerRows.length >= 8) break;
+        }
+        const tickerData = tickerRows.map(p => {
             const cls = (p.upnl||0)>=0?'':'bear';
             const sign = (p.upnl||0)>=0?'+':'';
             return `<span class="${cls}"><strong>${p.coin} ${p.side}</strong>${sign}$${(p.upnl||0).toFixed(2)}</span>`;
