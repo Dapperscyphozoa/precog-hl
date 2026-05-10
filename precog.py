@@ -2936,9 +2936,10 @@ def whales_feed():
     """
     try:
         items = whale_display.get_recent(limit=20)
+        status = whale_display.status()
     except Exception as e:
         return jsonify({'items': [], 'err': str(e)})
-    return jsonify({'items': items, 'source': 'hl_public_ws'})
+    return jsonify({'items': items, 'source': 'hl_public_ws', 'status': status})
 
 @app.route('/news', methods=['GET'])
 def news_feed():
