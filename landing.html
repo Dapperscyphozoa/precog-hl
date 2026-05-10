@@ -123,15 +123,15 @@ body::after {
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 /* HERO */
-.hero { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; margin-bottom: 48px; position: relative; min-height: 480px; }
+.hero { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; margin-bottom: 32px; position: relative; min-height: 360px; max-height: 70vh; }
 .hero-text { display: flex; flex-direction: column; justify-content: center; position: relative; z-index: 3; }
 .hero-kicker { font-size: 10px; letter-spacing: 0.5em; color: var(--oxide); margin-bottom: 16px; text-transform: uppercase; }
-.hero-title { font-family: 'Cormorant Garamond', serif; font-size: clamp(56px, 7vw, 108px); font-weight: 300; line-height: 0.9; letter-spacing: -0.02em; margin-bottom: 24px; }
+.hero-title { font-family: 'Cormorant Garamond', serif; font-size: clamp(40px, 4.5vw, 80px); font-weight: 300; line-height: 0.9; letter-spacing: -0.02em; margin-bottom: 16px; }
 .hero-title em { font-style: italic; color: var(--oxide); }
 .hero-title .blood { color: var(--blood); font-weight: 600; }
-.hero-lede { font-size: 14px; line-height: 1.7; color: var(--chrome); max-width: 480px; margin-bottom: 32px; opacity: 0.85; }
-.hero-stats { display: flex; gap: 40px; margin-top: auto; padding-top: 24px; border-top: 1px solid var(--line); }
-.hero-stat-val { font-size: 32px; font-weight: 300; letter-spacing: -0.02em; color: var(--bone); font-family: 'Cormorant Garamond', serif; }
+.hero-lede { font-size: 12px; line-height: 1.6; color: var(--chrome); max-width: 440px; margin-bottom: 20px; opacity: 0.85; }
+.hero-stats { display: flex; gap: 32px; margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line); }
+.hero-stat-val { font-size: 24px; font-weight: 300; letter-spacing: -0.02em; color: var(--bone); font-family: 'Cormorant Garamond', serif; }
 .hero-stat-val.pos { color: var(--gain); }
 .hero-stat-val.neg { color: var(--blood); }
 .hero-stat-lbl { font-size: 9px; letter-spacing: 0.3em; opacity: 0.5; text-transform: uppercase; margin-top: 4px; }
