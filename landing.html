@@ -1300,6 +1300,9 @@ const PAPER_ENGINES = [
   { name: 'vol-squeeze-fade',         url: 'https://vol-squeeze-fade.onrender.com',         stage: 'paper' },
   { name: 'vol-squeeze-breakout-v1',  url: 'https://vol-squeeze-breakout-v1.onrender.com',  stage: 'paper' },
   { name: 'pairs-engine-v1',          url: 'https://pairs-engine-v1.onrender.com',          stage: 'paper' },
+  // V10 is a background_worker without HTTP. It pushes state to precog's
+  // /api/v10_state endpoint each tick. We fetch from there directly.
+  { name: 'V10',                      state_url: '/api/v10_state',                          stage: 'paper' },
 ];
 
 async function _fetchAllMids() {
@@ -1319,11 +1322,12 @@ async function _fetchPaperPositions() {
   // Fetch HL allMids + each paper engine /state in parallel.
   const [mids, ...stateResults] = await Promise.all([
     _fetchAllMids(),
-    ...PAPER_ENGINES.map(e =>
-      fetch(`${e.url}/state`, { signal: AbortSignal.timeout(8000) })
+    ...PAPER_ENGINES.map(e => {
+      const u = e.state_url || `${e.url}/state`;
+      return fetch(u, { signal: AbortSignal.timeout(8000) })
         .then(r => r.ok ? r.json() : null)
-        .catch(() => null)
-    ),
+        .catch(() => null);
+    }),
   ]);
 
   const positions = [];
