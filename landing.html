@@ -132,7 +132,7 @@ body::after {
 .hero-lede { font-size: 14px; line-height: 1.7; color: var(--chrome); max-width: 480px; margin-bottom: 32px; opacity: 0.85; }
 .hero-stats { display: flex; gap: 40px; margin-top: auto; padding-top: 24px; border-top: 1px solid var(--line); }
 .hero-stat-val { font-size: 32px; font-weight: 300; letter-spacing: -0.02em; color: var(--bone); font-family: 'Cormorant Garamond', serif; }
-.hero-stat-val.pos { color: var(--acid); }
+.hero-stat-val.pos { color: var(--gain); }
 .hero-stat-val.neg { color: var(--blood); }
 .hero-stat-lbl { font-size: 9px; letter-spacing: 0.3em; opacity: 0.5; text-transform: uppercase; margin-top: 4px; }
 
@@ -208,7 +208,7 @@ body::after {
 .pos-row:last-child { border-bottom: none; }
 .pos-coin { font-weight: 600; letter-spacing: 0.05em; }
 .pos-side { font-size: 9px; padding: 2px 6px; letter-spacing: 0.15em; display: inline-block; }
-.side-L { background: rgba(59,130,246,0.15); color: var(--acid); border: 1px solid rgba(59,130,246,0.3); }
+.side-L { background: rgba(16,185,129,0.15); color: var(--gain); border: 1px solid rgba(16,185,129,0.35); }
 .side-S { background: rgba(193,39,45,0.15); color: var(--blood); border: 1px solid rgba(193,39,45,0.3); }
 /* Stage badge — paper / shadow / live tag shown alongside side. Paper rows
    also get a faint background tint + amber left border so they cannot be
@@ -1204,7 +1204,7 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
     <!-- SIGNAL FEED -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Signal Feed · Live</div>
+            <div class="panel-title">Signal Feed · Live + Pending</div>
             <div class="panel-meta" id="sig-meta">—</div>
         </div>
         <div id="signals" style="max-height: 320px; overflow-y: auto;"></div>
@@ -1454,20 +1454,101 @@ async function loadDash() {
     } catch (e) { console.error(e); }
 }
 
+// Pull pending signals from paper engines (fired/extended/armed/pending stages):
+// these are the unfilled orders sitting in the engines' state machines waiting
+// for the entry condition to complete. Surfacing them in the Signal Feed shows
+// the user the queue of trades-in-progress, not just past fills.
+async function _fetchPaperPendingSignals() {
+    const ENGS = [
+        { name: 'vol-squeeze-fade',        url: 'https://vol-squeeze-fade.onrender.com' },
+        { name: 'vol-squeeze-breakout-v1', url: 'https://vol-squeeze-breakout-v1.onrender.com' },
+    ];
+    const results = await Promise.all(ENGS.map(e =>
+        Promise.all([
+            fetch(`${e.url}/state`,   { signal: AbortSignal.timeout(8000) }).then(r => r.ok ? r.json() : null).catch(() => null),
+            fetch(`${e.url}/signals?limit=8`, { signal: AbortSignal.timeout(8000) }).then(r => r.ok ? r.json() : null).catch(() => null),
+        ]).then(([state, sigs]) => ({ engine: e.name, state, sigs }))
+    ));
+
+    const out = [];
+    for (const r of results) {
+        // 1) State-machine pending stages (breakout has fired/extended/armed)
+        const stages = r.state && r.state.stages ? r.state.stages : {};
+        // For breakout: pending = signals with stage in {fired, extended, armed}
+        try {
+            if (r.sigs && Array.isArray(r.sigs.signals)) {
+                for (const s of r.sigs.signals) {
+                    const stage = (s.stage || '').toLowerCase();
+                    if (['fired','extended','armed','pending'].includes(stage)) {
+                        out.push({
+                            coin: s.coin,
+                            kind: 'PAPER',
+                            stage: stage.toUpperCase(),
+                            side: s.fade_direction || s.raw_direction || s.armed_side || '',
+                            entry: s.armed_entry_px || s.ref_price || s.bb_mid_px || null,
+                            engine: r.engine,
+                            ts: s.ts || s.created_ts || null,
+                        });
+                    }
+                }
+            }
+        } catch (e) {}
+        // 2) Open trades that are still 'pending_fill' (limit-order awaiting fill)
+        const opn = r.state && Array.isArray(r.state.open_trades) ? r.state.open_trades : [];
+        for (const t of opn) {
+            if (t.status === 'pending_fill' || t.status === 'pending') {
+                out.push({
+                    coin: t.coin,
+                    kind: 'PAPER',
+                    stage: 'PENDING',
+                    side: t.side,
+                    entry: t.entry_px,
+                    engine: r.engine,
+                    ts: t.ts_open || null,
+                });
+            }
+        }
+    }
+    return out;
+}
+
 async function loadSignals() {
     try {
-        const r = await fetch('/signals');
-        const d = await r.json();
-        const items = d.items || [];
-        document.getElementById('signals').innerHTML = items.map(s => {
+        // Live + paper pending in parallel
+        const [r, pendings] = await Promise.all([
+            fetch('/signals').then(x => x.json()).catch(() => ({ items: [] })),
+            _fetchPaperPendingSignals().catch(() => []),
+        ]);
+        const live = r.items || [];
+        const pending = pendings || [];
+        const total = live.length + pending.length;
+
+        const liveRows = live.map(s => {
             const cls = s.kind === 'OPEN' ? 'pnl-pos' : (s.kind === 'CLOSED' ? 'pnl-neg' : '');
             return `<div class="pos-row" style="grid-template-columns:70px 1fr auto;font-size:11px">
                 <div class="pos-coin">${s.coin}</div>
-                <div style="opacity:0.8">${s.kind} ${s.side || ''}</div>
+                <div style="opacity:0.8"><span class="stage-tag stage-live" style="margin-right:6px">LIVE</span>${s.kind} ${s.side || ''}</div>
                 <div class="${cls}" style="font-size:9px;opacity:0.7">${s.ts || ''}</div>
             </div>`;
-        }).join('') || '<div class="pos-row" style="opacity:0.5">// awaiting signals</div>';
-        document.getElementById('sig-meta').textContent = items.length + ' recent';
+        }).join('');
+
+        const pendRows = pending.map(s => {
+            const px = s.entry != null ? Number(s.entry).toPrecision(5) : '—';
+            const eng = s.engine ? `<br><span style="opacity:0.4;font-size:9px;letter-spacing:0.05em">${s.engine}</span>` : '';
+            return `<div class="pos-row is-paper" style="grid-template-columns:70px 1fr auto;font-size:11px">
+                <div class="pos-coin">${s.coin}${eng}</div>
+                <div style="opacity:0.8"><span class="stage-tag stage-paper" style="margin-right:6px">PAPER</span>${s.stage} ${s.side || ''} <span style="opacity:0.5">@ ${px}</span></div>
+                <div style="font-size:9px;opacity:0.55">unfilled</div>
+            </div>`;
+        }).join('');
+
+        document.getElementById('signals').innerHTML =
+            (liveRows + pendRows) ||
+            '<div class="pos-row" style="opacity:0.5">// no live or pending signals</div>';
+        const metaParts = [];
+        if (live.length)    metaParts.push(`${live.length} live`);
+        if (pending.length) metaParts.push(`${pending.length} pending`);
+        document.getElementById('sig-meta').textContent = metaParts.join(' · ') || '0 recent';
     } catch (e) {
         document.getElementById('signals').innerHTML = '<div class="pos-row" style="opacity:0.5">// loading</div>';
     }
