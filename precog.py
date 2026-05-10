@@ -2601,7 +2601,17 @@ def _load_violations_page():
 
 @app.route('/', methods=['GET'])
 @app.route('/landing', methods=['GET'])
+@app.route('/engines', methods=['GET'])
+@app.route('/system', methods=['GET'])
+@app.route('/macro', methods=['GET'])
 def landing():
+    """Single template for DASH | ENGINES | SYSTEM | MACRO views.
+    Inline script in landing.html reads location.pathname and sets
+    body[data-view=...]. CSS in landing.html shows/hides sections per view.
+    AUDIT (and /violations, /shadow, /enforce, /experiment) keep dedicated
+    handlers below — the AUDIT tab in the new 5-tab nav points to /audit
+    which is aliased to /violations by violations_audit().
+    """
     resp = Response(_load_landing(), mimetype='text/html')
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     resp.headers['Pragma'] = 'no-cache'
