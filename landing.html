@@ -1398,6 +1398,11 @@ async function _fetchPaperPositions() {
   PAPER_ENGINES.forEach((eng, idx) => {
     const state = stateResults[idx];
     if (!state || !Array.isArray(state.open_trades)) return;
+    // Engine self-reports its mode (live | paper | dry_run). When LIVE_TRADING=1
+    // is set on Render, mode_effective='live' overrides the hardcoded stage.
+    // Per-trade `mode` field also exists (live | paper) and takes priority for
+    // mixed-mode engines.
+    const engineMode = state.mode_effective || eng.stage;
     for (const t of state.open_trades) {
       const mid = parseFloat(mids[t.coin]);
       const entry = parseFloat(t.entry_px);
@@ -1407,6 +1412,7 @@ async function _fetchPaperPositions() {
       if (isFinite(mid) && isFinite(entry) && isFinite(size)) {
         upnl = (mid - entry) * size * (isLong ? 1 : -1);
       }
+      const tradeStage = t.mode || engineMode;
       positions.push({
         coin: t.coin,
         side: isLong ? 'L' : 'S',
@@ -1417,7 +1423,7 @@ async function _fetchPaperPositions() {
         tp: t.tp_px,
         sl: t.sl_px,
         engine: eng.name,
-        stage: eng.stage,
+        stage: tradeStage,
       });
     }
   });
