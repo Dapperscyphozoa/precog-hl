@@ -46,17 +46,20 @@ COINS = [
 _PRINTS = defaultdict(lambda: deque(maxlen=200))   # coin -> deque[(ts, side, usd, px, sz)]
 _LOCK = threading.Lock()
 _RUN = False
-_STATE = {'connected': False, 'last_msg_ts': 0, 'errors': 0, 'last_err': None}
+_STATE = {'connected': False, 'last_msg_ts': 0, 'errors': 0, 'last_err': None, 'msgs_total': 0, 'msgs_trades': 0, 'channels_seen': {}}
 
 
 def _on_msg(ws, msg):
     """Receive trade messages, filter to whale prints, store."""
     try:
+        _STATE['msgs_total'] += 1
+        _STATE['last_msg_ts'] = time.time()
         m = json.loads(msg)
-        ch = m.get('channel')
+        ch = m.get('channel', 'unknown')
+        _STATE['channels_seen'][ch] = _STATE['channels_seen'].get(ch, 0) + 1
         if ch != 'trades':
             return
-        _STATE['last_msg_ts'] = time.time()
+        _STATE['msgs_trades'] += 1
         data = m.get('data', [])
         if not isinstance(data, list):
             return
@@ -83,17 +86,25 @@ def _on_msg(ws, msg):
 
 
 def _on_open(ws):
-    """Subscribe to trades channel for every monitored coin."""
+    """Subscribe to trades channel for each monitored coin.
+
+    HL's WS accepts multiple subscriptions on a single connection. We send
+    them with a small delay between each to stay polite — sending 32 in
+    a tight loop on connect can occasionally trigger rate-limiting.
+    """
     _STATE['connected'] = True
-    for coin in COINS:
-        try:
-            ws.send(json.dumps({
-                'method': 'subscribe',
-                'subscription': {'type': 'trades', 'coin': coin},
-            }))
-        except Exception as e:
-            _STATE['errors'] += 1
-            _STATE['last_err'] = f'subscribe {coin}: {e}'
+    def _subscribe_all():
+        for coin in COINS:
+            try:
+                ws.send(json.dumps({
+                    'method': 'subscribe',
+                    'subscription': {'type': 'trades', 'coin': coin},
+                }))
+                time.sleep(0.05)  # 50ms between subscribes
+            except Exception as e:
+                _STATE['errors'] += 1
+                _STATE['last_err'] = f'subscribe {coin}: {e}'
+    threading.Thread(target=_subscribe_all, daemon=True).start()
 
 
 def _on_err(ws, e):
@@ -169,4 +180,9 @@ def status():
         'tracked_coins': len(_PRINTS),
         'active_coins': active,
         'total_prints': total,
+        'msgs_total': _STATE['msgs_total'],
+        'msgs_trades': _STATE['msgs_trades'],
+        'channels_seen': dict(_STATE['channels_seen']),
+        'threshold_usd': WHALE_USD,
+        'subscribed_coins': len(COINS),
     }
