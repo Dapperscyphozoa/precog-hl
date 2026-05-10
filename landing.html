@@ -19,6 +19,8 @@
     --acid: #3b82f6;          /* was #3b82f6 (acid green) — now electric blue (PSYCHO PM v2 theme) */
     --acid-bright: #60a5fa;   /* lighter blue for highlights/hover */
     --acid-deep: #1d4ed8;     /* darker for shadows */
+    --heat: #b8ff2f;          /* preserved lime for orderbook bids + WR heatmap (semantic green for "good") */
+    --heat-soft: rgba(184,255,47,0.4);
     --oxide: #d97706;
     --cyan: #00e5ff;
     --pulse: #ff0055;
@@ -1250,7 +1252,7 @@ async function loadOrderbook() {
             if (y < 0 || y > H) return;
             const w = (b.usd / maxUsd) * 800;
             const intensity = Math.min(1, b.usd / maxUsd);
-            svg += `<rect x="${1000-w}" y="${y-3}" width="${w}" height="6" fill="rgba(59,130,246,${0.3 + intensity*0.7})" />`;
+            svg += `<rect x="${1000-w}" y="${y-3}" width="${w}" height="6" fill="rgba(184,255,47,${0.3 + intensity*0.7})" />`;
         });
         // Ask bars
         asks.forEach(a => {
@@ -1322,11 +1324,11 @@ async function loadHeatmap() {
 
         document.getElementById('heatmap').innerHTML = rows.map(s => {
             let bg;
-            if (s.wr >= 70) bg = 'rgba(59,130,246,0.4)';
-            else if (s.wr >= 55) bg = 'rgba(59,130,246,0.15)';
+            if (s.wr >= 70) bg = 'rgba(184,255,47,0.4)';
+            else if (s.wr >= 55) bg = 'rgba(184,255,47,0.15)';
             else if (s.wr >= 40) bg = 'rgba(217,118,6,0.2)';
             else bg = 'rgba(193,39,45,0.3)';
-            const pnlColor = s.pnl >= 0 ? 'var(--acid)' : 'var(--hot)';
+            const pnlColor = s.pnl >= 0 ? 'var(--heat)' : 'var(--blood)';
             return `<div style="padding:8px 6px;background:${bg};border:1px solid var(--line);text-align:center">
                 <div style="font-weight:600;font-size:11px">${s.coin}</div>
                 <div style="font-size:9px;opacity:0.7">${s.wr.toFixed(0)}% · ${s.n}</div>
