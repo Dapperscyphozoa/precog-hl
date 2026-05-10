@@ -42,21 +42,25 @@ except ImportError:
 
 _bl_last_tick = [0.0]
 # ═══════════════════════════════════════════════════════
-# CONFIG — R3 (locked from sweep results)
+# CONFIG — R3.2 (28-coin/60d HL backtest, n=18, WR 44.4%, PF 1.29, +2.0R)
+# Previous R3.1 (htf_displace=0.8) backtested at WR 19%, PF 0.50, -6.0R.
+# Each value env-overridable for rapid Render config changes.
 # ═══════════════════════════════════════════════════════
 PARAMS = {
-    'htf_lb': 5,
-    'htf_displace': 0.8,
-    'htf_max_age': 540,
-    'ltf_lb': 4,
-    'sweep_vol': 1.0,
-    'mss_vol': 1.0,
-    'displace': 2.0,
-    'sl_buf_pct': 0.0003,
-    'approach_pct': 0.03,
-    'rr_min': 2.25,
-    'timeout_bars': 40,
+    'htf_lb':        int(os.environ.get('SMCV2_HTF_LB', '5')),
+    'htf_displace':  float(os.environ.get('SMCV2_HTF_DISPLACE', '1.75')),  # was 0.8 — back to R3
+    'htf_max_age':   int(os.environ.get('SMCV2_HTF_MAX_AGE', '540')),
+    'ltf_lb':        int(os.environ.get('SMCV2_LTF_LB', '4')),
+    'sweep_vol':     float(os.environ.get('SMCV2_SWEEP_VOL', '1.0')),
+    'mss_vol':       float(os.environ.get('SMCV2_MSS_VOL', '1.0')),
+    'displace':      float(os.environ.get('SMCV2_DISPLACE', '2.0')),
+    'sl_buf_pct':    float(os.environ.get('SMCV2_SL_BUF_PCT', '0.0003')),
+    'approach_pct':  float(os.environ.get('SMCV2_APPROACH_PCT', '0.02')),  # was 0.03
+    'rr_min':        float(os.environ.get('SMCV2_RR_MIN', '2.25')),
+    'timeout_bars':  int(os.environ.get('SMCV2_TIMEOUT_BARS', '80')),       # was 40
 }
+# MIN_SL_PCT read at use-site (lines ~355, ~366). Default raised 0.005 → 0.008.
+os.environ.setdefault('SMCV2_MIN_SL_PCT', '0.008')
 
 # Coins with strict-negative outcomes in 52-day backtest (n>=2, 0 wins)
 BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC', 'BLAST'}
