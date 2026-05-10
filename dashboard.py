@@ -33,7 +33,7 @@ STATE_PATH    = os.environ.get('DASH_STATE_PATH', '/var/data/dashboard_state.jso
 COMMIT        = os.environ.get('RENDER_GIT_COMMIT', 'dev')[:7]
 
 # Engines we expect (defines panel order on the UI)
-ENGINES = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'pool-engine']
+ENGINES = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'pool-engine', 'V10', 'vol-squeeze-fade']
 
 # ────────────────────────────────────────────────────────────────
 # State cache (thread-safe)
@@ -365,14 +365,17 @@ html, body { margin:0; padding:0; background: var(--bg); color: var(--fg);
 
 <script>
 const ENGINES_LABELS = {
-  'multi-gate': 'MULTI-GATE  ·  v8.28 confluence',
-  'smc-v1':     'SMC v1  ·  long-only',
-  'smc-v2':     'SMC v2  ·  R3 strict',
-  'smc-loose':  'SMC-LOOSE  ·  R-1_max',
-  'lsr':        'LSR  ·  liquidity sweep reversal',
-  'brk':        'BRK  ·  break+retest continuation',
-  'pool-arch-rev':  'POOL-ARCH (REV)  ·  UZT reversal leg',
-  'pool-arch-cont': 'POOL-ARCH (CONT) ·  UZT continuation leg'
+  'multi-gate':       'MULTI-GATE  ·  v8.28 confluence',
+  'smc-v1':           'SMC v1  ·  long-only',
+  'smc-v2':           'SMC v2  ·  R3 strict',
+  'smc-loose':        'SMC-LOOSE  ·  R-1_max',
+  'lsr':              'LSR  ·  liquidity sweep reversal',
+  'brk':              'BRK  ·  break+retest continuation',
+  'pool-arch-rev':    'POOL-ARCH (REV)  ·  UZT reversal leg',
+  'pool-arch-cont':   'POOL-ARCH (CONT) ·  UZT continuation leg',
+  'pool-engine':      'POOL-ENGINE  ·  legacy pool runner',
+  'V10':              'V10  ·  SMC sweep-reversal',
+  'vol-squeeze-fade': 'VOL-SQUEEZE FADE  ·  contraction reversal'
 };
 
 function fmtUsd(n, opts={}) {
