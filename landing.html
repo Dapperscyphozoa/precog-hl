@@ -1547,7 +1547,7 @@ async function loadHeatmap() {
 
 async function loadEngines() {
     try {
-        const r = await fetch('/engines');
+        const r = await fetch('/api/engines');
         const d = await r.json();
         const ages = d.venue_ages || {};
         const render = (container, obj, labels = {}, showAge = null) => {
