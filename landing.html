@@ -1045,8 +1045,8 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
 
 <!-- METRICS BAR -->
 <div class="metrics-bar">
-    <div class="metric-cell"><div class="metric-val" id="m-venues">4</div><div class="metric-lbl">Venues</div></div>
-    <div class="metric-cell"><div class="metric-val" id="m-coins">91</div><div class="metric-lbl">Universe</div></div>
+    <div class="metric-cell"><div class="metric-val" id="m-venues">—</div><div class="metric-lbl">Venues</div></div>
+    <div class="metric-cell"><div class="metric-val" id="m-coins">—</div><div class="metric-lbl">Universe</div></div>
     <div class="metric-cell"><div class="metric-val" id="m-walls">0</div><div class="metric-lbl">Verified Walls</div></div>
     <div class="metric-cell"><div class="metric-val" id="m-whales">0</div><div class="metric-lbl">Whale Prints/h</div></div>
     <div class="metric-cell"><div class="metric-val" id="m-funding">0</div><div class="metric-lbl">Funding Cached</div></div>
@@ -1385,6 +1385,9 @@ async function loadDash() {
         document.getElementById('m-whales').textContent = d.whale?.total_whales || 0;
         document.getElementById('m-funding').textContent = d.funding_cached || 0;
         document.getElementById('m-risk').textContent = ((d.risk_ladder?.risk || 0.04)*100).toFixed(0) + '%';
+        // Universe size — was hardcoded "91" (stale). Reads d.universe_size now (full HL universe).
+        const mc = document.getElementById('m-coins');
+        if (mc && d.universe_size != null) mc.textContent = d.universe_size;
 
         // Positions
         const posDiv = document.getElementById('positions');
@@ -1723,6 +1726,9 @@ async function loadEngines() {
         const r = await fetch('/api/engines');
         const d = await r.json();
         const ages = d.venue_ages || {};
+        // Venues count — was hardcoded "4" (stale). Reads from /api/engines.venues now.
+        const mv = document.getElementById('m-venues');
+        if (mv && d.venues) mv.textContent = Object.keys(d.venues).length;
         const render = (container, obj, labels = {}, showAge = null) => {
             document.getElementById(container).innerHTML = Object.entries(obj).map(([k, live]) => {
                 const name = labels[k] || k.replace(/_/g, '·');
