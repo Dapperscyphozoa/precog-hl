@@ -28,6 +28,10 @@ except ImportError:
     pm_client = None
 
 import v10_blacklist  # 5-consec-loss runtime blacklist
+try:
+    import dashboard_push  # heartbeat to engine_dashboard
+except ImportError:
+    dashboard_push = None
 from coin_tiers import (DepthBaseline, get_tier, coins_for_tick, ALL_COINS, get_tier_number,
                           refresh_hl_volumes, get_volume_threshold, get_volume)
 from regime_gate import classify_regime, is_v10_allowed
@@ -990,6 +994,35 @@ def main():
     load_state()
     global EXCHANGE
     EXCHANGE = init_sdk()
+
+    # Dashboard heartbeat — push state to engine_dashboard every 60s.
+    # No-op if dashboard_push isn't importable or DASH_URL isn't set.
+    if dashboard_push is not None:
+        def _state_getter():
+            return {
+                'positions':    state.get('positions', {}),
+                'history':      state.get('recent_trades', []),
+                'scan_count':   state.get('tick_count', 0),
+                'last_scan_ts': state.get('last_tick_t', 0),
+            }
+        def _config_getter():
+            return {
+                'live':           LIVE,
+                'sizing_mode':    'fixed' if FIXED_NOTIONAL_USD > 0 else 'risk_pct',
+                'notional_usd':   FIXED_NOTIONAL_USD if FIXED_NOTIONAL_USD > 0 else None,
+                'max_concurrent': MAX_POSITIONS,
+            }
+        try:
+            dashboard_push.start_heartbeat(
+                engine_name='V10',
+                state_getter=_state_getter,
+                config_getter=_config_getter,
+                interval_sec=60,
+                log_fn=log,
+            )
+            log('[dashboard heartbeat] V10 wired')
+        except Exception as e:
+            log(f'[dashboard heartbeat] start failed: {e}')
     while True:
         try: tick()
         except Exception as e:
