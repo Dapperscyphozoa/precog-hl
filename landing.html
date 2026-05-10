@@ -377,20 +377,66 @@ body::after {
 }
 .pm-gate-card {
   position: relative;
-  padding: 9px 10px 9px 10px;
+  padding: 0;
   border: 1px solid var(--line);
   background: rgba(0,0,0,0.4);
   min-height: 64px;
-  transition: border-color 0.15s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
-.pm-gate-card:hover { border-color: var(--acid); }
+.pm-gate-card:hover {
+  border-color: var(--acid);
+  box-shadow: 0 0 12px rgba(59,130,246,0.15);
+}
+/* Flux image — half the card (top), photoreal biomech portrait */
+.pm-gate-card .pm-gate-img {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 130 / 80;
+  background: var(--steel);
+  overflow: hidden;
+}
+.pm-gate-card .pm-gate-img img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  display: block;
+  filter: contrast(1.05) saturate(0.85) brightness(0.85);
+  transition: filter 0.4s ease, transform 0.6s ease;
+}
+.pm-gate-card:hover .pm-gate-img img {
+  filter: contrast(1.15) saturate(1.0) brightness(0.95);
+  transform: scale(1.04);
+}
+.pm-gate-card .pm-gate-img-overlay {
+  position: absolute; inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(7,8,10,0.0) 0%, rgba(7,8,10,0.0) 60%, rgba(7,8,10,0.85) 100%),
+    repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(59,130,246,0.03) 2px, rgba(59,130,246,0.03) 3px),
+    radial-gradient(ellipse at 70% 30%, rgba(59,130,246,0.08), transparent 60%);
+  mix-blend-mode: screen;
+}
+.pm-gate-card.off .pm-gate-img img {
+  filter: contrast(0.95) saturate(0.25) brightness(0.5);
+}
+.pm-gate-card.off .pm-gate-img-overlay {
+  background:
+    linear-gradient(180deg, rgba(7,8,10,0.4) 0%, rgba(7,8,10,0.0) 50%, rgba(7,8,10,0.9) 100%),
+    radial-gradient(ellipse at center, rgba(193,39,45,0.12), transparent 70%);
+}
+/* Gate text body — bottom half */
+.pm-gate-card .pm-gate-body {
+  padding: 7px 9px 8px 9px;
+}
 .pm-gate-card .pm-gate-name {
   font-size: 9px;
   letter-spacing: 0.18em;
   color: var(--chrome);
   text-transform: uppercase;
   line-height: 1.2;
-  margin-bottom: 7px;
+  margin-bottom: 5px;
   font-weight: 500;
   word-break: break-all;
 }
@@ -405,18 +451,20 @@ body::after {
 .pm-gate-card.off .pm-gate-status { color: var(--bone); opacity: 0.55; }
 .pm-gate-card .pm-gate-dot {
   position: absolute;
-  top: 9px; right: 9px;
+  top: 7px; right: 7px;
   width: 7px; height: 7px;
   border-radius: 50%;
+  z-index: 2;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
 }
 .pm-gate-card.on .pm-gate-dot {
   background: var(--acid);
-  box-shadow: 0 0 6px var(--glow);
+  box-shadow: 0 0 6px var(--glow), 0 0 0 1px rgba(0,0,0,0.6);
   animation: pulse 2s ease-in-out infinite;
 }
 .pm-gate-card.off .pm-gate-dot {
   background: var(--blood);
-  opacity: 0.5;
+  opacity: 0.6;
 }
 
 .pm-rail-foot {
@@ -1711,14 +1759,94 @@ function _fmtGateName(name) {
   return String(name).replace(/_/g, '·');
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Flux/Pollinations biomech portraits per gate.
+//
+// Each precog internal gate (signal engine / guard / venue / sizing rule)
+// gets a unique photoreal biomech image rendered by Flux at 130×80 to fit
+// the 2-up card grid. The image is tied to the gate's role, not just its
+// name — a wall-bounce signal looks like a hydraulic ram, a BTC-correlation
+// guard looks like a coupling, a Binance venue looks like an order-book
+// console etc.
+//
+// Stable seed (salt 'v3-blue' to invalidate prior caches and align to the
+// blue theme palette). Browser lazy-loads + decodes async; first paint of
+// the rail is instant, images stream in after.
+// ───────────────────────────────────────────────────────────────────────
+const FLUX_BASE = 'https://image.pollinations.ai/prompt/';
+const FLUX_PARAMS = '?model=flux&width=130&height=80&nologo=true&enhance=false';
+const FLUX_BASE_PROMPT =
+  'photorealistic dark biomechanical industrial machine, intricate precision metal alloys, ' +
+  'electric blue accent glow, dramatic side lighting, dystopian terminal aesthetic, ' +
+  'macro lens, cinematic, 8k';
+
+const _gatePrompt = (group, name) => {
+  const n = String(name).toUpperCase();
+  // SIGNAL ENGINES — each looks like a different sensing/firing apparatus
+  if (group === 'SIGNAL ENGINES') {
+    if (n.includes('CVD'))         return FLUX_BASE_PROMPT + ', cumulative volume divergence detector, layered glass plates with flowing particles, ' + n;
+    if (n.includes('FUNDING_MR'))  return FLUX_BASE_PROMPT + ', funding mean-reversion oscillator, twin compressed coils balancing, ' + n;
+    if (n.includes('LIQ'))         return FLUX_BASE_PROMPT + ', liquidation cascade detector, chained explosive charges in sequence, ' + n;
+    if (n.includes('PIVOT'))       return FLUX_BASE_PROMPT + ', pivot point sensor, geared rotational joint with precision dials, ' + n;
+    if (n.includes('PULLBACK'))    return FLUX_BASE_PROMPT + ', pullback retracement engine, recoiling mechanical spring assembly, ' + n;
+    if (n.includes('WALL_ABSORB')) return FLUX_BASE_PROMPT + ', order-wall absorption chamber, dampened hydraulic shield panel, ' + n;
+    if (n.includes('WALL_BNC'))    return FLUX_BASE_PROMPT + ', kinetic wall-bounce piston, hydraulic ram, motion blur, ' + n;
+    if (n.includes('WALL_EXH'))    return FLUX_BASE_PROMPT + ', wall exhaustion sensor, decaying glow filaments, ' + n;
+    return FLUX_BASE_PROMPT + ', generic signal sensor module, ' + n;
+  }
+  // GUARDS — protective/filtering apparatus
+  if (group === 'GUARDS') {
+    if (n.includes('ATR'))         return FLUX_BASE_PROMPT + ', ATR volatility threshold gauge, calibrated pressure dial, ' + n;
+    if (n.includes('BTC_CORR'))    return FLUX_BASE_PROMPT + ', BTC correlation coupling, twin shafts linked by gearbelt, ' + n;
+    if (n.includes('CHASE'))       return FLUX_BASE_PROMPT + ', anti-chase cooldown latch, locked safety bolt, ' + n;
+    if (n.includes('DD'))          return FLUX_BASE_PROMPT + ', drawdown circuit breaker, heavy-duty trip switch in red enclosure, ' + n;
+    if (n.includes('FUNDING'))     return FLUX_BASE_PROMPT + ', funding cost filter, brass fluid-flow regulator, ' + n;
+    if (n.includes('NEWS'))        return FLUX_BASE_PROMPT + ', news-event blackout filter, shielded radio receiver, ' + n;
+    if (n.includes('POS_CAPS'))    return FLUX_BASE_PROMPT + ', position-cap clamp, mechanical jaw with measurement scale, ' + n;
+    if (n.includes('SPOOF'))       return FLUX_BASE_PROMPT + ', spoof-fade detector, frosted lens with phantom traces, ' + n;
+    if (n.includes('V3_TREND'))    return FLUX_BASE_PROMPT + ', V3 trend gauge, three stacked aligned needles, ' + n;
+    return FLUX_BASE_PROMPT + ', generic guard filter module, ' + n;
+  }
+  // VENUES — exchange terminals / order-book consoles
+  if (group === 'VENUES') {
+    return FLUX_BASE_PROMPT + ', exchange order-book terminal console with brushed metal bezel and engraved ' + n + ' logo plate';
+  }
+  // SIZING
+  if (group === 'SIZING') {
+    if (n.includes('CONF'))        return FLUX_BASE_PROMPT + ', confidence-based position sizer, weighted balance scale with brass disks, ' + n;
+    return FLUX_BASE_PROMPT + ', position-sizing calibration apparatus, ' + n;
+  }
+  return FLUX_BASE_PROMPT + ', precog internal gate module, ' + name;
+};
+
+const _gateSeed = (group, name) => {
+  const SALT = 'v3-blue';
+  const k = group + ':' + name + ':' + SALT;
+  let h = 0;
+  for (let i = 0; i < k.length; i++) h = ((h << 5) - h + k.charCodeAt(i)) | 0;
+  return Math.abs(h) % 1000000;
+};
+
+const _gateFluxUrl = (group, name) => {
+  const p = encodeURIComponent(_gatePrompt(group, name));
+  return FLUX_BASE + p + FLUX_PARAMS + '&seed=' + _gateSeed(group, name);
+};
+
 function _renderGateGroup(label, items, accentClass = '') {
   const cards = Object.entries(items).map(([name, on]) => {
     const cls = on ? 'pm-gate-card on' : 'pm-gate-card off';
     const status = on ? 'LIVE' : 'OFF';
+    const imgUrl = _gateFluxUrl(label, name);
     return `
       <div class="${cls}">
-        <div class="pm-gate-name">${_fmtGateName(name)}</div>
-        <div class="pm-gate-status">${status}</div>
+        <div class="pm-gate-img" aria-hidden="true">
+          <img src="${imgUrl}" alt="" loading="lazy" decoding="async" />
+          <span class="pm-gate-img-overlay"></span>
+        </div>
+        <div class="pm-gate-body">
+          <div class="pm-gate-name">${_fmtGateName(name)}</div>
+          <div class="pm-gate-status">${status}</div>
+        </div>
         <span class="pm-gate-dot"></span>
       </div>`;
   }).join('');
