@@ -212,8 +212,7 @@ body::after {
 .side-S { background: rgba(193,39,45,0.15); color: var(--blood); border: 1px solid rgba(193,39,45,0.3); }
 .pos-size { font-size: 10px; opacity: 0.6; text-align: right; }
 .pos-pnl { font-family: 'JetBrains Mono', monospace; font-weight: 600; text-align: right; min-width: 80px; }
-.pnl-pos { color: var(--acid); }
-.pnl-neg { color: var(--blood); }
+/* .pnl-pos / .pnl-neg defined globally above with --gain/--loss (proper green/red). */
 
 /* NEWS */
 .news-item { padding: 12px 0; border-bottom: 1px dashed var(--line); }
@@ -295,7 +294,7 @@ body::after {
         </div>
         <div>
             <div class="logo-text">PSYCHO PM</div>
-            <div class="logo-sub">TERMINAL · CYBER · v8.28</div>
+            <div class="logo-sub">TERMINAL · CYBER · V1.0</div>
         </div>
     </div>
     <div class="status-cluster">
@@ -555,7 +554,7 @@ body::after {
 <a href="/system" data-page="system">System</a>
 <a href="/macro" data-page="macro">Macro</a>
 <div class="nav-sep"></div>
-<span class="nav-tag">v8.29 · phase 1</span>
+<span class="nav-tag">V1.0 · phase 1</span>
 </nav>
 <script>(function(){var p=location.pathname,c="",v="dash";
 if(p==="/"||p===""){c="dashboard";v="dash";}
@@ -1004,7 +1003,7 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
                 <!-- Technical labels -->
                 <g font-family="JetBrains Mono" font-size="9" fill="#c8ccd4" opacity="0.6" letter-spacing="2">
                     <text x="50" y="90">SYS-01</text>
-                    <text x="520" y="90">v8.28</text>
+                    <text x="520" y="90">V1.0</text>
                     <text x="50" y="540">PRECOG</text>
                     <text x="490" y="540">LIVE</text>
                 </g>
@@ -2045,7 +2044,7 @@ async function loadPMRail() {
   const list = document.getElementById('pm-rail-list');
   if (!list) return;
   // Use same-origin /engines (precog itself returns it)
-  const e = await _fetchJSON('/engines');
+  const e = await _fetchJSON('/api/engines');
   if (e.__err) {
     list.innerHTML = `<div style="padding:24px 14px;font-size:10px;letter-spacing:0.2em;color:var(--blood);text-transform:uppercase;">// /engines unreachable<br>${e.__err}</div>`;
     return;
