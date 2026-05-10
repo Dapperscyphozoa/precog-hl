@@ -30,7 +30,7 @@ try:
 except ImportError:
     websocket = None
 
-WHALE_USD = 100_000
+WHALE_USD = 25_000
 WS_URL = 'wss://api.hyperliquid.xyz/ws'
 
 # Coins to monitor. Subset of HL universe that consistently has whale-sized
