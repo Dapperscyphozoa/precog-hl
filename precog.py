@@ -9946,6 +9946,58 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 # Reconciler-internal hard halt (3+ unsafe cycles) — still respected
                 if hash(coin + str(int(time.time() / 300))) % 10 == 0:
                     log(f"{coin} ENTRY-LIMITER halted: persistent drift across cycles")
+                # 2026-05-10: SHADOW EXEMPTION — wall_absorb shadow mode runs
+                # signal generation only, never dispatches a trade. Run it now,
+                # then return. Other engines stay halted.
+                if os.environ.get('WALL_ABSORB_SHADOW', '0') == '1' and \
+                   os.environ.get('WALL_ABSORB_ENABLED', '0') != '1':
+                    try:
+                        _wa_regime = 'unknown'
+                        try:
+                            import regime_detector as _rd_wash
+                            _wa_regime = _rd_wash.get_regime() or 'unknown'
+                        except Exception: pass
+                        cur_px = get_mid(coin)
+                        if cur_px:
+                            wa_side, wa_ctx = wall_absorption.check(coin, cur_px, _wa_regime, 0)
+                            if wa_side and wa_ctx:
+                                _wa_wall_px = float(wa_ctx.get('wall_price', cur_px))
+                                _wa_bb_mid  = float(wa_ctx.get('bb_mid', cur_px))
+                                if wa_side == 'BUY':
+                                    _wa_sl_px = _wa_wall_px * 0.995
+                                    _wa_tp_px = cur_px + 1.5 * (_wa_bb_mid - cur_px)
+                                else:
+                                    _wa_sl_px = _wa_wall_px * 1.005
+                                    _wa_tp_px = cur_px - 1.5 * (cur_px - _wa_bb_mid)
+                                _wa_record = {
+                                    'ts_ms': int(time.time() * 1000),
+                                    'coin': coin, 'side': wa_side,
+                                    'entry_px': cur_px,
+                                    'sl_px': round(_wa_sl_px, 8),
+                                    'tp_px': round(_wa_tp_px, 8),
+                                    'sl_pct': round(abs(_wa_sl_px - cur_px) / cur_px * 100, 3),
+                                    'tp_pct': round(abs(_wa_tp_px - cur_px) / cur_px * 100, 3),
+                                    'wall_price': _wa_wall_px,
+                                    'wall_usd':   wa_ctx.get('wall_usd'),
+                                    'wall_decay_pct': wa_ctx.get('wall_decay_pct'),
+                                    'bb_position': wa_ctx.get('bb_position'),
+                                    'bb_mid': _wa_bb_mid,
+                                    'regime': _wa_regime,
+                                    'distance_pct': wa_ctx.get('distance_pct'),
+                                    'engine': 'WALL_ABSORB',
+                                    'note': 'fired-during-halt-exemption',
+                                }
+                                for _wa_path in ('/var/data/wall_absorb_shadow.jsonl', '/tmp/wall_absorb_shadow.jsonl'):
+                                    try:
+                                        with open(_wa_path, 'a') as _wf:
+                                            _wf.write(json.dumps(_wa_record) + '\n')
+                                        break
+                                    except Exception: continue
+                                log(f"WALL-ABSORPTION SHADOW {coin} {wa_side} entry={cur_px} "
+                                    f"SL={_wa_sl_px:.6f} TP={_wa_tp_px:.6f} "
+                                    f"({wa_ctx.get('bb_position')} decay={wa_ctx.get('wall_decay_pct')}%)")
+                    except Exception as _wa_he:
+                        log(f"wall_absorb shadow-during-halt err {coin}: {_wa_he}")
                 return
             if limiter == 'reduced':
                 # Scale risk_mult down by 50% when drift degraded (1-5%)
