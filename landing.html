@@ -451,6 +451,28 @@ body::after {
   filter: contrast(1.05) saturate(0.85) brightness(0.85);
   transition: filter 0.4s ease, transform 0.6s ease;
 }
+/* Venue cards show real exchange favicons instead of biomech images.
+   Logos need contain (not cover) + padding + plain dark bg + no biomech filter. */
+.pm-gate-card[data-group="VENUES"] .pm-gate-img {
+  background: #0a0d12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pm-gate-card[data-group="VENUES"] .pm-gate-img img {
+  width: auto;
+  height: 70%;
+  max-width: 70%;
+  object-fit: contain;
+  filter: none;
+}
+.pm-gate-card[data-group="VENUES"]:hover .pm-gate-img img {
+  filter: brightness(1.15);
+  transform: none;
+}
+.pm-gate-card[data-group="VENUES"] .pm-gate-img-overlay {
+  background: linear-gradient(180deg, transparent 0%, transparent 65%, rgba(7,8,10,0.7) 100%);
+}
 .pm-gate-card:hover .pm-gate-img img {
   filter: contrast(1.15) saturate(1.0) brightness(0.95);
   transform: scale(1.04);
@@ -2015,13 +2037,32 @@ const _gateFluxUrl = (group, name) => {
   return FLUX_BASE + p + FLUX_PARAMS + '&seed=' + _gateSeed(group, name);
 };
 
+// Venue logos via Google S2 favicon service — public, universal, free.
+// Returns a 128px PNG of each exchange's published favicon, which is the
+// brand mark each exchange chose to display in browser tabs. Used here
+// purely to identify which venue is which on the dashboard (nominative
+// use); not endorsement.
+const VENUE_DOMAINS = {
+  BINANCE: 'binance.com',
+  BYBIT: 'bybit.com',
+  BITGET: 'bitget.com',
+  COINBASE: 'coinbase.com',
+  KRAKEN: 'kraken.com',
+  OKX: 'okx.com',
+};
+const _venueLogoUrl = (name) => {
+  const domain = VENUE_DOMAINS[String(name).toUpperCase()];
+  if (!domain) return _gateFluxUrl('VENUES', name);  // unknown venue → fallback
+  return `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+};
+
 function _renderGateGroup(label, items, accentClass = '') {
   const cards = Object.entries(items).map(([name, on]) => {
     const cls = on ? 'pm-gate-card on' : 'pm-gate-card off';
     const status = on ? 'LIVE' : 'OFF';
-    const imgUrl = _gateFluxUrl(label, name);
+    const imgUrl = label === 'VENUES' ? _venueLogoUrl(name) : _gateFluxUrl(label, name);
     return `
-      <div class="${cls}">
+      <div class="${cls}" data-group="${label}">
         <div class="pm-gate-img" aria-hidden="true">
           <img src="${imgUrl}" alt="" loading="lazy" decoding="async" />
           <span class="pm-gate-img-overlay"></span>
