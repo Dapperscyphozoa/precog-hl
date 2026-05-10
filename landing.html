@@ -210,6 +210,15 @@ body::after {
 .pos-side { font-size: 9px; padding: 2px 6px; letter-spacing: 0.15em; display: inline-block; }
 .side-L { background: rgba(59,130,246,0.15); color: var(--acid); border: 1px solid rgba(59,130,246,0.3); }
 .side-S { background: rgba(193,39,45,0.15); color: var(--blood); border: 1px solid rgba(193,39,45,0.3); }
+/* Stage badge — paper / shadow / live tag shown alongside side. Paper rows
+   also get a faint background tint + amber left border so they cannot be
+   visually confused with live wallet positions. */
+.stage-tag { font-size: 8px; padding: 2px 5px; letter-spacing: 0.18em; display: inline-block; margin-right: 4px; font-weight: 600; }
+.stage-paper { background: rgba(245,158,11,0.12); color: #f59e0b; border: 1px solid rgba(245,158,11,0.35); }
+.stage-shadow { background: rgba(139,92,246,0.12); color: #a78bfa; border: 1px solid rgba(139,92,246,0.35); }
+.stage-live { background: rgba(16,185,129,0.12); color: var(--gain); border: 1px solid rgba(16,185,129,0.35); }
+.pos-row.is-paper { background: rgba(245,158,11,0.04); border-left: 2px solid rgba(245,158,11,0.5); padding-left: 10px; margin-left: -2px; }
+.pos-row.is-shadow { background: rgba(139,92,246,0.04); border-left: 2px solid rgba(139,92,246,0.5); padding-left: 10px; margin-left: -2px; }
 .pos-size { font-size: 10px; opacity: 0.6; text-align: right; }
 .pos-pnl { font-family: 'JetBrains Mono', monospace; font-weight: 600; text-align: right; min-width: 80px; }
 /* .pnl-pos / .pnl-neg defined globally above with --gain/--loss (proper green/red). */
@@ -1050,7 +1059,7 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
     <!-- POSITIONS -->
     <div class="panel">
         <div class="panel-head">
-            <div class="panel-title">Positions · Live</div>
+            <div class="panel-title">Positions · Live + Paper</div>
             <div class="panel-meta" id="pos-meta">—</div>
         </div>
         <div id="positions"></div>
@@ -1281,6 +1290,72 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
 </div>
 
 <script>
+// ─────────────────────────────────────────────────────────────────────
+// Paper-engine open-trade aggregator. Pulls /state from each paper engine,
+// computes upnl using HL allMids, returns position-shaped objects tagged
+// with stage='paper'/'shadow' so the existing renderer can show them
+// alongside live wallet positions with clear visual distinction.
+// ─────────────────────────────────────────────────────────────────────
+const PAPER_ENGINES = [
+  { name: 'vol-squeeze-fade',         url: 'https://vol-squeeze-fade.onrender.com',         stage: 'paper' },
+  { name: 'vol-squeeze-breakout-v1',  url: 'https://vol-squeeze-breakout-v1.onrender.com',  stage: 'paper' },
+  { name: 'pairs-engine-v1',          url: 'https://pairs-engine-v1.onrender.com',          stage: 'paper' },
+];
+
+async function _fetchAllMids() {
+  try {
+    const r = await fetch('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'allMids' }),
+    });
+    return await r.json();  // { COIN: "price_string", ... }
+  } catch (e) {
+    return {};
+  }
+}
+
+async function _fetchPaperPositions() {
+  // Fetch HL allMids + each paper engine /state in parallel.
+  const [mids, ...stateResults] = await Promise.all([
+    _fetchAllMids(),
+    ...PAPER_ENGINES.map(e =>
+      fetch(`${e.url}/state`, { signal: AbortSignal.timeout(8000) })
+        .then(r => r.ok ? r.json() : null)
+        .catch(() => null)
+    ),
+  ]);
+
+  const positions = [];
+  PAPER_ENGINES.forEach((eng, idx) => {
+    const state = stateResults[idx];
+    if (!state || !Array.isArray(state.open_trades)) return;
+    for (const t of state.open_trades) {
+      const mid = parseFloat(mids[t.coin]);
+      const entry = parseFloat(t.entry_px);
+      const size = parseFloat(t.size);
+      const isLong = t.side === 'B' || t.side === 'L';
+      let upnl = 0;
+      if (isFinite(mid) && isFinite(entry) && isFinite(size)) {
+        upnl = (mid - entry) * size * (isLong ? 1 : -1);
+      }
+      positions.push({
+        coin: t.coin,
+        side: isLong ? 'L' : 'S',
+        size: Number(size).toPrecision(5),
+        entry: Number(entry).toPrecision(5),
+        upnl,
+        lev: t.leverage || '-',
+        tp: t.tp_px,
+        sl: t.sl_px,
+        engine: eng.name,
+        stage: eng.stage,
+      });
+    }
+  });
+  return positions;
+}
+
 async function loadDash() {
     try {
         const r = await fetch('/dash');
@@ -1290,8 +1365,14 @@ async function loadDash() {
         window.__equity = eq;
         // Cache full /dash payload so renderSystemA can avoid duplicate fetch
         window.__dashCache = { ts: Date.now(), data: d };
-        const pos = d.positions || [];
+        const livePos = (d.positions || []).map(p => ({ ...p, stage: p.stage || 'live' }));
+        // Pull paper-engine open trades in parallel; render even if this fails
+        let paperPos = [];
+        try { paperPos = await _fetchPaperPositions(); } catch (e) { console.error('paper positions fetch failed', e); }
+        const pos = [...livePos, ...paperPos];
         const upnl = pos.reduce((s,p)=>s+(p.upnl||0),0);
+        const liveCount = livePos.length;
+        const paperCount = paperPos.length;
 
         document.getElementById('hero-eq').textContent = '$' + eq.toFixed(2);
         document.getElementById('hero-pos').textContent = pos.length;
@@ -1312,17 +1393,28 @@ async function loadDash() {
             const cls = (p.upnl||0)>=0?'pnl-pos':'pnl-neg';
             const sign = (p.upnl||0)>=0?'+':'';
             const lev = p.lev || '-';
-            const tp = (p.tp != null) ? Number(p.tp).toPrecision(5) : '-';
-            const sl = (p.sl != null) ? Number(p.sl).toPrecision(5) : '-';
+            const tp = (p.tp != null && p.tp !== '-') ? Number(p.tp).toPrecision(5) : '-';
+            const sl = (p.sl != null && p.sl !== '-') ? Number(p.sl).toPrecision(5) : '-';
             const eng = p.engine ? `<span style="opacity:0.45;font-size:9px;letter-spacing:0.05em">${p.engine}</span>` : '';
-            return `<div class="pos-row">
+            // Stage badge: PAPER / SHADOW / LIVE — explicit and color-distinct
+            const stage = p.stage || 'live';
+            const stageLabel = stage.toUpperCase();
+            const stageBadge = `<span class="stage-tag stage-${stage}">${stageLabel}</span>`;
+            const rowCls = stage === 'paper' ? 'pos-row is-paper'
+                         : stage === 'shadow' ? 'pos-row is-shadow'
+                         : 'pos-row';
+            return `<div class="${rowCls}">
                 <div class="pos-coin">${p.coin}${eng?'<br>'+eng:''}</div>
-                <div><span class="pos-side side-${p.side}">${p.side}</span> <span style="opacity:0.5;font-size:9px">${lev}x</span></div>
+                <div>${stageBadge}<span class="pos-side side-${p.side}">${p.side}</span> <span style="opacity:0.5;font-size:9px">${lev}x</span></div>
                 <div class="pos-size">${p.size} @ ${p.entry}<br><span style="opacity:0.5;font-size:9px">TP ${tp} · SL ${sl}</span></div>
                 <div class="pos-pnl ${cls}">${sign}$${(p.upnl||0).toFixed(2)}</div>
             </div>`;
         }).join('') || '<div class="pos-row" style="opacity:0.5">// no active positions</div>';
-        document.getElementById('pos-meta').textContent = pos.length + ' active';
+        // Show breakdown so the user instantly sees how many are real vs simulated
+        const metaParts = [];
+        if (liveCount)  metaParts.push(`${liveCount} live`);
+        if (paperCount) metaParts.push(`${paperCount} paper`);
+        document.getElementById('pos-meta').textContent = metaParts.join(' · ') || '0 active';
 
         // Aggregation panel
         document.getElementById('aggregation').innerHTML = `
