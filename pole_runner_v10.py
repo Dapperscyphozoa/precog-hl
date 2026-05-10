@@ -207,6 +207,81 @@ EXCHANGE = None
 WALL_TRACKER = WallTracker(max_history=30)
 DEPTH_BASE = DepthBaseline(window=20, multiplier=8.0)
 
+
+# ───────── PUSH STATE TO PRECOG (visibility for landing page) ─────────
+# V10 is a background_worker — no public HTTP. Instead, push a state
+# snapshot to precog every tick. precog stores the latest push and
+# serves it via /api/v10_state. The landing page reads that endpoint
+# alongside the other paper engines.
+#
+# Push is fire-and-forget in a daemon thread. Network failures swallowed.
+import threading as _bg
+
+DASH_URL = os.environ.get('DASH_URL', '').rstrip('/')
+DASH_PUSH_SECRET = os.environ.get('DASH_PUSH_SECRET', '')
+
+
+def _build_v10_state_payload():
+    """Convert V10's internal `state` dict into the same /state shape that
+    the vol engines expose, so the landing's PAPER_ENGINES fetcher can
+    consume it without special-casing."""
+    open_trades = []
+    for coin, p in state.get('positions', {}).items():
+        try:
+            open_trades.append({
+                'cloid': p.get('cloid', f"v10sw_{coin}_{p.get('fill_t','?')}"),
+                'coin': coin,
+                'side': 'B' if p.get('side') in ('long', 'B', 'L') else 'A',
+                'size': float(p.get('size_coin') or p.get('size') or 0),
+                'entry_px': float(p.get('fill_price') or 0),
+                'sl_px': float(p.get('sl') or 0),
+                'tp_px': float(p.get('tp1') or p.get('tp2') or 0),
+                'notional': float(p.get('notional_usd') or 0),
+                'leverage': p.get('leverage') or LEVERAGE,
+                'ts_open': int(p.get('fill_t') or 0),
+            })
+        except Exception:
+            continue
+    try:
+        bl_state = v10_blacklist.get_state_snapshot()
+    except Exception:
+        bl_state = {}
+    return {
+        'service': 'V10',
+        'ts': int(time.time() * 1000),
+        'mode_effective': 'paper' if not LIVE else 'live',
+        'open_trades': open_trades,
+        'pending_count': len(state.get('pending', {})),
+        'tick_count': state.get('tick_count', 0),
+        'fires_total': state.get('fires_total', 0),
+        'blacklist': bl_state,
+        'universe_size': len(COINS),
+    }
+
+
+def _push_state_to_precog():
+    if not DASH_URL or not DASH_PUSH_SECRET:
+        return
+    try:
+        payload = _build_v10_state_payload()
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{DASH_URL}/api/v10_state",
+            data=body,
+            headers={
+                'Content-Type': 'application/json',
+                'X-Dash-Secret': DASH_PUSH_SECRET,
+            },
+            method='POST',
+        )
+        urllib.request.urlopen(req, timeout=4).read()
+    except Exception:
+        pass  # swallow — never block scan loop on visibility push
+
+
+def _push_state_async():
+    _bg.Thread(target=_push_state_to_precog, daemon=True).start()
+
 def init_sdk():
     if DRY_RUN:
         log("SDK skipped (DRY_RUN)"); return None
@@ -909,6 +984,9 @@ def main():
         try: tick()
         except Exception as e:
             log(f"tick err: {e}"); traceback.print_exc()
+        # Push state snapshot to precog for landing-page visibility (fire-and-forget)
+        try: _push_state_async()
+        except Exception: pass
         log(f"sleeping {POLL_INTERVAL_S}s")
         time.sleep(POLL_INTERVAL_S)
 
