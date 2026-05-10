@@ -333,9 +333,9 @@ body::after {
   width: 100%;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
-  gap: 16px;
-  padding: 16px 20px 16px 20px;
+  grid-template-columns: minmax(0, 1fr) 238px;
+  gap: 14px;
+  padding: 14px 17px 14px 17px;
   align-items: start;
   box-sizing: border-box;
 }
@@ -352,14 +352,14 @@ body::after {
   flex-direction: column;
 }
 .pm-rail-head {
-  padding: 12px 14px 10px;
+  padding: 10px 12px 9px;
   border-bottom: 1px solid var(--line);
   background: rgba(59,130,246,0.04);
   flex-shrink: 0;
 }
 .pm-rail-title {
   font-family: 'Cormorant Garamond', serif;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.18em;
   color: var(--bone);
@@ -414,20 +414,20 @@ body::after {
   animation-play-state: paused;
 }
 
-/* Gate-card grid — 4-up compact, no rolling (per user request 2026-05-10) */
-.pm-gate-section { padding: 10px 10px 4px; }
+/* Gate-card grid — stacked single-column on RHS rail (per user 2026-05-10) */
+.pm-gate-section { padding: 8px 8px 3px; }
 .pm-gate-section-label {
-  font-size: 9px;
+  font-size: 8px;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--blood);
   opacity: 0.85;
-  margin-bottom: 8px;
+  margin-bottom: 7px;
   font-weight: 500;
 }
 .pm-gate-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: 1fr;
   gap: 4px;
 }
 .pm-gate-card {
