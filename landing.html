@@ -390,42 +390,44 @@ body::after {
 .pm-rail-scroll::-webkit-scrollbar-track { background: var(--void); }
 .pm-rail-scroll::-webkit-scrollbar-thumb { background: var(--steel); }
 
-/* Continuous rolling animation: list translates from 0 to -distance and loops.
-   Distance and duration are set via CSS custom props by JS based on content size. */
+/* Continuous rolling animation: DISABLED per user request — gates are now
+   static 4-up grid; users couldn't read them while rolling.
+   Distance and duration vars remain for safety in case animation re-enabled. */
 @keyframes pm-rail-roll {
   0%   { transform: translateY(0); }
   92%  { transform: translateY(calc(-1 * var(--rail-distance, 0px))); }
   100% { transform: translateY(0); }
 }
 .pm-rail-scroll.cycling .pm-rail-list {
-  animation: pm-rail-roll var(--rail-cycle, 40s) linear infinite;
+  /* animation disabled — was: pm-rail-roll var(--rail-cycle, 40s) linear infinite */
+  animation: none;
 }
 .pm-rail-scroll.cycling:hover .pm-rail-list {
   animation-play-state: paused;
 }
 
-/* Gate-card grid (matches the screenshot — 2-up cards) */
-.pm-gate-section { padding: 14px 12px 4px; }
+/* Gate-card grid — 4-up compact, no rolling (per user request 2026-05-10) */
+.pm-gate-section { padding: 10px 10px 4px; }
 .pm-gate-section-label {
-  font-size: 10px;
-  letter-spacing: 0.25em;
+  font-size: 9px;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--blood);
   opacity: 0.85;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   font-weight: 500;
 }
 .pm-gate-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
 }
 .pm-gate-card {
   position: relative;
   padding: 0;
   border: 1px solid var(--line);
   background: rgba(0,0,0,0.4);
-  min-height: 64px;
+  min-height: 38px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   overflow: hidden;
   display: flex;
@@ -435,11 +437,11 @@ body::after {
   border-color: var(--acid);
   box-shadow: 0 0 12px rgba(59,130,246,0.15);
 }
-/* Flux image — half the card (top), photoreal biomech portrait */
+/* Flux image — top of card, compact strip (was 130/80, now 130/40 for 4-up density) */
 .pm-gate-card .pm-gate-img {
   position: relative;
   width: 100%;
-  aspect-ratio: 130 / 80;
+  aspect-ratio: 130 / 40;
   background: var(--steel);
   overflow: hidden;
 }
@@ -471,22 +473,22 @@ body::after {
     linear-gradient(180deg, rgba(7,8,10,0.4) 0%, rgba(7,8,10,0.0) 50%, rgba(7,8,10,0.9) 100%),
     radial-gradient(ellipse at center, rgba(193,39,45,0.12), transparent 70%);
 }
-/* Gate text body — bottom half */
+/* Gate text body — compact bottom (was 7px 9px 8px 9px) */
 .pm-gate-card .pm-gate-body {
-  padding: 7px 9px 8px 9px;
+  padding: 4px 5px 5px 5px;
 }
 .pm-gate-card .pm-gate-name {
-  font-size: 9px;
-  letter-spacing: 0.18em;
+  font-size: 8px;
+  letter-spacing: 0.14em;
   color: var(--chrome);
   text-transform: uppercase;
-  line-height: 1.2;
-  margin-bottom: 5px;
+  line-height: 1.15;
+  margin-bottom: 2px;
   font-weight: 500;
   word-break: break-all;
 }
 .pm-gate-card .pm-gate-status {
-  font-size: 17px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   font-family: 'JetBrains Mono', monospace;
@@ -496,8 +498,8 @@ body::after {
 .pm-gate-card.off .pm-gate-status { color: var(--bone); opacity: 0.55; }
 .pm-gate-card .pm-gate-dot {
   position: absolute;
-  top: 7px; right: 7px;
-  width: 7px; height: 7px;
+  top: 4px; right: 4px;
+  width: 5px; height: 5px;
   border-radius: 50%;
   z-index: 2;
   box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
@@ -530,8 +532,9 @@ body::after {
 @media (max-width: 1100px) {
   .pm-layout { grid-template-columns: minmax(0, 1fr) 240px; gap: 10px; padding: 12px; }
   .pm-rail-title { font-size: 14px; }
-  .pm-gate-section { padding: 12px 10px 2px; }
-  .pm-gate-card .pm-gate-status { font-size: 15px; }
+  .pm-gate-section { padding: 8px 8px 2px; }
+  .pm-gate-card .pm-gate-status { font-size: 10px; }
+  .pm-gate-grid { gap: 3px; }
 }
 @media (max-width: 800px) {
   .pm-layout { grid-template-columns: 1fr; }
