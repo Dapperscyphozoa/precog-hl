@@ -163,11 +163,28 @@ def atr(bars, period=14):
 
 def calc_size(balance, risk_pct, entry, sl):
     if balance <= 0: return 0, 0
+    # FORCE_NOTIONAL_USD env override — fixed-notional mode bypasses all
+    # risk-based sizing (risk_pct, sl_dist, MAX_NOTIONAL_PCT, LEVERAGE).
+    # Read live so Render env edits apply without restart.
+    try:
+        _force = float(os.environ.get('FORCE_NOTIONAL_USD', '0') or '0')
+    except Exception:
+        _force = 0.0
+    if _force > 0 and entry > 0:
+        return _force / entry, _force
     risk_amt = balance * risk_pct
     sl_dist = abs(entry - sl) / entry
     if sl_dist <= 0: return 0, 0
     notional = min(risk_amt / sl_dist, balance * LEVERAGE, balance * MAX_NOTIONAL_PCT * LEVERAGE)
     return notional / entry, notional
+
+
+def _force_notional_active() -> bool:
+    """True iff FORCE_NOTIONAL_USD is set > 0. Used to skip size_mult."""
+    try:
+        return float(os.environ.get('FORCE_NOTIONAL_USD', '0') or '0') > 0
+    except Exception:
+        return False
 
 def load_state():
     try:
@@ -393,8 +410,9 @@ def place_bounce(s: BounceSetup, bias: str = 'neutral', wall_usd: float = 0.0,
 
     size, notional = calc_size(state['balance'], RISK_PCT, s.entry_price, s.sl_price)
     if size <= 0: return None
-    size *= size_mult
-    notional *= size_mult
+    if not _force_notional_active():
+        size *= size_mult
+        notional *= size_mult
     if size <= 0: return None
     log(f"PLACE-BOUNCE [{tier}] {s.coin} {s.side} entry={s.entry_price:.6f} sl={s.sl_price:.6f} tp={s.tp_price:.6f} rr={s.rr:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
     log(f"  notes: {s.notes}")
@@ -492,8 +510,9 @@ def check_triggers(coin: str, last_5m: Optional[dict], atr_v: float):
         # Trend-aware size on breakout fire
         bias = t.get('bias', 'neutral')
         size_mult = trend_v9.size_multiplier(t['side'], bias) if TREND_FILTER_ON else 1.0
-        size *= size_mult
-        notional *= size_mult
+        if not _force_notional_active():
+            size *= size_mult
+            notional *= size_mult
         if size <= 0: del state['triggers'][tkey]; continue
         log(f"TRIGGER-FIRE {t['coin']} {t['side']} 5m_close={bar['c']:.6f} trigger={t['trigger_price']:.6f} bias={bias}×{size_mult:.1f}")
         is_buy = (t['side'] == 'BUY')
@@ -733,8 +752,9 @@ def tick():
             size, notional = calc_size(state['balance'], RISK_PCT, sp['entry_price'], sp['sl_price'])
             if size <= 0: continue
             size_mult = trend_v9.size_multiplier(sp['side'], bias) if TREND_FILTER_ON else 1.0
-            size *= size_mult
-            notional *= size_mult
+            if not _force_notional_active():
+                size *= size_mult
+                notional *= size_mult
             if size <= 0: continue
             log(f"PLACE-SPOOF {sp['coin']} {sp['side']} entry={sp['entry_price']:.6f} sl={sp['sl_price']:.6f} tp={sp['tp_price']:.6f} rr={sp['rr']:.2f} bias={bias}×{size_mult:.1f} sz={size:.6f} ${notional:.2f}")
             log(f"  notes: {sp['notes']}")
