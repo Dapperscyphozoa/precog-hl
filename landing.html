@@ -1089,6 +1089,30 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
         <div id="news"></div>
     </div>
 
+    <!-- LIVE OPS COLUMN (positions + 24h equity pulse) — fills the 3rd grid slot -->
+    <div class="lops-col">
+        <div class="panel">
+            <div class="panel-head">
+                <div class="panel-title">Live Positions</div>
+                <div class="panel-meta" id="lpos-meta">— open</div>
+            </div>
+            <div id="lpos-body"><div class="lpos-empty">// loading…</div></div>
+        </div>
+        <div class="panel">
+            <div class="panel-head">
+                <div class="panel-title">24h Equity Pulse</div>
+                <div class="panel-meta" id="pulse-meta">—</div>
+            </div>
+            <svg id="pulse-svg" viewBox="0 0 280 96" preserveAspectRatio="none"
+                 style="width:100%;height:96px;display:block;margin-top:8px"></svg>
+            <div id="pulse-foot" style="display:flex;justify-content:space-between;
+                 font-size:9px;letter-spacing:0.18em;color:var(--chrome);opacity:0.55;
+                 margin-top:10px;text-transform:uppercase;font-family:'JetBrains Mono',monospace">
+                <span>−24h</span><span id="pulse-net">net —</span><span>now</span>
+            </div>
+        </div>
+    </div>
+
     <!-- ENGINES panel removed: precog internal gates now render in the
          RHS engine rail (rolling vertical bar). One canonical surface for
          signal_engines / guards / venues / sizing. -->
@@ -1097,6 +1121,31 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
 <style>
 /* Hide the legacy engine grid containers since rail owns this view now. */
 #eng-signal, #eng-guards, #eng-venues, #eng-sizing { display: none; }
+
+/* ═══ LIVE OPS COLUMN (positions table + equity pulse) ═══
+   Slots into the 3rd column of the .grid. Uses .panel chrome so it sits
+   visually with the existing dashboard. Mono numbers, Cormorant title. */
+.lops-col { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.lpos-tbl { width: 100%; border-collapse: collapse; font-size: 11px;
+  font-variant-numeric: tabular-nums; font-family: 'JetBrains Mono', monospace; }
+.lpos-tbl th { text-align: left; padding: 5px 8px; font-size: 8px;
+  letter-spacing: 0.22em; color: var(--oxide); text-transform: uppercase;
+  border-bottom: 1px solid var(--line); opacity: 0.85; font-weight: 500; }
+.lpos-tbl th.r, .lpos-tbl td.r { text-align: right; }
+.lpos-tbl td { padding: 7px 8px; border-bottom: 1px solid rgba(200,204,212,0.06);
+  color: var(--bone); }
+.lpos-tbl tr:last-child td { border-bottom: none; }
+.lpos-tbl tr:hover td { background: rgba(255,255,255,0.02); }
+.lpos-coin { font-weight: 600; letter-spacing: 0.05em; color: var(--bone); }
+.lpos-side { display: inline-block; padding: 1px 5px; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.06em; border: 1px solid currentColor; }
+.lpos-side.L { color: var(--gain); }
+.lpos-side.S { color: var(--loss); }
+.lpos-pnl.pos { color: var(--gain); }
+.lpos-pnl.neg { color: var(--loss); }
+.lpos-empty { padding: 22px 12px; text-align: center; color: var(--chrome);
+  opacity: 0.45; font-size: 11px; letter-spacing: 0.1em;
+  font-family: 'JetBrains Mono', monospace; }
 </style>
 
 <div class="grid" style="display:none;">
@@ -2348,6 +2397,122 @@ poll('macro',     loadMacroStrip,  6000,   1900);
 poll('engines',   loadEngines,     8000,   2200);
 poll('systems',   loadSystems,     12000,  2500);
 poll('pmrail',    loadPMRail,      8000,   2800);
+
+// ═══ Live Positions + 24h Equity Pulse ═══════════════════════════════════
+// Live positions table mirrors /dash.positions in a compact mono format.
+// Equity pulse renders /audit/deep.per_hour as a 24-bar SVG (blue=fills,
+// green/red overlay=pnl). Both poll on their own cadence via poll().
+async function loadLivePositions() {
+  try {
+    const r = await fetch('/dash', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+    const rows = (d.positions || []).slice().sort((a, b) =>
+      Math.abs((b.upnl || 0)) - Math.abs((a.upnl || 0)));
+    const body = document.getElementById('lpos-body');
+    const meta = document.getElementById('lpos-meta');
+    if (!rows.length) {
+      body.innerHTML = '<div class="lpos-empty">// no open positions</div>';
+      if (meta) meta.textContent = '0 open';
+      return;
+    }
+    const fmtPx = v => {
+      if (v == null || isNaN(v)) return '—';
+      const n = Number(v);
+      if (n >= 1000) return n.toFixed(1);
+      if (n >= 1) return n.toFixed(3);
+      return n.toFixed(5);
+    };
+    const fmtPnl = v => {
+      const n = Number(v) || 0;
+      const s = n > 0 ? '+' : n < 0 ? '−' : '';
+      return s + '$' + Math.abs(n).toFixed(2);
+    };
+    let totalUpnl = 0;
+    const trs = rows.map(p => {
+      const u = Number(p.upnl) || 0; totalUpnl += u;
+      const cls = u > 0 ? 'pos' : u < 0 ? 'neg' : '';
+      const side = (p.side || '').toUpperCase();
+      const sLab = side === 'L' ? 'LONG' : side === 'S' ? 'SHORT' : '?';
+      return '<tr>'
+        + '<td class="lpos-coin">' + (p.coin || '—') + '</td>'
+        + '<td><span class="lpos-side ' + side + '">' + sLab + '</span></td>'
+        + '<td class="r">' + fmtPx(p.entry) + '</td>'
+        + '<td class="r" style="color:var(--muted,#6b7280);font-size:10px">' + (p.lev ?? '—') + '×</td>'
+        + '<td class="r lpos-pnl ' + cls + '">' + fmtPnl(u) + '</td>'
+        + '</tr>';
+    }).join('');
+    body.innerHTML = '<table class="lpos-tbl">'
+      + '<thead><tr><th>Coin</th><th>Side</th><th class="r">Entry</th>'
+      + '<th class="r">Lev</th><th class="r">uPnL</th></tr></thead>'
+      + '<tbody>' + trs + '</tbody></table>';
+    if (meta) {
+      const sign = totalUpnl > 0 ? '+' : totalUpnl < 0 ? '−' : '';
+      meta.textContent = rows.length + ' open · ' + sign + '$' + Math.abs(totalUpnl).toFixed(2);
+      meta.style.color = totalUpnl > 0 ? 'var(--gain)' : totalUpnl < 0 ? 'var(--loss)' : '';
+    }
+  } catch (e) {
+    const body = document.getElementById('lpos-body');
+    if (body) body.innerHTML = '<div class="lpos-empty">// /dash offline</div>';
+  }
+}
+
+async function loadEquityPulse() {
+  try {
+    const r = await fetch('/audit/deep?hours=24&format=json', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const a = await r.json();
+    const ph = (a && a.per_hour) ? a.per_hour.slice().reverse() : []; // oldest → newest
+    const svg = document.getElementById('pulse-svg');
+    const netEl = document.getElementById('pulse-net');
+    const metaEl = document.getElementById('pulse-meta');
+    if (!ph.length) {
+      svg.innerHTML = '<text x="140" y="50" text-anchor="middle" fill="rgba(217,214,205,0.35)" '
+        + 'font-size="9" font-family="JetBrains Mono">awaiting data</text>';
+      if (netEl) netEl.textContent = 'net —';
+      return;
+    }
+    const W = 280, H = 96, BL = 64; // baseline y for fill bars
+    const fills = ph.map(h => Number(h.fills) || 0);
+    const pnls  = ph.map(h => Number(h.pnl)   || 0);
+    const maxF  = Math.max(1, Math.max.apply(null, fills));
+    const absP  = Math.max.apply(null, pnls.map(Math.abs).concat([1]));
+    const bw    = W / ph.length;
+    let svgInner = '';
+    for (let i = 0; i < ph.length; i++) {
+      const x = i * bw;
+      const fh = (fills[i] / maxF) * BL;
+      const fy = BL - fh;
+      svgInner += '<rect x="' + x.toFixed(1) + '" y="' + fy.toFixed(1)
+        + '" width="' + (bw - 1).toFixed(1) + '" height="' + Math.max(1, fh).toFixed(1)
+        + '" fill="#3b82f6" opacity="0.55"/>';
+      if (pnls[i] !== 0) {
+        const ph2 = (Math.abs(pnls[i]) / absP) * 24;
+        const color = pnls[i] > 0 ? '#10b981' : '#ef4444';
+        svgInner += '<rect x="' + x.toFixed(1) + '" y="' + (BL + 4).toFixed(1)
+          + '" width="' + (bw - 1).toFixed(1) + '" height="' + ph2.toFixed(1)
+          + '" fill="' + color + '"/>';
+      }
+    }
+    svgInner += '<line x1="0" y1="' + BL + '" x2="' + W + '" y2="' + BL
+      + '" stroke="rgba(200,204,212,0.18)" stroke-width="1"/>';
+    svg.innerHTML = svgInner;
+    const totalNet  = pnls.reduce((s, v) => s + v, 0);
+    const totalFills = fills.reduce((s, v) => s + v, 0);
+    if (netEl) {
+      const sign = totalNet > 0 ? '+' : totalNet < 0 ? '−' : '';
+      netEl.textContent = 'net ' + sign + '$' + Math.abs(totalNet).toFixed(2);
+      netEl.style.color = totalNet > 0 ? 'var(--gain)' : totalNet < 0 ? 'var(--loss)' : '';
+    }
+    if (metaEl) metaEl.textContent = totalFills + ' fills · ' + ph.length + 'h';
+  } catch (e) {
+    const svg = document.getElementById('pulse-svg');
+    if (svg) svg.innerHTML = '<text x="140" y="50" text-anchor="middle" fill="rgba(193,39,45,0.6)" '
+      + 'font-size="9" font-family="JetBrains Mono">/audit offline</text>';
+  }
+}
+poll('lpos',   loadLivePositions, 5000,   3100);
+poll('pulse',  loadEquityPulse,   30000,  3400);
 
 // Refresh immediately when tab becomes visible again
 document.addEventListener('visibilitychange', () => {
