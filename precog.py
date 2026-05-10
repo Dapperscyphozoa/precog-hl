@@ -4983,6 +4983,143 @@ def funding_sig_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/wall_absorb_shadow', methods=['GET'])
+def wall_absorb_shadow():
+    """Wall-absorption shadow tracker.
+
+    When WALL_ABSORB_SHADOW=1 + WALL_ABSORB_ENABLED=0, the engine's check()
+    runs against live wall+BB+funding data and writes signals to JSONL but
+    does NOT enter trades. This endpoint reads the JSONL, fetches current
+    HL price for each open signal, and computes paper outcomes:
+      - hit_tp: price reached TP within max_age_hr
+      - hit_sl: price reached SL within max_age_hr
+      - open:   neither hit yet, signal still pending
+      - expired: max_age_hr exceeded with no hit (wash)
+
+    Args:
+      ?limit=N        cap signals returned (default 50)
+      ?max_age_hr=N   how long to keep signals "open" (default 4h)
+      ?coin=X         filter to one coin
+    """
+    try:
+        from flask import request as _req
+        limit = int(_req.args.get('limit', '50'))
+        max_age_hr = float(_req.args.get('max_age_hr', '4'))
+        coin_filter = (_req.args.get('coin') or '').upper() or None
+
+        records = []
+        for path in ('/var/data/wall_absorb_shadow.jsonl', '/tmp/wall_absorb_shadow.jsonl'):
+            try:
+                if not os.path.exists(path): continue
+                with open(path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line: continue
+                        try: records.append(json.loads(line))
+                        except Exception: continue
+            except Exception: continue
+
+        if coin_filter:
+            records = [r for r in records if r.get('coin','').upper() == coin_filter]
+
+        # Most recent first
+        records.sort(key=lambda r: r.get('ts_ms', 0), reverse=True)
+        records = records[:limit]
+
+        # Outcome scoring — fetch current price per coin once, then compare to entry/SL/TP
+        # This is cheap (mid cache); if max_age expired, mark as 'expired'.
+        now_ms = int(time.time() * 1000)
+        scored = []
+        wins = losses = opens = expired = 0
+        sum_win_bps = sum_loss_bps = 0.0
+
+        # Group by coin to amortize get_mid calls
+        cur_px_cache = {}
+        for r in records:
+            c = r.get('coin')
+            if c not in cur_px_cache:
+                try: cur_px_cache[c] = get_mid(c) or 0.0
+                except Exception: cur_px_cache[c] = 0.0
+            cur = cur_px_cache[c]
+            entry = float(r.get('entry_px', 0) or 0)
+            sl = float(r.get('sl_px', 0) or 0)
+            tp = float(r.get('tp_px', 0) or 0)
+            side = r.get('side', '?')
+            age_hr = (now_ms - r.get('ts_ms', now_ms)) / 3600_000.0
+
+            outcome = 'open'
+            pnl_bps = 0.0
+            if entry > 0 and cur > 0:
+                # Mark-to-current PnL in bps
+                if side == 'BUY':
+                    pnl_bps = (cur - entry) / entry * 10000
+                elif side == 'SELL':
+                    pnl_bps = (entry - cur) / entry * 10000
+
+                # NOTE: this scores against CURRENT price only. True hit_tp/hit_sl
+                # would require historical highs/lows — that's a v2 (we'd need to
+                # fetch HL klines covering the signal age window). For now, we
+                # use the simple heuristic: if current price has crossed TP, it
+                # likely hit; same for SL. Conservative for ranging markets.
+                if side == 'BUY':
+                    if cur >= tp: outcome = 'hit_tp'
+                    elif cur <= sl: outcome = 'hit_sl'
+                elif side == 'SELL':
+                    if cur <= tp: outcome = 'hit_tp'
+                    elif cur >= sl: outcome = 'hit_sl'
+
+                if age_hr > max_age_hr and outcome == 'open':
+                    outcome = 'expired'
+
+            if outcome == 'hit_tp':
+                wins += 1; sum_win_bps += abs(pnl_bps)
+            elif outcome == 'hit_sl':
+                losses += 1; sum_loss_bps += abs(pnl_bps)
+            elif outcome == 'expired':
+                expired += 1
+            else:
+                opens += 1
+
+            scored.append({
+                **r,
+                'cur_px':    round(cur, 8) if cur else None,
+                'pnl_bps':   round(pnl_bps, 1) if entry > 0 else None,
+                'age_hr':    round(age_hr, 2),
+                'outcome':   outcome,
+            })
+
+        n_resolved = wins + losses
+        wr = (wins / n_resolved * 100) if n_resolved > 0 else None
+        avg_win = (sum_win_bps / wins) if wins > 0 else 0
+        avg_loss = (sum_loss_bps / losses) if losses > 0 else 0
+        pf = (sum_win_bps / sum_loss_bps) if sum_loss_bps > 0 else (None if sum_win_bps == 0 else float('inf'))
+        if pf == float('inf'): pf = 'inf'
+        expectancy_bps = ((wins/n_resolved * avg_win) - (losses/n_resolved * avg_loss)) if n_resolved > 0 else None
+
+        return jsonify({
+            'shadow_enabled': os.environ.get('WALL_ABSORB_SHADOW', '0') == '1',
+            'live_enabled':   os.environ.get('WALL_ABSORB_ENABLED', '0') == '1',
+            'engine_status':  wall_absorption.status(),
+            'window':  {'limit': limit, 'max_age_hr': max_age_hr, 'coin': coin_filter},
+            'totals':  {
+                'signals': len(scored),
+                'wins':    wins,
+                'losses':  losses,
+                'open':    opens,
+                'expired': expired,
+                'win_rate_pct':    round(wr, 1) if wr is not None else None,
+                'avg_win_bps':     round(avg_win, 1) if wins else None,
+                'avg_loss_bps':    round(avg_loss, 1) if losses else None,
+                'profit_factor':   pf if isinstance(pf, str) else (round(pf, 2) if pf else None),
+                'expectancy_bps':  round(expectancy_bps, 1) if expectancy_bps is not None else None,
+            },
+            'signals': scored,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()[:500]}), 500
+
+
 @app.route('/reflexivity', methods=['GET'])
 def reflexivity_status():
     """Reflexivity detector — crowding + move position + echo scoring.
@@ -10037,6 +10174,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # exclusive with wall_exhaustion via wall classification (STABLE vs
     # EXHAUSTING) and with funding_engine via internal funding-overlap guard.
     # Default DISABLED via WALL_ABSORB_ENABLED=0; flip env to enable.
+    #
+    # 2026-05-10: SHADOW MODE — when WALL_ABSORB_SHADOW=1, run check() and log
+    # signals to /var/data/wall_absorb_shadow.jsonl with proposed entry/SL/TP,
+    # but DO NOT enter the trade dispatch path. Lets us paper-validate the
+    # engine on live wall+BB+funding data without risking capital. Mutually
+    # exclusive with WALL_ABSORB_ENABLED — if enabled is set, shadow is ignored.
     if not sig:
         try:
             _wa_regime = 'unknown'
@@ -10055,14 +10198,64 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             cur_px = get_mid(coin)
             wa_side, wa_ctx = wall_absorption.check(coin, cur_px, _wa_regime, _wa_active)
             if wa_side:
-                sig = wa_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_ABSORB'
-                state.setdefault('wall_entries', {})[coin] = {
-                    'side': wa_side, 'wall_price': wa_ctx['wall_price'],
-                    'wall_usd': wa_ctx['wall_usd'], 'entry_ts': time.time(),
-                    'engine': 'WALL_ABSORB'}
-                log(f"WALL-ABSORPTION {coin} {wa_side} {wa_ctx['bb_position']} "
-                    f"decay={wa_ctx['wall_decay_pct']}% dist={wa_ctx['distance_pct']}% "
-                    f"@ ${wa_ctx['wall_usd']/1000:.0f}k")
+                # Shadow mode: log to JSONL, do NOT enter trade
+                _wa_shadow = os.environ.get('WALL_ABSORB_SHADOW', '0') == '1'
+                _wa_enabled = os.environ.get('WALL_ABSORB_ENABLED', '0') == '1'
+                if _wa_shadow and not _wa_enabled:
+                    try:
+                        # Derive proposed SL/TP from wall_absorption ctx.
+                        # SL: just past the wall (so a wall break is the stop).
+                        # TP: 1.5× distance from current to BB mid (mean-reversion target).
+                        _wa_wall_px = float(wa_ctx.get('wall_price', cur_px))
+                        _wa_bb_mid  = float(wa_ctx.get('bb_mid', cur_px))
+                        if wa_side == 'BUY':
+                            _wa_sl_px = _wa_wall_px * 0.995  # 0.5% past wall (below)
+                            _wa_tp_px = cur_px + 1.5 * (_wa_bb_mid - cur_px)
+                        else:  # SELL
+                            _wa_sl_px = _wa_wall_px * 1.005  # 0.5% past wall (above)
+                            _wa_tp_px = cur_px - 1.5 * (cur_px - _wa_bb_mid)
+                        _wa_record = {
+                            'ts_ms': int(time.time() * 1000),
+                            'coin': coin, 'side': wa_side,
+                            'entry_px': cur_px,
+                            'sl_px': round(_wa_sl_px, 8),
+                            'tp_px': round(_wa_tp_px, 8),
+                            'sl_pct': round(abs(_wa_sl_px - cur_px) / cur_px * 100, 3),
+                            'tp_pct': round(abs(_wa_tp_px - cur_px) / cur_px * 100, 3),
+                            'wall_price': _wa_wall_px,
+                            'wall_usd':   wa_ctx.get('wall_usd'),
+                            'wall_decay_pct': wa_ctx.get('wall_decay_pct'),
+                            'bb_position': wa_ctx.get('bb_position'),
+                            'bb_mid': _wa_bb_mid,
+                            'regime': _wa_regime,
+                            'distance_pct': wa_ctx.get('distance_pct'),
+                            'engine': 'WALL_ABSORB',
+                        }
+                        try:
+                            _wa_path = '/var/data/wall_absorb_shadow.jsonl'
+                            with open(_wa_path, 'a') as _wf:
+                                _wf.write(json.dumps(_wa_record) + '\n')
+                        except Exception as _wa_we:
+                            # Fall back to /tmp if /var/data not writable
+                            try:
+                                with open('/tmp/wall_absorb_shadow.jsonl', 'a') as _wf:
+                                    _wf.write(json.dumps(_wa_record) + '\n')
+                            except Exception: pass
+                        log(f"WALL-ABSORPTION SHADOW {coin} {wa_side} entry={cur_px} "
+                            f"SL={_wa_sl_px:.6f} TP={_wa_tp_px:.6f} "
+                            f"({wa_ctx.get('bb_position')} decay={wa_ctx.get('wall_decay_pct')}%)")
+                        # CRITICAL: do not set sig — drop the signal so no live trade fires
+                    except Exception as _wa_se:
+                        log(f"wall_absorb shadow log err {coin}: {_wa_se}")
+                else:
+                    sig = wa_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_ABSORB'
+                    state.setdefault('wall_entries', {})[coin] = {
+                        'side': wa_side, 'wall_price': wa_ctx['wall_price'],
+                        'wall_usd': wa_ctx['wall_usd'], 'entry_ts': time.time(),
+                        'engine': 'WALL_ABSORB'}
+                    log(f"WALL-ABSORPTION {coin} {wa_side} {wa_ctx['bb_position']} "
+                        f"decay={wa_ctx['wall_decay_pct']}% dist={wa_ctx['distance_pct']}% "
+                        f"@ ${wa_ctx['wall_usd']/1000:.0f}k")
         except Exception as e:
             log(f"wall_absorption err {coin}: {e}")
     # 2026-04-25: FUNDING_MR engine — counter-crowd fade in chop.

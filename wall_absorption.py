@@ -271,7 +271,12 @@ def check(coin, current_px, regime='unknown', active_absorption_count=0):
     """
     _STATS['check_calls'] += 1
 
-    if not ENABLED:
+    # 2026-05-10: read ENABLED + SHADOW live so Render env edits apply without
+    # restart. SHADOW=1 lets check() run even when ENABLED=0 — the caller is
+    # responsible for blocking trade dispatch in shadow mode.
+    _live_enabled = os.environ.get('WALL_ABSORB_ENABLED', '0') == '1'
+    _live_shadow  = os.environ.get('WALL_ABSORB_SHADOW',  '0') == '1'
+    if not _live_enabled and not _live_shadow:
         _STATS['disabled'] += 1
         return None, None
 
