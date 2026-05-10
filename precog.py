@@ -37,6 +37,7 @@ import confidence
 import spoof_detection
 import session_scaler
 import whale_filter
+import whale_display
 import cvd_ws
 import oi_tracker
 import funding_arb
@@ -2923,20 +2924,21 @@ def signals_feed():
 
 @app.route('/whales', methods=['GET'])
 def whales_feed():
+    """Display feed for the dashboard.
+
+    Sourced from whale_display (Hyperliquid public WS) — the dashboard's
+    visual whale-print tape. SEPARATE from whale_filter._WHALES which
+    drives confluence_boost() and trade sizing.
+
+    Two sources avoid coupling: changing the dashboard's data feed must
+    NEVER alter scoring inputs. The two paths can drift in coverage and
+    that's intentional.
+    """
     try:
-        from collections import deque
-        items = []
-        if hasattr(whale_filter, '_WHALES'):
-            now = time.time()
-            with whale_filter._LOCK:
-                for coin, dq in whale_filter._WHALES.items():
-                    for ts, side, usd in list(dq)[-5:]:
-                        if now - ts < 300:
-                            items.append({'coin':coin,'side':side,'usd':usd,'ts':ts})
-        items.sort(key=lambda x: x['ts'], reverse=True)
-        return jsonify({'items': items[:20]})
+        items = whale_display.get_recent(limit=20)
     except Exception as e:
         return jsonify({'items': [], 'err': str(e)})
+    return jsonify({'items': items, 'source': 'hl_public_ws'})
 
 @app.route('/news', methods=['GET'])
 def news_feed():
@@ -11439,6 +11441,8 @@ def main():
     except Exception as e: log(f"liq_ws err: {e}")
     try: whale_filter.start()
     except Exception as e: log(f"whale_filter err: {e}")
+    try: whale_display.start()
+    except Exception as e: log(f"whale_display err: {e}")
     try: cvd_ws.start()
     except Exception as e: log(f"cvd_ws err: {e}")
     try: oi_tracker.start()
