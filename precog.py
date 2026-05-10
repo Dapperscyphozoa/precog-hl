@@ -2688,7 +2688,7 @@ def conf_test(coin):
     except Exception as e:
         return jsonify({'err': str(e)})
 
-@app.route('/engines', methods=['GET'])
+@app.route('/api/engines', methods=['GET'])
 def engines_status():
     """Live engine + guard + venue state."""
     try:
