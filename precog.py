@@ -2736,6 +2736,41 @@ def engines_status():
         'venue_ages': venues,
     })
 
+# ───────── V10 STATE RECEIVER (visibility for landing page) ─────────
+# V10 is a Render background_worker so it has no public HTTP. It pushes
+# its open positions + blacklist + universe state to this endpoint each
+# tick. The landing page reads /api/v10_state alongside the other paper
+# engines so V10's paper trades show in the Positions panel.
+_v10_state_lock = threading.Lock()
+_v10_state_cache = {
+    'service': 'V10', 'ts': 0, 'mode_effective': 'paper',
+    'open_trades': [], 'pending_count': 0, 'tick_count': 0,
+    'fires_total': 0, 'blacklist': {}, 'universe_size': 0,
+}
+V10_PUSH_SECRET = os.environ.get('V10_PUSH_SECRET', '')
+
+
+@app.route('/api/v10_state', methods=['GET', 'POST'])
+def v10_state():
+    if flask_request.method == 'POST':
+        # Auth: header secret must match V10_PUSH_SECRET env var
+        sent = flask_request.headers.get('X-Dash-Secret', '')
+        if not V10_PUSH_SECRET or sent != V10_PUSH_SECRET:
+            return jsonify({'error': 'unauthorized'}), 401
+        try:
+            payload = flask_request.get_json(force=True, silent=True) or {}
+        except Exception:
+            return jsonify({'error': 'bad_json'}), 400
+        with _v10_state_lock:
+            _v10_state_cache.update(payload)
+            _v10_state_cache['received_ts'] = int(time.time() * 1000)
+        return jsonify({'ok': True})
+    # GET — return latest snapshot
+    with _v10_state_lock:
+        snap = dict(_v10_state_cache)
+    return jsonify(snap)
+
+
 @app.route('/all_systems', methods=['GET'])
 def all_systems():
     """Aggregate live state of all 5 trading engines on this wallet.
