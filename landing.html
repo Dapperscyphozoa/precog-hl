@@ -326,31 +326,38 @@ body::after {
 .precog-nav .nav-tag{font-size:9px;color:#64748b;letter-spacing:0.25em;opacity:0.6;padding-left:6px}
 @media(max-width:700px){.precog-nav{padding:8px 10px;gap:4px}.precog-nav .nav-brand{font-size:13px;width:100%;padding:0 0 6px 0;margin:0 0 4px 0;border-right:none;border-bottom:1px solid rgba(200,204,212,0.1)}.precog-nav a{padding:5px 7px;font-size:9px;letter-spacing:0.15em}.precog-nav .nav-tag{width:100%;padding:6px 0 0 0;text-align:center}}
 
-/* ═══ PSYCHO PM TERMINAL — 2-COL LAYOUT WITH RHS ENGINE RAIL ═══ */
+/* ═══ PSYCHO PM TERMINAL — FIXED RHS DATA RAIL (always-on, full-height) ═══
+   Rail is hoisted out of pm-layout grid into a fixed-position sidebar so it
+   fills the RHS for the WHOLE page, not just the dashboard cards section.
+   pm-layout is now single-column; body gets right-padding equal to rail
+   width + gap so existing content never slides under the rail. */
 .pm-layout {
   position: relative;
   z-index: 2;
   width: 100%;
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 238px;
-  gap: 14px;
+  display: block;
   padding: 14px 17px 14px 17px;
-  align-items: start;
   box-sizing: border-box;
 }
 .pm-main { min-width: 0; overflow-x: hidden; }
 .pm-engine-rail {
-  position: sticky;
-  top: 12px;
-  height: calc(100vh - 24px);
-  max-height: calc(100vh - 24px);
+  position: fixed;
+  top: 46px;            /* below precog-nav (40-44px tall) */
+  right: 0;
+  width: 220px;
+  height: calc(100vh - 46px);
+  max-height: calc(100vh - 46px);
+  z-index: 50;
   overflow: hidden;
-  background: linear-gradient(180deg, var(--carbon) 0%, rgba(13,14,17,0.96) 100%);
-  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--carbon) 0%, rgba(13,14,17,0.97) 100%);
+  border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
 }
+/* push every page-level region clear of the fixed rail */
+body { padding-right: 232px; }
+.precog-nav { padding-right: 232px; }
 .pm-rail-head {
   padding: 10px 12px 9px;
   border-bottom: 1px solid var(--line);
@@ -560,20 +567,28 @@ body::after {
 .pm-rail-foot a:hover { color: var(--acid-bright); }
 
 @media (max-width: 1100px) {
-  .pm-layout { grid-template-columns: minmax(0, 1fr) 240px; gap: 10px; padding: 12px; }
-  .pm-rail-title { font-size: 14px; }
+  .pm-layout { padding: 12px; }
+  .pm-rail-title { font-size: 13px; }
   .pm-gate-section { padding: 8px 8px 2px; }
   .pm-gate-card .pm-gate-status { font-size: 10px; }
   .pm-gate-grid { gap: 3px; }
+  body { padding-right: 200px; }
+  .precog-nav { padding-right: 200px; }
+  .pm-engine-rail { width: 188px; }
 }
 @media (max-width: 800px) {
-  .pm-layout { grid-template-columns: 1fr; }
+  body { padding-right: 0; }
+  .precog-nav { padding-right: 16px; }
   .pm-engine-rail {
     position: relative;
-    top: 0;
+    top: 0; right: auto;
+    width: 100%;
     height: auto;
     max-height: 70vh;
-    margin-top: 16px;
+    margin: 16px 0;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
   }
 }
 </style>
