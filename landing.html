@@ -20,9 +20,54 @@
     --oxide: #d97706;
     --cyan: #00e5ff;
     --pulse: #ff0055;
+    --gain: #10b981;
+    --loss: #ef4444;
     --line: rgba(200,204,212,0.12);
     --glow: rgba(184,255,47,0.4);
 }
+
+/* PnL colour utility classes — used on $-PnL, W/L, Avg Win, Avg Loss */
+.pnl-pos { color: var(--gain); }
+.pnl-neg { color: var(--loss); }
+
+/* === VIEW-BASED SECTION TOGGLE ===
+   The same landing.html is served by /, /engines, /system, /macro.
+   A small inline script (after the nav block) sets body[data-view=...].
+   These rules hide/show sections accordingly. */
+
+/* DASH (default /) — hide engine breakdown grid */
+body[data-view="dash"] [data-section="engines"] { display: none !important; }
+
+/* ENGINES (/engines) — show only the systems grid + nav, hide hero/metrics/grid panels */
+body[data-view="engines"] .hero,
+body[data-view="engines"] .metrics-bar,
+body[data-view="engines"] .grid:not(#systems-grid),
+body[data-view="engines"] .footer { display: none !important; }
+body[data-view="engines"] [data-section="engines"] { display: grid !important; }
+
+/* SYSTEM, MACRO, AUDIT (when the request lands on /system, /macro, /audit and
+   the server still serves landing.html as a fallback while sub-page handlers
+   redirect to their own routes). For now: just show the nav and a placeholder. */
+body[data-view="system"] .hero,
+body[data-view="system"] .metrics-bar,
+body[data-view="system"] .grid,
+body[data-view="system"] [data-section="engines"],
+body[data-view="system"] .footer,
+body[data-view="macro"] .hero,
+body[data-view="macro"] .metrics-bar,
+body[data-view="macro"] .grid,
+body[data-view="macro"] [data-section="engines"],
+body[data-view="macro"] .footer { display: none !important; }
+
+/* Placeholder "loading sub-page" message when fallback occurs */
+.subpage-placeholder { display: none; padding: 80px 20px; text-align: center; font-family: 'Cormorant Garamond', serif; color: var(--chrome); }
+body[data-view="system"] .subpage-placeholder.system,
+body[data-view="macro"] .subpage-placeholder.macro { display: block; }
+.subpage-placeholder h2 { font-size: 36px; letter-spacing: 0.3em; margin-bottom: 16px; color: var(--bone); font-weight: 400; }
+.subpage-placeholder p { font-size: 13px; letter-spacing: 0.2em; opacity: 0.6; }
+.subpage-placeholder .links { margin-top: 32px; display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+.subpage-placeholder .links a { padding: 10px 18px; border: 1px solid var(--line); color: var(--chrome); text-decoration: none; font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase; transition: all 0.15s; }
+.subpage-placeholder .links a:hover { border-color: var(--cyan); color: var(--cyan); }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body {
     background: var(--void);
@@ -191,13 +236,12 @@ body::after {
 .metric-val { font-family: 'Cormorant Garamond', serif; font-size: 28px; font-weight: 400; color: var(--bone); line-height: 1; }
 .metric-lbl { font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--chrome); opacity: 0.6; margin-top: 6px; }
 
-/* TICKER */
-.ticker { position: fixed; bottom: 0; left: 0; right: 0; background: var(--void); border-top: 1px solid var(--acid); overflow: hidden; white-space: nowrap; padding: 10px 0; z-index: 100; font-size: 11px; letter-spacing: 0.15em; }
-.ticker-track { display: inline-block; animation: tickerScroll 120s linear infinite; }
-.ticker-track span { display: inline-block; padding: 0 32px; color: var(--chrome); }
-.ticker-track span strong { color: var(--acid); margin-right: 8px; }
-.ticker-track span.bear strong { color: var(--blood); }
-@keyframes tickerScroll { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+/* TICKER (static — used to scroll, now a fixed compact row) */
+.ticker { position: fixed; bottom: 0; left: 0; right: 0; background: var(--void); border-top: 1px solid var(--line); overflow-x: auto; overflow-y: hidden; white-space: nowrap; padding: 10px 16px; z-index: 100; font-size: 11px; letter-spacing: 0.15em; }
+.ticker-track { display: inline-flex; gap: 28px; align-items: center; }
+.ticker-track span { display: inline-block; color: var(--chrome); }
+.ticker-track span strong { color: var(--gain); margin-right: 8px; font-weight: 600; }
+.ticker-track span.bear strong { color: var(--loss); }
 
 /* FOOTER */
 .footer { margin-top: 60px; margin-bottom: 60px; padding-top: 24px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; font-size: 10px; letter-spacing: 0.2em; opacity: 0.5; text-transform: uppercase; }
@@ -272,16 +316,38 @@ body::after {
 <nav class="precog-nav">
 <a href="/" class="nav-brand">PRECOG</a>
 <a href="/" data-page="dashboard">Dash</a>
-<a href="/violations" data-page="violations">Audit</a>
-<a href="/audit/deep?format=html" data-page="deep">Deep</a>
-<a href="/audit/elasticity?format=html" data-page="elasticity">Elasticity</a>
-<a href="/shadow/compare?format=html" data-page="shadow">Shadow</a>
-<a href="/enforce" data-page="enforce">Enforce</a>
-<a href="/experiment" data-page="experiment">Experiment</a>
+<a href="/engines" data-page="engines">Engines</a>
+<a href="/audit" data-page="audit">Audit</a>
+<a href="/system" data-page="system">System</a>
+<a href="/macro" data-page="macro">Macro</a>
 <div class="nav-sep"></div>
-<span class="nav-tag">v8.28 · phase 1</span>
+<span class="nav-tag">v8.29 · phase 1</span>
 </nav>
-<script>(function(){var p=location.pathname,c="";if(p==="/"||p==="")c="dashboard";else if(p.indexOf("/violations")===0||p==="/audit")c="violations";else if(p.indexOf("/audit/deep")===0)c="deep";else if(p.indexOf("/audit/elasticity")===0)c="elasticity";else if(p.indexOf("/shadow")===0)c="shadow";else if(p.indexOf("/enforce")===0)c="enforce";else if(p.indexOf("/experiment")===0)c="experiment";document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.getAttribute("data-page")===c)a.classList.add("current")})})();</script>
+<script>(function(){var p=location.pathname,c="",v="dash";
+if(p==="/"||p===""){c="dashboard";v="dash";}
+else if(p.indexOf("/engines")===0){c="engines";v="engines";}
+else if(p.indexOf("/audit")===0||p.indexOf("/violations")===0||p.indexOf("/shadow")===0){c="audit";v="audit";}
+else if(p.indexOf("/system")===0||p.indexOf("/enforce")===0||p.indexOf("/experiment")===0){c="system";v="system";}
+else if(p.indexOf("/macro")===0){c="macro";v="macro";}
+document.body.setAttribute("data-view",v);
+document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.getAttribute("data-page")===c)a.classList.add("current")})})();</script>
+
+<!-- SUB-PAGE PLACEHOLDERS (only displayed on /system and /macro; CSS controls visibility) -->
+<div class="subpage-placeholder system">
+    <h2>SYSTEM</h2>
+    <p>// operator tools — enforcement contract & promotion-engine A/B</p>
+    <div class="links">
+        <a href="/enforce">Enforce · Protection</a>
+        <a href="/experiment">Experiment · Promotion</a>
+    </div>
+</div>
+<div class="subpage-placeholder macro">
+    <h2>MACRO</h2>
+    <p>// daily macro economic report — internal · national · global</p>
+    <div class="links">
+        <a href="#" style="opacity:0.5;pointer-events:none">MER backend not yet wired (placeholder)</a>
+    </div>
+</div>
 
 <!-- HERO -->
 <div class="hero">
@@ -665,8 +731,8 @@ body::after {
 </div>
 
 <!-- ═══ SYSTEMS A–F · MOVED UP ═══ -->
-<!-- SYSTEMS A–F — UNIFORM PANELS -->
-<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
+<!-- SYSTEMS A–F — UNIFORM PANELS (shown only on /engines view) -->
+<div data-section="engines" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
 
     <!-- SYSTEM A · PRECOG (multi-gate) -->
     <div class="panel">
@@ -897,13 +963,13 @@ async function loadDash() {
                 <div>Funding arb: <strong style="color:var(--oxide)">${d.funding_arb?.hl_coins||0}</strong></div>
             </div>`;
 
-        // Ticker
-        const tickerData = sorted.slice(0,10).map(p => {
+        // Ticker — static, top 8 positions
+        const tickerData = sorted.slice(0,8).map(p => {
             const cls = (p.upnl||0)>=0?'':'bear';
             const sign = (p.upnl||0)>=0?'+':'';
             return `<span class="${cls}"><strong>${p.coin} ${p.side}</strong>${sign}$${(p.upnl||0).toFixed(2)}</span>`;
-        }).join(' · ');
-        document.getElementById('ticker').innerHTML = tickerData + ' · ' + tickerData;
+        }).join('');
+        document.getElementById('ticker').innerHTML = tickerData;
 
         document.getElementById('foot-updated').textContent = 'Updated · ' + new Date().toISOString().substr(11,8);
     } catch (e) { console.error(e); }
@@ -1140,7 +1206,7 @@ function fmtPct(v, dp) {
 }
 function moneyColor(v) {
     if (v == null || isNaN(v)) return '';
-    return v >= 0 ? 'color:var(--acid)' : 'color:#f88';
+    return v >= 0 ? 'color:var(--gain)' : 'color:var(--loss)';
 }
 
 function renderStatsGrid(elId, stats) {
@@ -1228,14 +1294,14 @@ function buildStatsFromAggregate(d, includeOps) {
     const aw = Math.abs(Number(d.avg_win_usd || 0));
     const al = Math.abs(Number(d.avg_loss_usd || 0));
     const rr = (al > 0) ? (aw / al).toFixed(2) : '—';
-    const rrColor = (al > 0 && aw / al >= 1) ? 'color:var(--acid)' : 'color:#f88';
+    const rrColor = (al > 0 && aw / al >= 1) ? 'color:var(--gain)' : 'color:var(--loss)';
     const usdStr = (usdPnl != null) ? `${usdPnl >= 0 ? '+' : ''}$${usdPnl.toFixed(2)}` : '—';
     const stats = [
         { val: usdStr, lbl: '$ PnL', color: moneyColor(usdPnl) },
         { val: wrWin, lbl: 'Win Rate' },
         { val: `${wWin}/${lWin}/${bWin}`, lbl: 'W/L/B' },
-        { val: avgW, lbl: 'Avg Win', color: 'color:var(--acid)' },
-        { val: avgL, lbl: 'Avg Loss', color: 'color:#f88' },
+        { val: avgW, lbl: 'Avg Win', color: 'color:var(--gain)' },
+        { val: avgL, lbl: 'Avg Loss', color: 'color:var(--loss)' },
         { val: rr, lbl: 'R:R', color: rrColor },
         { val: closed, lbl: 'Closes' },
     ];
