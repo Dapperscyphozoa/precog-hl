@@ -4,7 +4,11 @@ Signal: fade the trap direction. Wall withdrew = price will continue through.
 import time, threading
 import orderbook_ws
 
-SPOOF_APPROACH_PCT = 0.003   # price within 0.3% of wall
+# 2026-05-11: was 0.003 (decimal). orderbook_ws stores distance_pct in percent
+# units (0.1 = 0.1%), so the comparison `w['distance_pct'] > SPOOF_APPROACH_PCT`
+# filtered every wall. Fix: 0.3 (percent units). Env-overridable.
+import os as _os
+SPOOF_APPROACH_PCT = float(_os.environ.get('SPOOF_APPROACH_PCT', '0.3'))  # within 0.3% of wall (percent units)
 SPOOF_WITHDRAW_PCT = 0.5      # wall size drops >50%
 SPOOF_WINDOW_SEC = 30         # detection window
 COOLDOWN_SEC = 300
