@@ -188,13 +188,20 @@ def mark_fired(coin, ob_body_top, ob_body_bottom):
         state['fired_obs'][coin] = lst[-50:]
 
 def calc_size(balance, entry, sl):
-    if balance <= 0 or entry <= 0: return 0, 0
-    # FIXED_NOTIONAL_USD override: every trade is exactly this dollar notional,
-    # capped only by available leverage. Skips RISK_PCT / sl_dist computation.
+    if entry <= 0: return 0, 0
+    # FIXED_NOTIONAL_USD override: every trade is exactly this dollar notional.
+    # In LIVE mode, capped by available leverage. In DRY_RUN (paper observation),
+    # bypass balance gate entirely — paper wallet balance is $0 by design and we
+    # want to record what the engine WOULD have fired with $50 notional.
     if FIXED_NOTIONAL_USD > 0:
+        if DRY_RUN or balance <= 0:
+            # Paper observation mode — use fixed notional unconstrained
+            return FIXED_NOTIONAL_USD / entry, FIXED_NOTIONAL_USD
         notional_cap_lev = balance * LEVERAGE
         notional = min(FIXED_NOTIONAL_USD, notional_cap_lev)
         return notional / entry, notional
+    # Risk-based sizing requires real balance
+    if balance <= 0: return 0, 0
     risk_amt = balance * RISK_PCT
     sl_dist = abs(entry - sl) / entry
     if sl_dist <= 0: return 0, 0
