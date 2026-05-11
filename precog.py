@@ -3106,9 +3106,30 @@ def backtest_endpoint():
         elif top_n > 0:
             # Pull top N by volume from HL meta_and_asset_ctxs (same as shadow tier)
             try:
-                meta_ctxs = info.meta_and_asset_ctxs()
-                meta = meta_ctxs[0]
-                ctxs = meta_ctxs[1]
+                # 2026-05-11: route through meta_cache (shared singleton)
+                # 2026-05-11 v2: distinguish ImportError (legitimate fallback)
+                # from None-return (429 backoff — must NOT re-hit HL directly,
+                # that's the very thing the cache exists to prevent).
+                _shared = None
+                _mc_imported = False
+                try:
+                    import meta_cache as _mc
+                    _mc_imported = True
+                    _shared = _mc.get_meta_ctxs(info)
+                except ImportError:
+                    pass
+                if _shared:
+                    meta, ctxs = _shared
+                elif not _mc_imported:
+                    # meta_cache module missing — legitimate direct fallback
+                    meta_ctxs = info.meta_and_asset_ctxs()
+                    meta = meta_ctxs[0]
+                    ctxs = meta_ctxs[1]
+                else:
+                    # Cache returned None (HL 429 backoff or info not ready).
+                    # Must NOT re-hit HL directly — that's the saturation source.
+                    log('meta_cache unavailable (429 backoff) — backtest top-N deferred')
+                    return jsonify({'err': 'meta_cache unavailable (HL rate-limit backoff). Retry in 30s.'}), 503
                 # Exclude live coins
                 live = set(COINS)
                 ranked = []
@@ -3295,6 +3316,7 @@ def health():
                     'whale_filter':   (whale_filter.status() if hasattr(whale_filter, 'status') else {}),
                     'spoof_detection':(spoof_detection.status() if hasattr(spoof_detection, 'status') else {}),
                     'oi_tracker':     (oi_tracker.status() if hasattr(oi_tracker, 'status') else {}),
+                    'meta_cache':     (__import__('meta_cache').status() if True else {}),
                     'enforce_throttle': {
                         **_ENFORCE_STATS,
                         'cooldown_sec': _ENFORCE_COOLDOWN_SEC,
@@ -7513,14 +7535,33 @@ def get_all_positions_live(force=False):
 
 _FUNDING_CACHE = {'data': {}, 'ts': 0}
 def get_funding_rate(coin):
+    """Fetch current funding rate for a coin (per hour). Negative = shorts pay, positive = longs pay."""
     now = __import__('time').time()
     if now - _FUNDING_CACHE['ts'] < 900:  # cache 15 min
         return _FUNDING_CACHE['data'].get(coin, 0)
-    """Fetch current funding rate for a coin (per hour). Negative = shorts pay, positive = longs pay."""
     try:
-        meta = info.meta_and_asset_ctxs()
-        asset_ctxs = meta[1]
-        universe = meta[0]['universe']
+        # 2026-05-11: route through meta_cache (shared singleton, 30s TTL)
+        # 2026-05-11 v2: distinguish ImportError (legit fallback) from None
+        # (429 backoff — must NOT re-hit HL directly). On None, return stale
+        # cached funding (15min TTL is acceptable for this signal).
+        _shared = None
+        _mc_imported = False
+        try:
+            import meta_cache as _mc
+            _mc_imported = True
+            _shared = _mc.get_meta_ctxs(info)
+        except ImportError:
+            pass
+        if _shared:
+            universe, asset_ctxs = _shared[0]['universe'], _shared[1]
+        elif not _mc_imported:
+            # meta_cache module missing — legitimate direct fallback
+            meta = info.meta_and_asset_ctxs()
+            asset_ctxs = meta[1]
+            universe = meta[0]['universe']
+        else:
+            # Cache None (429 backoff). Serve stale value from _FUNDING_CACHE.
+            return _FUNDING_CACHE['data'].get(coin, 0)
         for i, u in enumerate(universe):
             if u['name']==coin and i<len(asset_ctxs):
                 return float(asset_ctxs[i].get('funding', 0))
@@ -12310,8 +12351,20 @@ def main():
                             raise   # let candle_snapshot.build_snapshot count + log
                         return [(int(b['t']), float(b['o']), float(b['h']),
                                  float(b['l']), float(b['c']), float(b['v'])) for b in d]
-                    _candle_snap.build_snapshot(COINS, '15m', _snap_fetch,
-                                                 throttle_fn=_hl_throttle,
+                    # 2026-05-11: use OKX-specific throttle (0.1s) for snapshot, not
+                    # HL throttle (2.0s) — snapshot uses _snap_fetch which calls
+                    # okx_fetch, so HL_MIN_GAP_SEC was the wrong rate limit and
+                    # was costing us 20× on build duration. Also filter the
+                    # known-unknown coins out of the build set up front to skip
+                    # pointless per-coin no-op iterations (each still cost
+                    # a throttle gap before this filter).
+                    try:
+                        _snap_throttle = okx_fetch.throttle
+                    except AttributeError:
+                        _snap_throttle = _hl_throttle
+                    _snap_coins = [c for c in COINS if c not in _UNKNOWN_COINS]
+                    _candle_snap.build_snapshot(_snap_coins, '15m', _snap_fetch,
+                                                 throttle_fn=_snap_throttle,
                                                  n_bars=100, log_fn=log)
                 except Exception as _se:
                     log(f"[snapshot] build err (fail-soft): {_se}")

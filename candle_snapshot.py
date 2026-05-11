@@ -4,62 +4,62 @@ candle_snapshot.py — Deterministic single-source candle pipeline (final form).
 Architecture:
   v1: 78 per-tick REST fetches → CloudFront 429 cascade
   v2: bucketed (20/tick) — still allowed REST fallback in tick path
-  v3 (FINAL): atomic full-universe build with 90% coverage gate
-       NO REST escape during tick. fetch() = snapshot → LKG → empty.
+  v3: atomic full-universe build with 90% coverage gate, sequential
+  v4 (CURRENT, 2026-05-11):
+       - PARALLEL fetch with bounded concurrency (ThreadPoolExecutor)
+       - PER-TF build lock (allows concurrent adjacent TF builds, e.g.
+         15m + 30m + 1h built simultaneously rather than serialized)
+       - All other guarantees preserved: atomic commit, 3-tier coverage
+         gate, LKG fallback, no REST in tick path
 
 Design rules:
-  - Snapshot layer = single writer, atomic commit (all-or-nothing per tick)
-  - Signal layer  = pure read, O(1) lookup
-  - Coverage gate = ≥90% of universe must succeed before commit
-  - LKG persists across failed/partial builds
+  - Snapshot layer = single writer per TF, atomic commit (all-or-nothing)
+  - Different TFs may build concurrently (independent state)
+  - Same-TF concurrent rebuilds short-circuit (only one in flight per TF)
+  - Coverage gate = soft 85% / monotonic / hard 75% (stale)
   - Tick path NEVER calls REST — only background snapshot build does
-  - Backwards compat: signal engine still calls fetch(coin); zero changes
-    needed to signal logic
+  - Signal layer = pure read, O(1) lookup
 
-Public API:
-  build_snapshot(coins, tf, fetch_fn, throttle_fn) → dict with 'ok'/'total'
-  get_candles(coin, tf='15m') → list  (snapshot or LKG)
+Public API (unchanged):
+  build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100,
+                 log_fn=None, max_workers=8) → dict
+  get_candles(coin, tf='15m') → list
   snapshot_age_sec() → float
-  snapshot_status() → dict (for /health diagnostics)
-
-Trade-off (intentional):
-  Deterministic stale data > real-time partial data.
-  Worst case: stale by ~1 tick window (~60s) on a 15m timeframe = ~6% drift.
+  snapshot_status() → dict
 """
 
+import os
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 
 
 # ─── GLOBAL SNAPSHOT STATE ──────────────────────────────────────────────────
 _GLOBAL_SNAPSHOT = {
-    'ts': 0.0,
-    'tf': defaultdict(dict),
+    'ts_by_tf': {},                # {tf: float} — last commit time per TF
+    'tf': defaultdict(dict),       # {tf: {coin: candles}}
 }
 _LAST_KNOWN_GOOD = defaultdict(dict)
 _SNAPSHOT_LOCK = threading.Lock()
 
-_BUILD_LOCK = {
-    'active': False,
-    'tf': None,
-    'started_at': 0.0,
-}
+# Per-TF build locks: {tf: threading.Lock()} created on demand.
+# Allows 15m and 30m to build concurrently, but a second 15m caller waits.
+_PER_TF_LOCKS = {}
+_PER_TF_LOCK_GUARD = threading.Lock()
 
-SNAPSHOT_TTL_SEC = 300.0   # 5 min — accommodates 156s build at 2.0s gap
-                           # for CloudFront friendliness, build takes ~55s for
-                           # 78 coins. 60s TTL caused stale flips immediately
-                           # after each commit. 180s gives 3 builds of headroom.
-# Three-tier commit gate (2026-04-25):
-#   v3 used hard 0.90 — too strict, caused snapshot starvation when 84-87%
-#   coverage was operationally healthy. Replaced with monotonic-improvement
-#   model: accept if soft target met OR not-worse-than-previous OR above hard
-#   floor when stale. Bounded degradation, never regresses hard.
-COVERAGE_SOFT_TARGET = 0.85    # always commit at or above this
-COVERAGE_HARD_FLOOR  = 0.75    # absolute minimum (only when stale)
-COVERAGE_THRESHOLD   = COVERAGE_SOFT_TARGET   # legacy alias for /health field
+# Per-TF in-flight tracking (for /health diagnostics)
+_BUILDS_ACTIVE = {}  # {tf: started_at}
 
-_PREV_COVERAGE_RATIO = {}  # {tf: float} — for monotonic-improvement rule
+# Configuration
+SNAPSHOT_TTL_SEC = float(os.environ.get('SNAPSHOT_TTL_SEC', '300'))
+MAX_WORKERS_DEFAULT = int(os.environ.get('SNAPSHOT_MAX_WORKERS', '8'))
+
+COVERAGE_SOFT_TARGET = float(os.environ.get('SNAPSHOT_COVERAGE_SOFT', '0.85'))
+COVERAGE_HARD_FLOOR  = float(os.environ.get('SNAPSHOT_COVERAGE_HARD', '0.75'))
+COVERAGE_THRESHOLD   = COVERAGE_SOFT_TARGET   # legacy alias for /health
+
+_PREV_COVERAGE_RATIO = {}  # {tf: float}
 
 _STATS = {
     'snapshots_built': 0,
@@ -73,24 +73,41 @@ _STATS = {
     'last_coverage_ratio': 0.0,
     'last_build_coins_ok': 0,
     'last_build_coins_total': 0,
-    'last_missing_coins': [],   # observability
-    'commit_reason_soft':     0,  # ratio >= 0.85
-    'commit_reason_monotonic':0,  # ratio >= prev
-    'commit_reason_stale':    0,  # ratio >= 0.75 AND snapshot stale
+    'last_missing_coins': [],
+    'commit_reason_soft':     0,
+    'commit_reason_monotonic':0,
+    'commit_reason_stale':    0,
+    'concurrent_builds_skipped': 0,
 }
 
 
-def snapshot_age_sec():
-    if _GLOBAL_SNAPSHOT['ts'] == 0:
+def _get_tf_lock(tf):
+    with _PER_TF_LOCK_GUARD:
+        lk = _PER_TF_LOCKS.get(tf)
+        if lk is None:
+            lk = threading.Lock()
+            _PER_TF_LOCKS[tf] = lk
+        return lk
+
+
+def snapshot_age_sec(tf=None):
+    """Age of the most recent commit. If tf given, age for that TF only."""
+    if tf is not None:
+        ts = _GLOBAL_SNAPSHOT['ts_by_tf'].get(tf, 0.0)
+        return float('inf') if ts == 0 else time.time() - ts
+    # No TF: oldest age across all loaded TFs
+    if not _GLOBAL_SNAPSHOT['ts_by_tf']:
         return float('inf')
-    return time.time() - _GLOBAL_SNAPSHOT['ts']
+    return time.time() - min(_GLOBAL_SNAPSHOT['ts_by_tf'].values())
 
 
 def snapshot_status():
     return {
         'active': True,
-        'mode': 'three_tier_commit_gate',
+        'mode': 'parallel_per_tf_v4',
         'age_sec': round(snapshot_age_sec(), 1),
+        'age_per_tf': {tf: round(time.time() - ts, 1)
+                       for tf, ts in _GLOBAL_SNAPSHOT['ts_by_tf'].items()},
         'is_fresh': snapshot_age_sec() < SNAPSHOT_TTL_SEC,
         'coverage_threshold': COVERAGE_THRESHOLD,
         'coverage_soft_target': COVERAGE_SOFT_TARGET,
@@ -98,26 +115,22 @@ def snapshot_status():
         'tfs_loaded': list(_GLOBAL_SNAPSHOT['tf'].keys()),
         'coins_per_tf': {tf: len(coins) for tf, coins in _GLOBAL_SNAPSHOT['tf'].items()},
         'lkg_size': sum(len(c) for c in _LAST_KNOWN_GOOD.values()),
-        'building': _BUILD_LOCK.get('active', False),
+        'building': dict(_BUILDS_ACTIVE),
+        'max_workers_default': MAX_WORKERS_DEFAULT,
         **_STATS,
     }
 
 
 def get_candles(coin, tf='15m'):
-    # 2026-04-25: case-preserving lookup. HL uses lowercase 'k' prefix for
-    # 1000x multiplier symbols (kFLOKI, kSHIB, kPEPE). Uppercasing breaks them.
-    # Try exact match first (fast), then case-insensitive scan as fallback
-    # for legacy callers that may use a different case.
+    """Case-preserving lookup; falls back to LKG; case-insensitive scan last."""
     with _SNAPSHOT_LOCK:
         snap_tf = _GLOBAL_SNAPSHOT['tf'].get(tf, {})
-        # Exact match — fast path
         if coin in snap_tf:
             return snap_tf[coin]
         lkg_tf = _LAST_KNOWN_GOOD.get(tf, {})
         if coin in lkg_tf:
             _STATS['fallback_to_lkg'] += 1
             return lkg_tf[coin]
-        # Case-insensitive scan — slow fallback for callers using different case
         coin_l = coin.lower()
         for k, v in snap_tf.items():
             if k.lower() == coin_l:
@@ -129,22 +142,44 @@ def get_candles(coin, tf='15m'):
     return []
 
 
-def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=None):
-    """Atomic full-universe snapshot build with coverage gate."""
-    age = snapshot_age_sec()
+def build_snapshot(coins, tf, fetch_fn, throttle_fn=None,
+                   n_bars=100, log_fn=None, max_workers=None):
+    """Parallel atomic full-universe snapshot build with coverage gate.
+
+    Concurrency model:
+      - Workers: ThreadPoolExecutor(max_workers). I/O-bound: fine on GIL.
+      - throttle_fn: still called once per coin BEFORE submitting the fetch.
+        With concurrent workers, the throttle becomes a rate-limiter rather
+        than a strict serial gap — calls are released at the throttle's
+        pace, workers pick them up and run fetches in parallel.
+      - Per-TF lock prevents double-build of the same TF; different TFs
+        can build concurrently.
+
+    Performance:
+      - 80 coins, 0.1s OKX throttle, 8 workers, ~150ms per fetch:
+        ≈ max(80 × 0.1s = 8s,  ceil(80/8) × 0.15s = 1.5s) = ~10s.
+      - vs sequential at 2s gap = 160s. ~16× speedup.
+    """
+    if max_workers is None:
+        max_workers = MAX_WORKERS_DEFAULT
+
+    age = snapshot_age_sec(tf)
     if age < SNAPSHOT_TTL_SEC:
         _STATS['snapshots_reused'] += 1
         n_loaded = len(_GLOBAL_SNAPSHOT['tf'].get(tf, {}))
         return {'ok': n_loaded, 'total': n_loaded, 'coverage': 1.0,
                 'committed': False, 'reused': True}
 
-    if _BUILD_LOCK.get('active'):
+    tf_lock = _get_tf_lock(tf)
+    if not tf_lock.acquire(blocking=False):
+        # Another worker is already building this exact TF; don't pile on
+        _STATS['concurrent_builds_skipped'] += 1
         if log_fn:
-            log_fn(f"[snapshot] build skipped — another builder active for tf={_BUILD_LOCK.get('tf')}")
+            log_fn(f"[snapshot] build skipped — {tf} already in flight")
         return {'ok': 0, 'total': 0, 'coverage': 0.0,
                 'committed': False, 'skipped': True}
 
-    _BUILD_LOCK.update({'active': True, 'tf': tf, 'started_at': time.time()})
+    _BUILDS_ACTIVE[tf] = time.time()
 
     try:
         coins_list = list(coins)
@@ -158,24 +193,34 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
         fail_count = 0
         missing_coins = []
 
-        for coin in coins_list:
-            # 2026-04-25: preserve original case (HL needs 'kFLOKI' not 'KFLOKI')
+        def _fetch_one(coin):
             try:
-                if throttle_fn:
+                if throttle_fn is not None:
                     throttle_fn()
                 candles = fetch_fn(coin, tf, n_bars)
-                if candles and len(candles) > 0:
+                return (coin, candles, None)
+            except Exception as e:
+                return (coin, None, e)
+
+        # Bounded concurrency. workers ≤ max_workers; throttle controls
+        # the actual fetch rate.
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, n_total)),
+                                thread_name_prefix=f'snap-{tf}') as ex:
+            futures = [ex.submit(_fetch_one, c) for c in coins_list]
+            for fut in as_completed(futures):
+                coin, candles, err = fut.result()
+                if err is not None:
+                    _STATS['fetch_errors'] += 1
+                    fail_count += 1
+                    missing_coins.append(coin)
+                    if log_fn:
+                        log_fn(f"[snapshot] fetch err {coin} {tf}: {err}")
+                elif candles and len(candles) > 0:
                     new_snap[coin] = candles
                     ok_count += 1
                 else:
                     fail_count += 1
                     missing_coins.append(coin)
-            except Exception as e:
-                _STATS['fetch_errors'] += 1
-                fail_count += 1
-                missing_coins.append(coin)
-                if log_fn:
-                    log_fn(f"[snapshot] fetch err {coin} {tf}: {e}")
 
         duration = time.time() - start
         coverage = ok_count / max(1, n_total)
@@ -184,16 +229,11 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
         _STATS['last_coverage_ratio'] = round(coverage, 3)
         _STATS['last_build_coins_ok'] = ok_count
         _STATS['last_build_coins_total'] = n_total
-        # Cap missing list for /health (avoid bloat with degenerate cases)
         _STATS['last_missing_coins'] = missing_coins[:25]
 
         # ─── THREE-TIER COMMIT GATE ──────────────────────────────────────
-        # Rule 1: soft target — always commit at or above 0.85
-        # Rule 2: monotonic — accept if not worse than previous snapshot
-        # Rule 3: stale rescue — accept if above hard floor AND snapshot stale
-        # Else: reject (kept previous, LKG expanded with what we got)
         prev_ratio = _PREV_COVERAGE_RATIO.get(tf, 0.0)
-        is_stale = snapshot_age_sec() >= SNAPSHOT_TTL_SEC
+        is_stale = snapshot_age_sec(tf) >= SNAPSHOT_TTL_SEC
         commit = False
         commit_reason = None
 
@@ -201,20 +241,17 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
             commit = True
             commit_reason = 'soft'
         elif coverage >= prev_ratio and prev_ratio > 0:
-            # Not worse than previous → safe forward step
             commit = True
             commit_reason = 'monotonic'
         elif coverage >= COVERAGE_HARD_FLOOR and is_stale:
-            # Hard floor + stale rescue → better than starvation
             commit = True
             commit_reason = 'stale'
-        # else: reject
 
         committed = False
         if commit:
             with _SNAPSHOT_LOCK:
                 _GLOBAL_SNAPSHOT['tf'][tf] = new_snap
-                _GLOBAL_SNAPSHOT['ts'] = time.time()
+                _GLOBAL_SNAPSHOT['ts_by_tf'][tf] = time.time()
                 for c, candles in new_snap.items():
                     _LAST_KNOWN_GOOD[tf][c] = candles
             _STATS['snapshots_committed'] += 1
@@ -223,11 +260,12 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
             committed = True
             if log_fn:
                 miss_n = len(missing_coins)
-                miss_preview = (',' .join(missing_coins[:6]) +
+                miss_preview = (','.join(missing_coins[:6]) +
                                 (f',+{miss_n-6}' if miss_n > 6 else '')) if miss_n else ''
                 log_fn(f"[snapshot] COMMIT tf={tf} coverage={coverage:.1%} "
                        f"reason={commit_reason} ok={ok_count}/{n_total} "
-                       f"missing={miss_n}({miss_preview}) dur={duration:.1f}s")
+                       f"missing={miss_n}({miss_preview}) dur={duration:.1f}s "
+                       f"workers={max_workers}")
         else:
             _STATS['snapshots_rejected'] += 1
             with _SNAPSHOT_LOCK:
@@ -235,9 +273,9 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
                     _LAST_KNOWN_GOOD[tf][c] = candles
             if log_fn:
                 log_fn(f"[snapshot] REJECT tf={tf} coverage={coverage:.1%} "
-                       f"prev={prev_ratio:.1%} hard_floor={COVERAGE_HARD_FLOOR:.0%} "
+                       f"prev={prev_ratio:.1%} hard={COVERAGE_HARD_FLOOR:.0%} "
                        f"stale={is_stale} — kept previous, LKG expanded "
-                       f"({len(missing_coins)} coins missing)")
+                       f"({len(missing_coins)} missing)")
 
         return {
             'ok': ok_count, 'total': n_total,
@@ -248,9 +286,14 @@ def build_snapshot(coins, tf, fetch_fn, throttle_fn=None, n_bars=100, log_fn=Non
         }
 
     finally:
-        _BUILD_LOCK.update({'active': False, 'tf': None, 'started_at': 0.0})
+        _BUILDS_ACTIVE.pop(tf, None)
+        tf_lock.release()
 
 
-def invalidate():
+def invalidate(tf=None):
+    """Force next build to actually rebuild rather than reuse cache."""
     with _SNAPSHOT_LOCK:
-        _GLOBAL_SNAPSHOT['ts'] = 0.0
+        if tf is None:
+            _GLOBAL_SNAPSHOT['ts_by_tf'].clear()
+        else:
+            _GLOBAL_SNAPSHOT['ts_by_tf'].pop(tf, None)
