@@ -10234,12 +10234,13 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as e:
             log(f"pullback err {coin}: {e}")
     # Tertiary: wall-bounce retest engine (requires verified OB + V3 alignment)
-    # 2026-04-28: HARD-REMOVED. WALL_BNC failed in its theoretical sweet spot
-    # (chop/bear-calm): -$1.16 / 4 trades / 50% WR. Concept (bounce off support
-    # walls) doesn't survive contact with our notional+latency. To restore:
-    # remove the `if False:` guard. Was also in DISABLE_ENGINES env, but that
-    # only catches AFTER signal generation — wraps the entire check.
-    if False and not sig:
+    # 2026-04-28: hard-disabled after -$1.16 / 4 trades on stale snapshot data.
+    # 2026-05-11: re-enabled behind WALL_BNC_ENABLED env kill-switch.
+    # wall_bounce.check() returns immediately if env != '1' — no cost when off.
+    # Snapshot/cache hardening + 429 fixes + smaller live notional address the
+    # latency-and-notional failure mode from April. Flip the env to activate;
+    # gate-fail counters in status() reveal why fires happen (or don't).
+    if not sig:
         try:
             # Infer V3 direction from trend_gate checks
             v3_dir = 0
