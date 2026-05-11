@@ -867,11 +867,67 @@ def save_state(state):
         # once HL confirms the entry fill (phase transitions to 'live' or
         # 'tp1_filled'). The dashboard should only show real positions.
         # phase='done' is a closed position pending cleanup — also exclude.
+        #
+        # 2026-05-11: phase alone is unreliable. Persisted state can carry
+        # phase='live' for entries that never truly cumulatively filled
+        # (e.g. spurious WS events, restart-from-disk with stale state).
+        # Add two stronger checks:
+        #   1. Require entry_filled_sz >= 95% of sz_total (the same
+        #      threshold used by the on-fill transition)
+        #   2. Cross-check vs HL clearinghouseState — drop any position
+        #      not actually present on the wallet; self-heal phase='done'
+        #      in state so subsequent loops stop including it.
         all_pos = state.get('positions', {})
-        filled_pos = {
-            coin: p for coin, p in all_pos.items()
-            if p.get('phase') in ('live', 'tp1_filled')
-        }
+
+        # Step 1: query HL for ground truth (best-effort)
+        hl_coins = None
+        try:
+            import urllib.request as _ur2, json as _json2
+            body2 = _json2.dumps({'type': 'clearinghouseState', 'user': WALLET}).encode()
+            req2 = _ur2.Request('https://api.hyperliquid.xyz/info', data=body2,
+                                headers={'Content-Type': 'application/json'})
+            with _ur2.urlopen(req2, timeout=5) as r2:
+                cs = _json2.loads(r2.read())
+            hl_coins = set()
+            for ap in cs.get('assetPositions', []):
+                pp = ap.get('position', {}) or {}
+                try:
+                    sz_hl = float(pp.get('szi', 0))
+                except (TypeError, ValueError):
+                    sz_hl = 0
+                if abs(sz_hl) > 0:
+                    hl_coins.add(pp.get('coin'))
+        except Exception:
+            hl_coins = None
+
+        # Step 2: self-heal — mark phase='done' for positions not on HL
+        # so they get cleaned up on the next save cycle.
+        if hl_coins is not None:
+            for coin, p in list(all_pos.items()):
+                if coin in hl_coins:
+                    continue
+                if p.get('phase') in ('live', 'tp1_filled', 'pending_fill'):
+                    cum_filled = float(p.get('entry_filled_sz', 0) or 0)
+                    sz_total = float(p.get('sz_total', 0) or 0)
+                    # Only self-heal if we *thought* it was live but HL says no
+                    if p.get('phase') in ('live', 'tp1_filled') or \
+                       (p.get('phase') == 'pending_fill' and cum_filled > 0):
+                        p['phase'] = 'done'
+                        log(f'  selfheal: {coin} phase→done (not on HL, was {p.get("phase")})')
+
+        # Step 3: build filled_pos — strict checks
+        filled_pos = {}
+        for coin, p in all_pos.items():
+            if p.get('phase') not in ('live', 'tp1_filled'):
+                continue
+            cum_filled = float(p.get('entry_filled_sz', 0) or 0)
+            sz_total = float(p.get('sz_total', 0) or 0)
+            if sz_total > 0 and cum_filled < sz_total * 0.95:
+                continue  # phase says live but entry never actually filled
+            if hl_coins is not None and coin not in hl_coins:
+                continue  # HL says not present — drop
+            filled_pos[coin] = p
+
         _dash_push(
             engine_name='smc-loose',
             live=LIVE_TRADING,
