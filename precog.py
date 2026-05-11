@@ -14029,11 +14029,17 @@ if __name__ == '__main__':
         while True:
             try:
                 # Open positions from position_ledger.all_rows()
+                # Filter to LIVE state only — PENDING_ENTRY rows are
+                # entries submitted to HL but not yet filled. They should
+                # not appear as "open_positions" on the dashboard (causes
+                # phantom-position bug where unfilled maker-only entries
+                # are reported as live trades).
                 positions_dict = {}
                 try:
                     rows = position_ledger.all_rows() or {}
                     for coin, row in rows.items():
                         if not row: continue
+                        if row.get('state') != 'LIVE': continue
                         sz = float(row.get('size') or 0)
                         if abs(sz) < 1e-12: continue
                         is_long = row.get('is_long')
