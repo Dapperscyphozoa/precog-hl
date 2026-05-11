@@ -269,13 +269,36 @@ def start_heartbeat(engine_name, state_getter, config_getter, interval_sec=60,
             try:
                 state = state_getter() or {}
                 cfg = config_getter() or {}
+                # ── Filter pending/done positions out of heartbeat push ──
+                # save_state has its own filter, but heartbeat is a SEPARATE
+                # push path (60s cadence) that gets the raw state.positions.
+                # Without filtering here, phantoms (phase=pending_fill or
+                # corrupt phase=live without actual fill) leak through.
+                all_pos = state.get('positions', {}) or {}
+                filtered_pos = {}
+                for coin, p in all_pos.items():
+                    if not isinstance(p, dict):
+                        continue
+                    phase = p.get('phase')
+                    # No phase field → assume legacy engine, include it
+                    if phase is None:
+                        filtered_pos[coin] = p
+                        continue
+                    if phase not in ('live', 'tp1_filled'):
+                        continue
+                    # Even if phase says live, require entry actually filled
+                    cum = float(p.get('entry_filled_sz', 0) or 0)
+                    tot = float(p.get('sz_total', 0) or 0)
+                    if tot > 0 and cum < tot * 0.95:
+                        continue
+                    filtered_pos[coin] = p
                 push_state(
                     engine_name=engine_name,
                     live=cfg.get('live', False),
                     sizing_mode=cfg.get('sizing_mode'),
                     notional_usd=cfg.get('notional_usd'),
                     max_concurrent=cfg.get('max_concurrent'),
-                    positions_dict=state.get('positions', {}),
+                    positions_dict=filtered_pos,
                     history_list=state.get('history', []),
                     scan_count=state.get('scan_count', 0),
                     last_scan_ts=state.get('last_scan_ts', 0),
