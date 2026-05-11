@@ -3085,6 +3085,7 @@ def backtest_router_endpoint():
         compare=1     (default 1 → run all 3 variants)
     """
     import datetime, os
+    from flask import request
     try:
         from router_harness.harness import compare_variants, run_backtest
         from router_harness.router import route
