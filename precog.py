@@ -6950,6 +6950,10 @@ def current_risk_pct(equity):
 # ═══════════════════════════════════════════════════════
 def load_state():
     default = {'positions':{}, 'cooldowns':{}, 'consec_losses':0, 'cb_pause_until':0, 'last_pnl_close':None, 'cd_format':'ts'}
+    # B-RECON: env-controlled hard reset for phantom-position cleanup.
+    # When PRECOG_RESET_POSITIONS=1, wipe all in-memory positions on boot.
+    # Operator workflow: set env, redeploy, observe clean boot, unset env.
+    _force_reset = os.environ.get('PRECOG_RESET_POSITIONS','0') == '1'
     try:
         # Try primary path, fall back to backup
         path = STATE_PATH if os.path.exists(STATE_PATH) else STATE_PATH + '.bak'
@@ -6960,6 +6964,10 @@ def load_state():
             loaded['cd_format'] = 'ts'
         for k,v in default.items():
             if k not in loaded: loaded[k]=v
+        if _force_reset:
+            n_before = len(loaded.get('positions',{}))
+            loaded['positions'] = {}
+            print(f'=== B-RECON: PRECOG_RESET_POSITIONS=1 -> cleared {n_before} stale position entries ===', flush=True)
         # Auto-scrub bogus stats (any bucket pnl > 100% is impossible, drop it)
         s = loaded.get('stats', {})
         if s:
