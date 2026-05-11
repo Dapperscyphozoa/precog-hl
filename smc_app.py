@@ -205,6 +205,34 @@ def _boot():
                     except Exception:
                         hl_coins = None  # network error → fall back to local state
 
+                    # Self-healing cleanup: pop state.positions entries that
+                    # are no longer on HL. These are positions that closed
+                    # natively (TP/SL fill on HL) without smc-v1's close hook
+                    # firing. Bounded by smc-* trade_id prefix to avoid
+                    # touching positions adopted by reconciler.
+                    if hl_coins is not None:
+                        stale = []
+                        for coin, pos in list((smc_state.state.positions or {}).items()):
+                            if coin in hl_coins:
+                                continue
+                            tid = (pos or {}).get('trade_id', '') or ''
+                            if not tid.startswith('smc-'):
+                                continue
+                            stale.append(coin)
+                        for coin in stale:
+                            try:
+                                smc_state.state.positions.pop(coin, None)
+                                log.info(f"[dash] cleanup: popped state.positions[{coin}] — closed on HL, hook missed")
+                            except Exception as e:
+                                log.warning(f"[dash] cleanup err {coin}: {e}")
+                        if stale:
+                            try:
+                                # Best-effort persist — module may export state_persist
+                                if hasattr(smc_state, 'state_persist'):
+                                    smc_state.state_persist()
+                            except Exception:
+                                pass
+
                     positions_for_push = {}
                     for coin, p in (smc_state.state.positions or {}).items():
                         # Skip if HL fetch succeeded and this coin isn't on the wallet
