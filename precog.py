@@ -3107,17 +3107,29 @@ def backtest_endpoint():
             # Pull top N by volume from HL meta_and_asset_ctxs (same as shadow tier)
             try:
                 # 2026-05-11: route through meta_cache (shared singleton)
+                # 2026-05-11 v2: distinguish ImportError (legitimate fallback)
+                # from None-return (429 backoff — must NOT re-hit HL directly,
+                # that's the very thing the cache exists to prevent).
+                _shared = None
+                _mc_imported = False
                 try:
                     import meta_cache as _mc
+                    _mc_imported = True
                     _shared = _mc.get_meta_ctxs(info)
-                except Exception:
-                    _shared = None
+                except ImportError:
+                    pass
                 if _shared:
                     meta, ctxs = _shared
-                else:
+                elif not _mc_imported:
+                    # meta_cache module missing — legitimate direct fallback
                     meta_ctxs = info.meta_and_asset_ctxs()
                     meta = meta_ctxs[0]
                     ctxs = meta_ctxs[1]
+                else:
+                    # Cache returned None (HL 429 backoff or info not ready).
+                    # Must NOT re-hit HL directly — that's the saturation source.
+                    log('meta_cache unavailable (429 backoff) — backtest top-N deferred')
+                    return jsonify({'err': 'meta_cache unavailable (HL rate-limit backoff). Retry in 30s.'}), 503
                 # Exclude live coins
                 live = set(COINS)
                 ranked = []
@@ -7515,23 +7527,33 @@ def get_all_positions_live(force=False):
 
 _FUNDING_CACHE = {'data': {}, 'ts': 0}
 def get_funding_rate(coin):
+    """Fetch current funding rate for a coin (per hour). Negative = shorts pay, positive = longs pay."""
     now = __import__('time').time()
     if now - _FUNDING_CACHE['ts'] < 900:  # cache 15 min
         return _FUNDING_CACHE['data'].get(coin, 0)
-    """Fetch current funding rate for a coin (per hour). Negative = shorts pay, positive = longs pay."""
     try:
         # 2026-05-11: route through meta_cache (shared singleton, 30s TTL)
+        # 2026-05-11 v2: distinguish ImportError (legit fallback) from None
+        # (429 backoff — must NOT re-hit HL directly). On None, return stale
+        # cached funding (15min TTL is acceptable for this signal).
+        _shared = None
+        _mc_imported = False
         try:
             import meta_cache as _mc
+            _mc_imported = True
             _shared = _mc.get_meta_ctxs(info)
-        except Exception:
-            _shared = None
+        except ImportError:
+            pass
         if _shared:
             universe, asset_ctxs = _shared[0]['universe'], _shared[1]
-        else:
+        elif not _mc_imported:
+            # meta_cache module missing — legitimate direct fallback
             meta = info.meta_and_asset_ctxs()
             asset_ctxs = meta[1]
             universe = meta[0]['universe']
+        else:
+            # Cache None (429 backoff). Serve stale value from _FUNDING_CACHE.
+            return _FUNDING_CACHE['data'].get(coin, 0)
         for i, u in enumerate(universe):
             if u['name']==coin and i<len(asset_ctxs):
                 return float(asset_ctxs[i].get('funding', 0))

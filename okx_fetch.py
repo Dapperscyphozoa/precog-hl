@@ -21,6 +21,7 @@ OKX endpoint:
 """
 
 import json
+import threading
 import time
 import urllib.request
 import urllib.parse
@@ -159,16 +160,21 @@ def fetch_klines(hl_coin, interval, n_bars):
 # 0.05s gap = 20 req/s = right at the limit. Use 0.1s to be safe.
 _LAST_CALL = [0.0]
 _MIN_GAP_SEC = 0.1
+_THROTTLE_LOCK = threading.Lock()  # serialise the gate; fetches stay parallel
 
 
 def throttle():
     """Per-call gap to stay under OKX public rate limit.
+    Thread-safe — lock held through the sleep so concurrent workers
+    serialise the gate (without this, N workers all read _LAST_CALL,
+    all skip the sleep, all fire near-simultaneously → instant 429).
     Drop-in compatible with precog.py's _hl_throttle signature."""
-    now = time.time()
-    gap = now - _LAST_CALL[0]
-    if gap < _MIN_GAP_SEC:
-        time.sleep(_MIN_GAP_SEC - gap)
-    _LAST_CALL[0] = time.time()
+    with _THROTTLE_LOCK:
+        now = time.time()
+        gap = now - _LAST_CALL[0]
+        if gap < _MIN_GAP_SEC:
+            time.sleep(_MIN_GAP_SEC - gap)
+        _LAST_CALL[0] = time.time()
 
 
 # Smoke test
