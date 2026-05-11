@@ -3077,6 +3077,54 @@ def drift_diagnostic():
         return jsonify({'err': str(e), 'trace': _tb.format_exc()[-500:]}), 500
 
 
+@app.route('/backtest/router', methods=['GET'])
+def backtest_router_endpoint():
+    """Run the wall-router harness on recorded data. Returns 3-variant comparison.
+    Query params:
+        date=YYYYMMDD (default today)
+        compare=1     (default 1 → run all 3 variants)
+    """
+    import datetime, os
+    try:
+        from router_harness.harness import compare_variants, run_backtest
+        from router_harness.router import route
+        from router_harness.recorder import stats as _recorder_stats
+    except Exception as e:
+        return jsonify({'err': f'harness import failed: {e}'}), 500
+    date = request.args.get('date', datetime.datetime.utcnow().strftime('%Y%m%d'))
+    base = os.environ.get('ROUTER_HARNESS_DIR', '/var/data/router_harness')
+    walls_path = os.path.join(base, f'walls_{date}.jsonl')
+    signals_path = os.path.join(base, f'signals_{date}.jsonl')
+    if not os.path.exists(walls_path) or not os.path.exists(signals_path):
+        return jsonify({
+            'err': 'no recorded data for date',
+            'walls_path': walls_path,
+            'signals_path': signals_path,
+            'recorder_stats': _recorder_stats(),
+        }), 404
+    if request.args.get('compare', '1') == '1':
+        return jsonify({
+            'date': date,
+            'recorder_stats': _recorder_stats(),
+            'comparison': compare_variants(signals_path, walls_path),
+        })
+    return jsonify({
+        'date': date,
+        'recorder_stats': _recorder_stats(),
+        'result': run_backtest(signals_path, walls_path, route),
+    })
+
+
+@app.route('/router/stats', methods=['GET'])
+def router_stats_endpoint():
+    """Recorder stats — how much data we've captured for the harness."""
+    try:
+        from router_harness.recorder import stats as _recorder_stats
+        return jsonify(_recorder_stats())
+    except Exception as e:
+        return jsonify({'err': str(e)}), 500
+
+
 @app.route('/backtest', methods=['GET'])
 def backtest_endpoint():
     """Run historical backtest of confluence_engine on a list of coins.
@@ -10465,11 +10513,34 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
         except Exception as _tce:
             log(f"trend_cont err {coin}: {_tce}")
 
+    # 2026-05-11: router_harness recorder. Capture the signal attempt BEFORE
+    # any guard drops it. The harness replays these to score router decisions.
+    if sig and signal_engine:
+        try:
+            from router_harness.recorder import record_signal_attempt
+            record_signal_attempt(
+                coin=coin, side=sig, engine=signal_engine,
+                entry_px=float(get_mid(coin) or 0),
+                blocked_by=None, block_reason=None,
+            )
+        except Exception:
+            pass
+
     # 2026-04-27: engine kill switch. Nullify signal if engine is disabled
     # via DISABLE_ENGINES env, auto-paused (rolling WR), or per-coin x
     # per-engine paused (this coin+engine has proven negative rolling WR).
     if sig and signal_engine and _engine_disabled(signal_engine, coin=coin):
         log(f"{coin} {sig} {signal_engine} dropped: engine_disabled (manual/auto-pause/coin-pair)")
+        # Record the block too so the harness sees which signals got vetoed
+        try:
+            from router_harness.recorder import record_signal_attempt
+            record_signal_attempt(
+                coin=coin, side=sig, engine=signal_engine,
+                entry_px=float(get_mid(coin) or 0),
+                blocked_by='engine_disabled', block_reason='manual/auto-pause/coin-pair',
+            )
+        except Exception:
+            pass
         sig = None
 
     # 2026-04-29: BUCKET FILTER — historical MFE-positive rate veto.
@@ -14005,6 +14076,47 @@ if __name__ == '__main__':
             _t.sleep(30)
 
     threading.Thread(target=_dashboard_push_loop, daemon=True, name='dashboard_push').start()
+
+    # 2026-05-11: router_harness wall-state recorder. Every 30s, dump verified
+    # walls per coin to /var/data/router_harness/walls_YYYYMMDD.jsonl. The
+    # backtest harness needs this — historical orderbook depth doesn't exist
+    # anywhere else in our stack. Cheap (<1KB/coin/snapshot, <10MB/day).
+    def _wall_recorder_loop():
+        import time as _t
+        _interval = int(os.environ.get('WALL_RECORDER_INTERVAL_S', '30'))
+        try:
+            from router_harness.recorder import record_wall_snapshot
+        except Exception as e:
+            log(f'[wall_recorder] import err — disabled: {e}')
+            return
+        _t.sleep(60)  # give orderbook_ws time to populate
+        while True:
+            try:
+                # Snapshot every coin with depth data
+                with orderbook_ws._LOCK:
+                    coins = list(orderbook_ws._DEPTH.keys())
+                for c in coins:
+                    try:
+                        walls = orderbook_ws.get_walls(c)
+                        # Enrich with persistence_sec from windows count
+                        enriched = []
+                        for w in walls:
+                            w2 = dict(w)
+                            w2['persistence_sec'] = w2.get('persistence_windows', 0) * 30
+                            enriched.append(w2)
+                        with orderbook_ws._LOCK:
+                            d = orderbook_ws._DEPTH.get(c, {})
+                            mid = d.get('mid', 0)
+                        if mid and enriched:
+                            record_wall_snapshot(c, mid, enriched)
+                    except Exception:
+                        pass
+            except Exception as e:
+                log(f'[wall_recorder] loop err: {e}')
+            _t.sleep(_interval)
+
+    if os.environ.get('WALL_RECORDER_ENABLED', '1') == '1':
+        threading.Thread(target=_wall_recorder_loop, daemon=True, name='wall_recorder').start()
 
     # 2026-04-30: periodic naked-position protection sweep.
     # Belt-and-braces guard for entries where SL placement raced the
