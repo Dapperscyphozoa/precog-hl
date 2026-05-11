@@ -1549,6 +1549,11 @@ async function _fetchPaperPendingSignals() {
 
     const out = [];
     for (const r of results) {
+        // Engine self-reports its mode_effective ('live' | 'paper' | 'dry_run').
+        // When LIVE_TRADING=1 + key + extraAgent validated, mode_effective='live'.
+        // Render the badge to match operational reality, not the engine's category.
+        const engineMode = (r.state && r.state.mode_effective) ? r.state.mode_effective : 'paper';
+        const badge = (engineMode === 'live') ? 'LIVE' : 'PAPER';
         // 1) State-machine pending stages (breakout has fired/extended/armed)
         const stages = r.state && r.state.stages ? r.state.stages : {};
         // For breakout: pending = signals with stage in {fired, extended, armed}
@@ -1559,7 +1564,7 @@ async function _fetchPaperPendingSignals() {
                     if (['fired','extended','armed','pending'].includes(stage)) {
                         out.push({
                             coin: s.coin,
-                            kind: 'PAPER',
+                            kind: badge,
                             stage: stage.toUpperCase(),
                             side: s.fade_direction || s.raw_direction || s.armed_side || '',
                             entry: s.armed_entry_px || s.ref_price || s.bb_mid_px || null,
@@ -1576,7 +1581,7 @@ async function _fetchPaperPendingSignals() {
             if (t.status === 'pending_fill' || t.status === 'pending') {
                 out.push({
                     coin: t.coin,
-                    kind: 'PAPER',
+                    kind: badge,
                     stage: 'PENDING',
                     side: t.side,
                     entry: t.entry_px,
@@ -1612,9 +1617,13 @@ async function loadSignals() {
         const pendRows = pending.map(s => {
             const px = s.entry != null ? Number(s.entry).toPrecision(5) : '—';
             const eng = s.engine ? `<br><span style="opacity:0.4;font-size:9px;letter-spacing:0.05em">${s.engine}</span>` : '';
-            return `<div class="pos-row is-paper" style="grid-template-columns:70px 1fr auto;font-size:11px">
+            // Badge follows the engine's actual mode (kind set in _fetchPaperPendingSignals)
+            const isLive = s.kind === 'LIVE';
+            const rowCls = isLive ? 'pos-row' : 'pos-row is-paper';
+            const tagCls = isLive ? 'stage-tag stage-live' : 'stage-tag stage-paper';
+            return `<div class="${rowCls}" style="grid-template-columns:70px 1fr auto;font-size:11px">
                 <div class="pos-coin">${s.coin}${eng}</div>
-                <div style="opacity:0.8"><span class="stage-tag stage-paper" style="margin-right:6px">PAPER</span>${s.stage} ${s.side || ''} <span style="opacity:0.5">@ ${px}</span></div>
+                <div style="opacity:0.8"><span class="${tagCls}" style="margin-right:6px">${s.kind}</span>${s.stage} ${s.side || ''} <span style="opacity:0.5">@ ${px}</span></div>
                 <div style="font-size:9px;opacity:0.55">unfilled</div>
             </div>`;
         }).join('');
