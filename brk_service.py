@@ -867,13 +867,24 @@ def save_state(state):
 # EXECUTION — entry + native SL + native TP1 + native TP2
 # ═══════════════════════════════════════════════════════
 def make_cloid(coin, suffix):
-    """16-byte hex cloid via SHA-256. Uniquely encodes coin+timestamp+suffix
-    regardless of coin name length. Prefix `brk_` distinguishes from
-    SMC v2 (`smcv2_`), SMC-LOOSE (`smcloose_`), LSR (`lsr_`), multi-gate,
-    and SMC v1 cloids on the shared wallet.
+    """16-byte hex cloid. Embeds attribution prefix in first 7 bytes (ASCII)
+    followed by 9 bytes of sha256 for uniqueness.
+
+    2026-05-11: was pure sha256 (no recoverable prefix in fill history).
+    Now: 'pa_brk_' (7 bytes ASCII) + sha256(raw)[:9 bytes]. Total 16 bytes = 32 hex.
+
+    Decode in fill attribution: bytes.fromhex(cloid[2:])[:7].decode('ascii')
+    → 'pa_brk_' for this engine. Recoverable from HL fill history.
+
+    Prefix `pa_brk_` distinguishes from SMC v2 (`smcv2_`), SMC-LOOSE
+    (`smc-native-`, `smc-wkf-`), LSR (`lsr_`), multi-gate, and SMC v1 cloids
+    on the shared wallet.
     """
     raw = f'pa_brk_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
-    return '0x' + hashlib.sha256(raw).hexdigest()[:32]
+    h = hashlib.sha256(raw).digest()
+    prefix_bytes = b'pa_brk_'  # exactly 7 bytes
+    combined = prefix_bytes + h[:9]
+    return '0x' + combined.hex()
 
 
 def calc_size(coin, entry_px):
