@@ -820,6 +820,16 @@ def load_state():
             log(f'state .bak load err: {e2} — falling to default empty state')
             loaded = None
 
+    # B-RECON: env-controlled hard reset for phantom-position cleanup.
+    # When SMCV2_RESET_POSITIONS=1, wipe all in-memory positions on boot.
+    # Operator workflow: set env, redeploy, observe clean boot, unset env.
+    if os.environ.get('SMCV2_RESET_POSITIONS','0') == '1':
+        log('=== B-RECON: SMCV2_RESET_POSITIONS=1 → clearing all state positions ===')
+        if loaded is not None:
+            n_before = len(loaded.get('positions',{}))
+            loaded['positions'] = {}
+            log(f'B-RECON: cleared {n_before} stale position entries')
+
     if loaded is None:
         return default
 

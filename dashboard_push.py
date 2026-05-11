@@ -7,7 +7,7 @@ Usage in any engine service:
 
     # at the end of save_state(state):
     push_state(
-        engine_name      = 'lsr',                 # one of: multi-gate, smc-v1, smc-v2, smc-loose, lsr
+        engine_name      = 'multi-gate',          # one of: multi-gate, smc-v1, smc-v2, smc-loose, pool-arch-rev, pool-arch-cont
         live             = LIVE_TRADING,
         sizing_mode      = SIZING_MODE,
         notional_usd     = FIXED_NOTIONAL_USD,
@@ -73,28 +73,23 @@ def _compute_stats_12h(history_list):
             elif cr:                                                outcome = cr.upper()
 
         pnl_total += pnl
-        # Classification rule (no breakeven category):
-        #   - TP1/TP2 hits = WIN
-        #   - BE stop = WIN (TP1 already paid 50%, runner exited at entry — net positive)
-        #   - SL = LOSS
-        #   - TIMEOUT / PHANTOM_LIVE / pnl≈0 = NOT A TRADE (entry never filled or reconciled away)
-        #     These are excluded from W/L counts entirely.
-        if outcome.startswith('TP') or outcome == 'BE':
+        # Classification: BE-stops only fire after price moved in favor far enough
+        # to lock breakeven — that's a positive trade outcome. Any non-negative
+        # pnl on a BE/TP/timeout exit counts as a win. Only true negative pnl
+        # without a TP tag is a loss; only exact-zero non-BE exits are bes.
+        if outcome.startswith('TP') or pnl > 0:
             wins.append(pnl)
-        elif outcome.startswith('SL'):
-            losses.append(pnl)
-        elif outcome in ('TIMEOUT', 'PHANTOM_LIVE'):
-            pass  # not a real trade — exclude from counts
-        elif pnl > 0.001:
+        elif outcome == 'BE' and pnl >= 0:
             wins.append(pnl)
-        elif pnl < -0.001:
+        elif outcome.startswith('SL') or pnl < 0:
             losses.append(pnl)
-        # else: pnl≈0 with no clear outcome label → excluded
+        else:
+            bes.append(pnl)
     wr = (len(wins) / max(1, len(wins)+len(losses))) * 100 if (wins or losses) else None
     avg_win = (sum(wins)/len(wins)) if wins else 0.0
     avg_loss = (sum(losses)/len(losses)) if losses else 0.0
     rr_blended = (avg_win / abs(avg_loss)) if (avg_win > 0 and avg_loss < 0) else None
-    return {'wins': len(wins), 'losses': len(losses), 'breakevens': 0,
+    return {'wins': len(wins), 'losses': len(losses), 'breakevens': len(bes),
             'pnl_total': round(pnl_total, 4),
             'avg_win': round(avg_win, 4), 'avg_loss': round(avg_loss, 4),
             'wr': round(wr, 2) if wr is not None else None,
@@ -257,7 +252,7 @@ def start_heartbeat(engine_name, state_getter, config_getter, interval_sec=60,
     threshold isn't tripped.
 
     Args:
-        engine_name:    'multi-gate' / 'smc-v1' / 'smc-v2' / 'smc-loose' / 'lsr'
+        engine_name:    'multi-gate' / 'smc-v1' / 'smc-v2' / 'smc-loose' / 'pool-arch-rev' / 'pool-arch-cont'
         state_getter:   callable() -> the engine's state dict (with 'positions' and 'history')
         config_getter:  callable() -> dict with keys: live, sizing_mode, notional_usd, max_concurrent
         interval_sec:   how often to push (default 60s)

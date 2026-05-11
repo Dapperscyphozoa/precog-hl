@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreCog v8.28 — 50-coin universe + 48 MT4 tickers
+"""PreCog V1.0 — 50-coin universe + 48 MT4 tickers
 
 Dual signal engine:
   1. Internal BOS/pivot/RSI → per-ticker gated (73 configs)
@@ -37,6 +37,7 @@ import confidence
 import spoof_detection
 import session_scaler
 import whale_filter
+import whale_display
 import cvd_ws
 import oi_tracker
 import funding_arb
@@ -2546,7 +2547,7 @@ PRECOG_NAV = '''<style>
 <a href="/enforce" data-page="enforce">Enforce</a>
 <a href="/experiment" data-page="experiment">Experiment</a>
 <div class="nav-sep"></div>
-<span class="nav-tag">v8.28 · phase 1</span>
+<span class="nav-tag">V1.0 · phase 1</span>
 </nav>
 <script>(function(){var p=location.pathname,c="";if(p==="/"||p==="")c="dashboard";else if(p.indexOf("/violations")===0||p==="/audit")c="violations";else if(p.indexOf("/audit/deep")===0)c="deep";else if(p.indexOf("/audit/elasticity")===0)c="elasticity";else if(p.indexOf("/shadow")===0)c="shadow";else if(p.indexOf("/enforce")===0)c="enforce";else if(p.indexOf("/experiment")===0)c="experiment";document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.getAttribute("data-page")===c)a.classList.add("current")})})();</script>
 '''
@@ -2601,7 +2602,17 @@ def _load_violations_page():
 
 @app.route('/', methods=['GET'])
 @app.route('/landing', methods=['GET'])
+@app.route('/engines', methods=['GET'])
+@app.route('/system', methods=['GET'])
+@app.route('/macro', methods=['GET'])
 def landing():
+    """Single template for DASH | ENGINES | SYSTEM | MACRO views.
+    Inline script in landing.html reads location.pathname and sets
+    body[data-view=...]. CSS in landing.html shows/hides sections per view.
+    AUDIT (and /violations, /shadow, /enforce, /experiment) keep dedicated
+    handlers below — the AUDIT tab in the new 5-tab nav points to /audit
+    which is aliased to /violations by violations_audit().
+    """
     resp = Response(_load_landing(), mimetype='text/html')
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     resp.headers['Pragma'] = 'no-cache'
@@ -2678,7 +2689,7 @@ def conf_test(coin):
     except Exception as e:
         return jsonify({'err': str(e)})
 
-@app.route('/engines', methods=['GET'])
+@app.route('/api/engines', methods=['GET'])
 def engines_status():
     """Live engine + guard + venue state."""
     try:
@@ -2723,6 +2734,163 @@ def engines_status():
             'KRAKEN':   v_ok('kr'),
         },
         'venue_ages': venues,
+    })
+
+# ───────── V10 STATE RECEIVER (visibility for landing page) ─────────
+# V10 is a Render background_worker so it has no public HTTP. It pushes
+# its open positions + blacklist + universe state to this endpoint each
+# tick. The landing page reads /api/v10_state alongside the other paper
+# engines so V10's paper trades show in the Positions panel.
+_v10_state_lock = threading.Lock()
+_v10_state_cache = {
+    'service': 'V10', 'ts': 0, 'mode_effective': 'paper',
+    'open_trades': [], 'pending_count': 0, 'tick_count': 0,
+    'fires_total': 0, 'blacklist': {}, 'universe_size': 0,
+}
+V10_PUSH_SECRET = os.environ.get('V10_PUSH_SECRET', '')
+
+
+@app.route('/api/v10_state', methods=['GET', 'POST'])
+def v10_state():
+    if flask_request.method == 'POST':
+        # Auth: header secret must match V10_PUSH_SECRET env var
+        sent = flask_request.headers.get('X-Dash-Secret', '')
+        if not V10_PUSH_SECRET or sent != V10_PUSH_SECRET:
+            return jsonify({'error': 'unauthorized'}), 401
+        try:
+            payload = flask_request.get_json(force=True, silent=True) or {}
+        except Exception:
+            return jsonify({'error': 'bad_json'}), 400
+        with _v10_state_lock:
+            _v10_state_cache.update(payload)
+            _v10_state_cache['received_ts'] = int(time.time() * 1000)
+        return jsonify({'ok': True})
+    # GET — return latest snapshot
+    with _v10_state_lock:
+        snap = dict(_v10_state_cache)
+    return jsonify(snap)
+
+
+@app.route('/all_systems', methods=['GET'])
+def all_systems():
+    """Aggregate live state of all 5 trading engines on this wallet.
+    Source of truth: the unified dashboard service (which receives push-state
+    from each engine on every save_state). This endpoint queries the dashboard
+    server-side to sidestep CORS, then maps the response to the legacy shape
+    the landing page expects, plus a rich `engines` array with full per-engine
+    stats and a `totals` aggregate for top-of-page metrics.
+    """
+    import urllib.request as _ur, urllib.error as _ue, json as _json, time as _t
+
+    DASH_URL = os.environ.get('DASH_URL', 'https://dashboard-8b7i.onrender.com').rstrip('/')
+
+    # System metadata (display labels + universe info — not in dash payload)
+    SYSTEMS_META = {
+        'multi-gate': {'label': 'MULTI-GATE',  'branch': 'main',         'direction': 'L+S',
+                       'universe': 80,    'desc': 'PIVOT/PULLBACK/WALL/CVD/LIQ + 9 guards',
+                       'url': 'https://precog-i8c3.onrender.com'},
+        'smc-v1':     {'label': 'SMC v1',      'branch': 'smc-v1',       'direction': 'LONG',
+                       'universe': '~190', 'desc': 'Native SMC engine, long-only',
+                       'url': 'https://precog-sa.onrender.com'},
+        'smc-v2':     {'label': 'SMC v2',      'branch': 'smc-v2',       'direction': 'L+S',
+                       'universe': 173,   'desc': 'R3 backtest-validated SMC, both directions',
+                       'url': ''},
+        'smc-loose':  {'label': 'SMC-LOOSE',   'branch': 'smc-loose',    'direction': 'L+S',
+                       'universe': 173,   'desc': 'R-1_max loose params, full universe',
+                       'url': ''},
+        'pool-arch-rev':  {'label': 'POOL-ARCH (REV)', 'branch': 'uzt-unified', 'direction': 'L+S',
+                       'universe': 173,   'desc': 'Pool Architect — REVERSAL leg. UZT bridge, htf_displace=0.8',
+                       'url': ''},
+        'pool-arch-cont': {'label': 'POOL-ARCH (CONT)', 'branch': 'uzt-unified', 'direction': 'L+S',
+                       'universe': 173,   'desc': 'Pool Architect — CONTINUATION leg. BT +1,328R / 156 coins / 50d',
+                       'url': ''},
+    }
+    ORDER = ['multi-gate', 'smc-v1', 'smc-v2', 'smc-loose', 'pool-arch-rev', 'pool-arch-cont']
+
+    # Pull dash state (single round-trip)
+    dash_state = None
+    dash_error = None
+    try:
+        req = _ur.Request(f'{DASH_URL}/api/state', headers={'User-Agent':'multi-gate-aggregator'})
+        with _ur.urlopen(req, timeout=5) as r:
+            dash_state = _json.loads(r.read())
+    except _ue.HTTPError as e:
+        dash_error = f'dash HTTP {e.code}'
+    except Exception as e:
+        dash_error = f'dash err: {str(e)[:80]}'
+
+    by_name = {}
+    if dash_state:
+        for e in (dash_state.get('engines') or []):
+            by_name[e.get('engine')] = e
+
+    # Self-equity (HL clearinghouse via local cache — avoid extra round-trip)
+    try:
+        _eq = float(get_balance())
+    except Exception:
+        _eq = None
+
+    out = []
+    for name in ORDER:
+        meta = SYSTEMS_META[name]
+        d = by_name.get(name) or {}
+        present = bool(d.get('present'))
+        is_live = d.get('live') is True
+        entry = {
+            # Legacy fields (so old landing.html keeps working)
+            'name':            meta['label'],
+            'branch':          meta['branch'],
+            'direction':       meta['direction'],
+            'universe':        meta['universe'],
+            'desc':            meta['desc'],
+            'url':             meta['url'],
+            'live':            is_live and present and not d.get('stale', True),
+            'equity':          _eq if name == 'multi-gate' else None,
+            'positions':       d.get('open_count', 0) if present else None,
+            'commit':          (dash_state or {}).get('commit', '')[:8] if dash_state else '',
+            'engines_active':  None,
+            'error':           None if present else (dash_error or 'no_signal'),
+            # Rich fields from dashboard
+            'engine_key':      name,
+            'present':         present,
+            'stale':           d.get('stale', True),
+            'age_sec':         d.get('age_sec'),
+            'sizing_mode':     d.get('sizing_mode'),
+            'notional_usd':    d.get('notional_usd'),
+            'max_concurrent':  d.get('max_concurrent'),
+            'pnl_total':       d.get('pnl_total', 0) or 0,
+            'wins':            d.get('wins', 0) or 0,
+            'losses':          d.get('losses', 0) or 0,
+            'breakevens':      d.get('breakevens', 0) or 0,
+            'wr':              d.get('wr'),
+            'avg_win':         d.get('avg_win', 0) or 0,
+            'avg_loss':        d.get('avg_loss', 0) or 0,
+            'rr_blended':      d.get('rr'),
+            'open_positions':  d.get('open_positions', []) or [],
+        }
+        out.append(entry)
+
+    # Aggregate totals (drives the top-of-page summary)
+    agg = (dash_state or {}).get('aggregate', {}) or {}
+    totals = {
+        'pnl_total':       agg.get('pnl_total', 0) or 0,
+        'closes':          agg.get('closes', 0) or 0,
+        'open':            agg.get('open', 0) or 0,
+        'wins':            agg.get('wins', 0) or 0,
+        'losses':          agg.get('losses', 0) or 0,
+        'wr':              agg.get('wr'),
+        'engines_live':    sum(1 for s in out if s['live']),
+        'engines_total':   len(out),
+        'equity':          _eq,
+        'commit':          (dash_state or {}).get('commit', '')[:8] if dash_state else '',
+        'dash_url':        DASH_URL,
+        'dash_error':      dash_error,
+    }
+    return jsonify({
+        'systems':    out,
+        'totals':     totals,
+        'fetched_at': int(_t.time()),
+        'source':     'dashboard',
     })
 
 @app.route('/orderbook/<coin>', methods=['GET'])
@@ -2791,20 +2959,22 @@ def signals_feed():
 
 @app.route('/whales', methods=['GET'])
 def whales_feed():
+    """Display feed for the dashboard.
+
+    Sourced from whale_display (Hyperliquid public WS) — the dashboard's
+    visual whale-print tape. SEPARATE from whale_filter._WHALES which
+    drives confluence_boost() and trade sizing.
+
+    Two sources avoid coupling: changing the dashboard's data feed must
+    NEVER alter scoring inputs. The two paths can drift in coverage and
+    that's intentional.
+    """
     try:
-        from collections import deque
-        items = []
-        if hasattr(whale_filter, '_WHALES'):
-            now = time.time()
-            with whale_filter._LOCK:
-                for coin, dq in whale_filter._WHALES.items():
-                    for ts, side, usd in list(dq)[-5:]:
-                        if now - ts < 300:
-                            items.append({'coin':coin,'side':side,'usd':usd,'ts':ts})
-        items.sort(key=lambda x: x['ts'], reverse=True)
-        return jsonify({'items': items[:20]})
+        items = whale_display.get_recent(limit=20)
+        status = whale_display.status()
     except Exception as e:
         return jsonify({'items': [], 'err': str(e)})
+    return jsonify({'items': items, 'source': 'hl_public_ws', 'status': status})
 
 @app.route('/news', methods=['GET'])
 def news_feed():
@@ -3086,7 +3256,7 @@ def health():
                     'pause_reason': ('wr' if _wr_fail else ('ev' if _ev_fail else None)) if _paused else None,
                 }
         except Exception: pass
-    return jsonify({'status':'ok','version':'v8.28',
+    return jsonify({'status':'ok','version':'V1.0',
                     'commit_live': _commit_short,
                     'disabled_engines': _disabled_engines_live() or None,
                     'webhook_security': {
@@ -4813,6 +4983,143 @@ def funding_sig_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/wall_absorb_shadow', methods=['GET'])
+def wall_absorb_shadow():
+    """Wall-absorption shadow tracker.
+
+    When WALL_ABSORB_SHADOW=1 + WALL_ABSORB_ENABLED=0, the engine's check()
+    runs against live wall+BB+funding data and writes signals to JSONL but
+    does NOT enter trades. This endpoint reads the JSONL, fetches current
+    HL price for each open signal, and computes paper outcomes:
+      - hit_tp: price reached TP within max_age_hr
+      - hit_sl: price reached SL within max_age_hr
+      - open:   neither hit yet, signal still pending
+      - expired: max_age_hr exceeded with no hit (wash)
+
+    Args:
+      ?limit=N        cap signals returned (default 50)
+      ?max_age_hr=N   how long to keep signals "open" (default 4h)
+      ?coin=X         filter to one coin
+    """
+    try:
+        from flask import request as _req
+        limit = int(_req.args.get('limit', '50'))
+        max_age_hr = float(_req.args.get('max_age_hr', '4'))
+        coin_filter = (_req.args.get('coin') or '').upper() or None
+
+        records = []
+        for path in ('/var/data/wall_absorb_shadow.jsonl', '/tmp/wall_absorb_shadow.jsonl'):
+            try:
+                if not os.path.exists(path): continue
+                with open(path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line: continue
+                        try: records.append(json.loads(line))
+                        except Exception: continue
+            except Exception: continue
+
+        if coin_filter:
+            records = [r for r in records if r.get('coin','').upper() == coin_filter]
+
+        # Most recent first
+        records.sort(key=lambda r: r.get('ts_ms', 0), reverse=True)
+        records = records[:limit]
+
+        # Outcome scoring — fetch current price per coin once, then compare to entry/SL/TP
+        # This is cheap (mid cache); if max_age expired, mark as 'expired'.
+        now_ms = int(time.time() * 1000)
+        scored = []
+        wins = losses = opens = expired = 0
+        sum_win_bps = sum_loss_bps = 0.0
+
+        # Group by coin to amortize get_mid calls
+        cur_px_cache = {}
+        for r in records:
+            c = r.get('coin')
+            if c not in cur_px_cache:
+                try: cur_px_cache[c] = get_mid(c) or 0.0
+                except Exception: cur_px_cache[c] = 0.0
+            cur = cur_px_cache[c]
+            entry = float(r.get('entry_px', 0) or 0)
+            sl = float(r.get('sl_px', 0) or 0)
+            tp = float(r.get('tp_px', 0) or 0)
+            side = r.get('side', '?')
+            age_hr = (now_ms - r.get('ts_ms', now_ms)) / 3600_000.0
+
+            outcome = 'open'
+            pnl_bps = 0.0
+            if entry > 0 and cur > 0:
+                # Mark-to-current PnL in bps
+                if side == 'BUY':
+                    pnl_bps = (cur - entry) / entry * 10000
+                elif side == 'SELL':
+                    pnl_bps = (entry - cur) / entry * 10000
+
+                # NOTE: this scores against CURRENT price only. True hit_tp/hit_sl
+                # would require historical highs/lows — that's a v2 (we'd need to
+                # fetch HL klines covering the signal age window). For now, we
+                # use the simple heuristic: if current price has crossed TP, it
+                # likely hit; same for SL. Conservative for ranging markets.
+                if side == 'BUY':
+                    if cur >= tp: outcome = 'hit_tp'
+                    elif cur <= sl: outcome = 'hit_sl'
+                elif side == 'SELL':
+                    if cur <= tp: outcome = 'hit_tp'
+                    elif cur >= sl: outcome = 'hit_sl'
+
+                if age_hr > max_age_hr and outcome == 'open':
+                    outcome = 'expired'
+
+            if outcome == 'hit_tp':
+                wins += 1; sum_win_bps += abs(pnl_bps)
+            elif outcome == 'hit_sl':
+                losses += 1; sum_loss_bps += abs(pnl_bps)
+            elif outcome == 'expired':
+                expired += 1
+            else:
+                opens += 1
+
+            scored.append({
+                **r,
+                'cur_px':    round(cur, 8) if cur else None,
+                'pnl_bps':   round(pnl_bps, 1) if entry > 0 else None,
+                'age_hr':    round(age_hr, 2),
+                'outcome':   outcome,
+            })
+
+        n_resolved = wins + losses
+        wr = (wins / n_resolved * 100) if n_resolved > 0 else None
+        avg_win = (sum_win_bps / wins) if wins > 0 else 0
+        avg_loss = (sum_loss_bps / losses) if losses > 0 else 0
+        pf = (sum_win_bps / sum_loss_bps) if sum_loss_bps > 0 else (None if sum_win_bps == 0 else float('inf'))
+        if pf == float('inf'): pf = 'inf'
+        expectancy_bps = ((wins/n_resolved * avg_win) - (losses/n_resolved * avg_loss)) if n_resolved > 0 else None
+
+        return jsonify({
+            'shadow_enabled': os.environ.get('WALL_ABSORB_SHADOW', '0') == '1',
+            'live_enabled':   os.environ.get('WALL_ABSORB_ENABLED', '0') == '1',
+            'engine_status':  wall_absorption.status(),
+            'window':  {'limit': limit, 'max_age_hr': max_age_hr, 'coin': coin_filter},
+            'totals':  {
+                'signals': len(scored),
+                'wins':    wins,
+                'losses':  losses,
+                'open':    opens,
+                'expired': expired,
+                'win_rate_pct':    round(wr, 1) if wr is not None else None,
+                'avg_win_bps':     round(avg_win, 1) if wins else None,
+                'avg_loss_bps':    round(avg_loss, 1) if losses else None,
+                'profit_factor':   pf if isinstance(pf, str) else (round(pf, 2) if pf else None),
+                'expectancy_bps':  round(expectancy_bps, 1) if expectancy_bps is not None else None,
+            },
+            'signals': scored,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()[:500]}), 500
+
+
 @app.route('/reflexivity', methods=['GET'])
 def reflexivity_status():
     """Reflexivity detector — crowding + move position + echo scoring.
@@ -5129,6 +5436,105 @@ def cancel_stale_makers():
                         'cancelled': cancelled, 'would_cancel': skipped})
     except Exception as e:
         log(f"CANCEL_STALE ERR: {e}")
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/cancel_orphans', methods=['GET', 'POST'])
+def cancel_orphans():
+    """Cancel orphaned reduce-only / trigger orders — orders sitting on the
+    books for a coin that has no current position. They can't fire today
+    (reduce-only on no position) but become a hazard if the coin is re-entered:
+    a stale orphan SL would fire against the new entry at the wrong price.
+
+    Args:
+      ?secret=    required
+      ?coin=X     optional, restrict to one coin
+      ?dryrun=1   report what WOULD be cancelled, no action
+    """
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    coin_filter = (flask_request.args.get('coin') or '').upper() or None
+    dryrun = flask_request.args.get('dryrun') == '1'
+    try:
+        us = _cached_user_state()
+        # coin → abs position size
+        pos_by_coin = {}
+        for ap in us.get('assetPositions', []):
+            p = ap.get('position', {})
+            sz = abs(float(p.get('szi', 0)))
+            if sz > 0:
+                pos_by_coin[p.get('coin', '').upper()] = sz
+
+        fo = _cached_frontend_orders()
+        cancelled = []
+        skipped = []
+        for o in fo:
+            c = (o.get('coin') or '').upper()
+            if coin_filter and c != coin_filter:
+                continue
+            # Orphan = reduce-only OR isTrigger, AND coin has no live position.
+            is_reduce = bool(o.get('reduceOnly'))
+            is_trigger = bool(o.get('isTrigger'))
+            if not (is_reduce or is_trigger):
+                continue
+            if c in pos_by_coin:
+                continue  # has live position — not an orphan
+            oid = o.get('oid')
+            info = {
+                'coin': c, 'oid': oid,
+                'side': o.get('side'),
+                'px': o.get('limitPx'),
+                'trigger_px': o.get('triggerPx'),
+                'sz': o.get('sz'),
+                'order_type': o.get('orderType', ''),
+                'reason': 'orphan_no_position',
+            }
+            if dryrun:
+                skipped.append(info)
+                continue
+            try:
+                r = exchange.cancel(c, oid)
+                status = (r or {}).get('response', {}).get('data', {}).get('statuses', [{}])[0] if r else {}
+                info['hl_response'] = status
+                cancelled.append(info)
+                log(f"ORPHAN CANCELLED {c} oid={oid} px={o.get('limitPx')} type={o.get('orderType','')}")
+            except Exception as e:
+                info['err'] = str(e)
+                cancelled.append(info)
+                log(f"ORPHAN CANCEL ERR {c} oid={oid}: {e}")
+        return jsonify({
+            'status': 'done',
+            'dryrun': dryrun,
+            'cancelled': cancelled,
+            'would_cancel': skipped,
+            'count_cancelled': len(cancelled),
+            'count_would_cancel': len(skipped),
+        })
+    except Exception as e:
+        log(f"CANCEL_ORPHANS ERR: {e}")
+        return jsonify({'err': str(e)}), 500
+
+
+@app.route('/cancel_oid', methods=['GET', 'POST'])
+def cancel_one_oid():
+    """Cancel a single order by oid. ?secret= required, ?coin=X&oid=N.
+    Use for surgical clean-up (e.g. abandoned LIMIT entries that haven't filled)."""
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    coin = (flask_request.args.get('coin') or '').upper()
+    try:
+        oid = int(flask_request.args.get('oid', '0'))
+    except Exception:
+        return jsonify({'err': 'oid_invalid'}), 400
+    if not coin or not oid:
+        return jsonify({'err': 'coin_and_oid_required'}), 400
+    try:
+        r = exchange.cancel(coin, oid)
+        status = (r or {}).get('response', {}).get('data', {}).get('statuses', [{}])[0] if r else {}
+        log(f"CANCEL_OID {coin} oid={oid} → {status}")
+        return jsonify({'status': 'done', 'coin': coin, 'oid': oid, 'hl_response': status})
+    except Exception as e:
+        log(f"CANCEL_OID ERR {coin} {oid}: {e}")
         return jsonify({'err': str(e)}), 500
 
 
@@ -7577,6 +7983,35 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None, engine=None):
             out['reason'] = 'no_bracket_pcts'
             return out
 
+        # ─────────────────────────────────────────────────────────
+        # ACCOUNT-LEVEL RISK GATE — query dashboard before firing.
+        # Single source of truth for cross-engine cumulative exposure.
+        # Fail-open: if dashboard unreachable, allow fire.
+        # ─────────────────────────────────────────────────────────
+        try:
+            import urllib.request as _ur, urllib.parse as _up, json as _json
+            _ntl = float(size) * float(mark_px)
+            _q = _up.urlencode({
+                'coin':     coin,
+                'side':     'LONG' if is_long else 'SHORT',
+                'notional': f'{_ntl:.4f}',
+                'sl_pct':   f'{sl_pct:.6f}' if sl_pct else '0.005',
+            })
+            _dash_url = os.environ.get('DASH_URL', 'https://dashboard-8b7i.onrender.com').rstrip('/')
+            _req = _ur.Request(f'{_dash_url}/api/risk_check?{_q}',
+                               headers={'User-Agent': 'multi-gate-risk-gate'})
+            with _ur.urlopen(_req, timeout=3) as _r:
+                _rc = _json.loads(_r.read())
+            if not _rc.get('can_fire', True):
+                log(f"{coin} atomic skipped: risk gate blocked — reason={_rc.get('block_reason')} "
+                    f"projected_total=${_rc.get('projected',{}).get('total_notional',0):.2f} "
+                    f"limit=${_rc.get('limits',{}).get('max_total_notional',0):.2f}")
+                out['reason'] = f"risk_gate:{_rc.get('block_reason')}"
+                return out
+        except Exception as _e:
+            log(f"{coin} risk gate query err (failing-open): {_e}")
+            # Continue — fail-open
+
         # Submit atomically
         tid = trade_id or cloid or f"{coin}_{'B' if is_buy else 'S'}_{int(time.time())}"
         result = atomic_entry.submit_atomic(
@@ -9511,6 +9946,58 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
                 # Reconciler-internal hard halt (3+ unsafe cycles) — still respected
                 if hash(coin + str(int(time.time() / 300))) % 10 == 0:
                     log(f"{coin} ENTRY-LIMITER halted: persistent drift across cycles")
+                # 2026-05-10: SHADOW EXEMPTION — wall_absorb shadow mode runs
+                # signal generation only, never dispatches a trade. Run it now,
+                # then return. Other engines stay halted.
+                if os.environ.get('WALL_ABSORB_SHADOW', '0') == '1' and \
+                   os.environ.get('WALL_ABSORB_ENABLED', '0') != '1':
+                    try:
+                        _wa_regime = 'unknown'
+                        try:
+                            import regime_detector as _rd_wash
+                            _wa_regime = _rd_wash.get_regime() or 'unknown'
+                        except Exception: pass
+                        cur_px = get_mid(coin)
+                        if cur_px:
+                            wa_side, wa_ctx = wall_absorption.check(coin, cur_px, _wa_regime, 0)
+                            if wa_side and wa_ctx:
+                                _wa_wall_px = float(wa_ctx.get('wall_price', cur_px))
+                                _wa_bb_mid  = float(wa_ctx.get('bb_mid', cur_px))
+                                if wa_side == 'BUY':
+                                    _wa_sl_px = _wa_wall_px * 0.995
+                                    _wa_tp_px = cur_px + 1.5 * (_wa_bb_mid - cur_px)
+                                else:
+                                    _wa_sl_px = _wa_wall_px * 1.005
+                                    _wa_tp_px = cur_px - 1.5 * (cur_px - _wa_bb_mid)
+                                _wa_record = {
+                                    'ts_ms': int(time.time() * 1000),
+                                    'coin': coin, 'side': wa_side,
+                                    'entry_px': cur_px,
+                                    'sl_px': round(_wa_sl_px, 8),
+                                    'tp_px': round(_wa_tp_px, 8),
+                                    'sl_pct': round(abs(_wa_sl_px - cur_px) / cur_px * 100, 3),
+                                    'tp_pct': round(abs(_wa_tp_px - cur_px) / cur_px * 100, 3),
+                                    'wall_price': _wa_wall_px,
+                                    'wall_usd':   wa_ctx.get('wall_usd'),
+                                    'wall_decay_pct': wa_ctx.get('wall_decay_pct'),
+                                    'bb_position': wa_ctx.get('bb_position'),
+                                    'bb_mid': _wa_bb_mid,
+                                    'regime': _wa_regime,
+                                    'distance_pct': wa_ctx.get('distance_pct'),
+                                    'engine': 'WALL_ABSORB',
+                                    'note': 'fired-during-halt-exemption',
+                                }
+                                for _wa_path in ('/var/data/wall_absorb_shadow.jsonl', '/tmp/wall_absorb_shadow.jsonl'):
+                                    try:
+                                        with open(_wa_path, 'a') as _wf:
+                                            _wf.write(json.dumps(_wa_record) + '\n')
+                                        break
+                                    except Exception: continue
+                                log(f"WALL-ABSORPTION SHADOW {coin} {wa_side} entry={cur_px} "
+                                    f"SL={_wa_sl_px:.6f} TP={_wa_tp_px:.6f} "
+                                    f"({wa_ctx.get('bb_position')} decay={wa_ctx.get('wall_decay_pct')}%)")
+                    except Exception as _wa_he:
+                        log(f"wall_absorb shadow-during-halt err {coin}: {_wa_he}")
                 return
             if limiter == 'reduced':
                 # Scale risk_mult down by 50% when drift degraded (1-5%)
@@ -9739,6 +10226,12 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
     # exclusive with wall_exhaustion via wall classification (STABLE vs
     # EXHAUSTING) and with funding_engine via internal funding-overlap guard.
     # Default DISABLED via WALL_ABSORB_ENABLED=0; flip env to enable.
+    #
+    # 2026-05-10: SHADOW MODE — when WALL_ABSORB_SHADOW=1, run check() and log
+    # signals to /var/data/wall_absorb_shadow.jsonl with proposed entry/SL/TP,
+    # but DO NOT enter the trade dispatch path. Lets us paper-validate the
+    # engine on live wall+BB+funding data without risking capital. Mutually
+    # exclusive with WALL_ABSORB_ENABLED — if enabled is set, shadow is ignored.
     if not sig:
         try:
             _wa_regime = 'unknown'
@@ -9757,14 +10250,64 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             cur_px = get_mid(coin)
             wa_side, wa_ctx = wall_absorption.check(coin, cur_px, _wa_regime, _wa_active)
             if wa_side:
-                sig = wa_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_ABSORB'
-                state.setdefault('wall_entries', {})[coin] = {
-                    'side': wa_side, 'wall_price': wa_ctx['wall_price'],
-                    'wall_usd': wa_ctx['wall_usd'], 'entry_ts': time.time(),
-                    'engine': 'WALL_ABSORB'}
-                log(f"WALL-ABSORPTION {coin} {wa_side} {wa_ctx['bb_position']} "
-                    f"decay={wa_ctx['wall_decay_pct']}% dist={wa_ctx['distance_pct']}% "
-                    f"@ ${wa_ctx['wall_usd']/1000:.0f}k")
+                # Shadow mode: log to JSONL, do NOT enter trade
+                _wa_shadow = os.environ.get('WALL_ABSORB_SHADOW', '0') == '1'
+                _wa_enabled = os.environ.get('WALL_ABSORB_ENABLED', '0') == '1'
+                if _wa_shadow and not _wa_enabled:
+                    try:
+                        # Derive proposed SL/TP from wall_absorption ctx.
+                        # SL: just past the wall (so a wall break is the stop).
+                        # TP: 1.5× distance from current to BB mid (mean-reversion target).
+                        _wa_wall_px = float(wa_ctx.get('wall_price', cur_px))
+                        _wa_bb_mid  = float(wa_ctx.get('bb_mid', cur_px))
+                        if wa_side == 'BUY':
+                            _wa_sl_px = _wa_wall_px * 0.995  # 0.5% past wall (below)
+                            _wa_tp_px = cur_px + 1.5 * (_wa_bb_mid - cur_px)
+                        else:  # SELL
+                            _wa_sl_px = _wa_wall_px * 1.005  # 0.5% past wall (above)
+                            _wa_tp_px = cur_px - 1.5 * (cur_px - _wa_bb_mid)
+                        _wa_record = {
+                            'ts_ms': int(time.time() * 1000),
+                            'coin': coin, 'side': wa_side,
+                            'entry_px': cur_px,
+                            'sl_px': round(_wa_sl_px, 8),
+                            'tp_px': round(_wa_tp_px, 8),
+                            'sl_pct': round(abs(_wa_sl_px - cur_px) / cur_px * 100, 3),
+                            'tp_pct': round(abs(_wa_tp_px - cur_px) / cur_px * 100, 3),
+                            'wall_price': _wa_wall_px,
+                            'wall_usd':   wa_ctx.get('wall_usd'),
+                            'wall_decay_pct': wa_ctx.get('wall_decay_pct'),
+                            'bb_position': wa_ctx.get('bb_position'),
+                            'bb_mid': _wa_bb_mid,
+                            'regime': _wa_regime,
+                            'distance_pct': wa_ctx.get('distance_pct'),
+                            'engine': 'WALL_ABSORB',
+                        }
+                        try:
+                            _wa_path = '/var/data/wall_absorb_shadow.jsonl'
+                            with open(_wa_path, 'a') as _wf:
+                                _wf.write(json.dumps(_wa_record) + '\n')
+                        except Exception as _wa_we:
+                            # Fall back to /tmp if /var/data not writable
+                            try:
+                                with open('/tmp/wall_absorb_shadow.jsonl', 'a') as _wf:
+                                    _wf.write(json.dumps(_wa_record) + '\n')
+                            except Exception: pass
+                        log(f"WALL-ABSORPTION SHADOW {coin} {wa_side} entry={cur_px} "
+                            f"SL={_wa_sl_px:.6f} TP={_wa_tp_px:.6f} "
+                            f"({wa_ctx.get('bb_position')} decay={wa_ctx.get('wall_decay_pct')}%)")
+                        # CRITICAL: do not set sig — drop the signal so no live trade fires
+                    except Exception as _wa_se:
+                        log(f"wall_absorb shadow log err {coin}: {_wa_se}")
+                else:
+                    sig = wa_side; bar_ts = int(time.time()*1000); signal_engine = 'WALL_ABSORB'
+                    state.setdefault('wall_entries', {})[coin] = {
+                        'side': wa_side, 'wall_price': wa_ctx['wall_price'],
+                        'wall_usd': wa_ctx['wall_usd'], 'entry_ts': time.time(),
+                        'engine': 'WALL_ABSORB'}
+                    log(f"WALL-ABSORPTION {coin} {wa_side} {wa_ctx['bb_position']} "
+                        f"decay={wa_ctx['wall_decay_pct']}% dist={wa_ctx['distance_pct']}% "
+                        f"@ ${wa_ctx['wall_usd']/1000:.0f}k")
         except Exception as e:
             log(f"wall_absorption err {coin}: {e}")
     # 2026-04-25: FUNDING_MR engine — counter-crowd fade in chop.
@@ -11062,7 +11605,7 @@ state = {'consec_losses': 0, 'cooldowns': {}, 'coin_hist': {}, 'coin_kill': {}}
 
 def main():
     global state, _LAST_OPEN_TS
-    log(f"PreCog v8.28 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
+    log(f"PreCog V1.0 | {WALLET} | risk={INITIAL_RISK_PCT} trail={TRAIL_PCT} V3={V3_HTF}/{V3_EMA}")
 
     # SURVIVAL GUARDS bootstrap: load per-coin WR from trades.csv
     try:
@@ -11179,6 +11722,8 @@ def main():
     except Exception as e: log(f"liq_ws err: {e}")
     try: whale_filter.start()
     except Exception as e: log(f"whale_filter err: {e}")
+    try: whale_display.start()
+    except Exception as e: log(f"whale_display err: {e}")
     try: cvd_ws.start()
     except Exception as e: log(f"cvd_ws err: {e}")
     try: oi_tracker.start()
@@ -13165,6 +13710,47 @@ def dash_json():
                 pos_rec['engine'] = engine
     except Exception:
         pass
+
+    # Fallback: pull SL/TP directly from HL's open trigger orders for any
+    # position still missing values. The bot's state['positions'] tracker
+    # only has tp_pct/sl_pct for trades it opened with that flow — older
+    # positions and trades opened via legacy paths leave sl=None even
+    # though a real SL trigger order is sitting on HL.
+    try:
+        fo = _cached_frontend_orders()
+        triggers_by_coin = {}
+        for o in fo:
+            c = (o.get('coin') or '').upper()
+            ot = o.get('orderType') or ''
+            tpx = o.get('triggerPx')
+            if not c or tpx is None:
+                continue
+            try:
+                tpx_f = float(tpx)
+            except (TypeError, ValueError):
+                continue
+            if 'Stop' in ot or 'Take' in ot:
+                kind = 'sl' if 'Stop' in ot else 'tp'
+                # If multiple SL/TP orders exist for one coin, prefer the
+                # one closest to entry — nearest stop is the binding one.
+                existing = triggers_by_coin.get(c, {}).get(kind)
+                triggers_by_coin.setdefault(c, {})[kind] = tpx_f if existing is None else (
+                    tpx_f if abs(tpx_f) < abs(existing) else existing  # tiebreak: smaller magnitude
+                )
+
+        for pos_rec in positions:
+            c = (pos_rec.get('coin') or '').upper()
+            t = triggers_by_coin.get(c, {})
+            # Only fill if missing — don't overwrite tracker-derived values
+            if pos_rec.get('sl') is None and 'sl' in t:
+                pos_rec['sl'] = t['sl']
+                pos_rec['sl_source'] = 'hl_trigger'
+            if pos_rec.get('tp') is None and 'tp' in t:
+                pos_rec['tp'] = t['tp']
+                pos_rec['tp_source'] = 'hl_trigger'
+    except Exception:
+        pass
+
     try: news = news_filter.get_state()
     except Exception: news = {}
     try: ladder = risk_ladder.get_state()
@@ -13185,7 +13771,7 @@ def dash_json():
         if len(h) >= 5: coin_wr[coin] = round(sum(h)/len(h)*100, 1)
     killed = {c:v.get('until',0) for c,v in coin_kill.items() if time.time() < v.get('until',0)}
     return jsonify({
-        'equity': eq, 'version': 'v8.28',
+        'equity': eq, 'version': 'V1.0',
         'positions': positions, 'n_positions': len(positions),
         'universe_size': len(COINS),
         'news': news, 'risk_ladder': ladder,
@@ -13270,6 +13856,93 @@ if __name__ == '__main__':
     # Run precog signal loop in background thread
     t = threading.Thread(target=main, daemon=True)
     t.start()
+
+    # Dashboard pusher (non-blocking, errors swallowed).
+    # Pushes multi-gate's open positions + recent closes to the unified
+    # dashboard service every 30s. Uses position_ledger for live state and
+    # trade_ledger for closed history.
+    def _dashboard_push_loop():
+        import time as _t
+        # Wait 60s after boot so position state is loaded
+        _t.sleep(60)
+        try:
+            from dashboard_push import push_state as _dash_push
+        except ImportError:
+            log('[dashboard] dashboard_push module not present; skipping')
+            return
+        log('[dashboard] pusher started (30s interval)')
+        while True:
+            try:
+                # Open positions from position_ledger.all_rows()
+                positions_dict = {}
+                try:
+                    rows = position_ledger.all_rows() or {}
+                    for coin, row in rows.items():
+                        if not row: continue
+                        sz = float(row.get('size') or 0)
+                        if abs(sz) < 1e-12: continue
+                        is_long = row.get('is_long')
+                        if is_long is None:
+                            is_long = sz > 0
+                        positions_dict[coin] = {
+                            'is_long': bool(is_long),
+                            'entry':   float(row.get('entry_px') or 0),
+                            'sl':      float(row.get('sl_px') or 0),
+                            'tp1':     float(row.get('tp_px') or 0),
+                            'tp2':     0,
+                            'size':    abs(sz),
+                            'fired_t': int((row.get('opened_t') or 0)),
+                        }
+                except Exception as e:
+                    log(f'[dashboard] read positions err: {e}')
+                # Closed history from trade_ledger CSV (last 12h)
+                history = []
+                try:
+                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                    if _LEDGER_OK and _ledger:
+                        rows = _ledger._read_all()
+                        cutoff_iso = (_dt.now(_tz.utc) - _td(hours=12)).isoformat()
+                        for r in rows:
+                            if r.get('event_type') != 'CLOSE': continue
+                            ts_iso = r.get('ts') or r.get('timestamp') or ''
+                            if not ts_iso or ts_iso < cutoff_iso: continue
+                            try:
+                                pnl = float(r.get('pnl') or 0)
+                            except (TypeError, ValueError):
+                                pnl = 0
+                            # Convert iso timestamp to epoch ms
+                            try:
+                                ts_ms = int(_dt.fromisoformat(ts_iso.replace('Z', '+00:00')).timestamp()*1000)
+                            except Exception:
+                                ts_ms = 0
+                            history.append({
+                                'coin':     r.get('coin'),
+                                'is_long':  r.get('side', '').upper() in ('BUY','LONG'),
+                                'entry':    float(r.get('entry_price') or 0) if r.get('entry_price') else 0,
+                                'exit_px':  float(r.get('exit_price') or 0) if r.get('exit_price') else 0,
+                                'realized_pnl': pnl,
+                                'outcome':  r.get('close_reason') or 'CLOSE',
+                                'close_t':  ts_ms,
+                            })
+                except Exception as e:
+                    log(f'[dashboard] read history err: {e}')
+                # Push
+                _dash_push(
+                    engine_name='multi-gate',
+                    live=os.environ.get('LIVE_TRADING', '0') == '1',
+                    sizing_mode='fixed',
+                    notional_usd=float(os.environ.get('NOTIONAL_USD', '25')),
+                    max_concurrent=int(os.environ.get('MAX_CONCURRENT', '20')),
+                    positions_dict=positions_dict,
+                    history_list=history,
+                    scan_count=0,
+                    last_scan_ts=int(_t.time()*1000),
+                )
+            except Exception as e:
+                log(f'[dashboard] push iteration err: {e}')
+            _t.sleep(30)
+
+    threading.Thread(target=_dashboard_push_loop, daemon=True, name='dashboard_push').start()
 
     # 2026-04-30: periodic naked-position protection sweep.
     # Belt-and-braces guard for entries where SL placement raced the
