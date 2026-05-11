@@ -861,13 +861,24 @@ def save_state(state):
     # Push to dashboard (non-blocking, errors swallowed)
     try:
         from dashboard_push import push_state as _dash_push
+        # ── Filter out positions that haven't actually filled on HL yet ──
+        # state['positions'] is populated when an entry order is SUBMITTED
+        # (phase='pending_fill'). It only becomes a real on-chain position
+        # once HL confirms the entry fill (phase transitions to 'live' or
+        # 'tp1_filled'). The dashboard should only show real positions.
+        # phase='done' is a closed position pending cleanup — also exclude.
+        all_pos = state.get('positions', {})
+        filled_pos = {
+            coin: p for coin, p in all_pos.items()
+            if p.get('phase') in ('live', 'tp1_filled')
+        }
         _dash_push(
             engine_name='smc-loose',
             live=LIVE_TRADING,
             sizing_mode='fixed',
             notional_usd=FIXED_NOTIONAL_USD,
             max_concurrent=MAX_CONCURRENT,
-            positions_dict=state.get('positions', {}),
+            positions_dict=filled_pos,
             history_list=state.get('history', []),
             scan_count=state.get('scan_count', 0),
             last_scan_ts=state.get('last_scan_ts', 0),
