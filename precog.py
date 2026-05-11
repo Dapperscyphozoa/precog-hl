@@ -12344,10 +12344,31 @@ def main():
                 except Exception as e:
                     log(f"profit-lock err {k}: {e}")
 
-            # Spoof scan per open position + near-wall coins
+            # Spoof scan per open position + near-wall coins (router-harness wiring 2026-05-11)
+            # Previously only scanned open-position coins, leaving spoof_detection
+            # with tracked_walls=0 on a no-position wallet — broke the router's
+            # persistence/spoof gate. Now also scans all coins with verified walls
+            # in orderbook_ws (capped at 50 to bound cost; all local-memory ops).
+            scanned = set()
             for k in list(live_positions.keys()):
-                try: spoof_detection.scan_walls(k, get_mid(k))
+                try:
+                    spoof_detection.scan_walls(k, get_mid(k))
+                    scanned.add(k)
                 except Exception: pass
+            try:
+                with orderbook_ws._LOCK:
+                    wall_coins = [c for c, walls in orderbook_ws._VERIFIED_WALLS.items() if walls]
+                for k in wall_coins[:50]:
+                    if k in scanned:
+                        continue
+                    try:
+                        mid = get_mid(k)
+                        if mid and mid > 0:
+                            spoof_detection.scan_walls(k, mid)
+                    except Exception:
+                        pass
+            except Exception as _se:
+                log(f'spoof scan extension err: {_se}')
 
             # Hourly funding refresh (both funding_filter and funding_arb)
             fund_age = time.time() - getattr(main, '_funding_ts', 0)
