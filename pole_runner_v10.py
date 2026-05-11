@@ -70,7 +70,7 @@ MIN_WALL_USD     = float(os.environ.get('MIN_WALL_USD', '100000'))  # min wall a
 # ============================================================================
 # Council Fixes 1-4 (validated 180d backtest: WR 24.9% → 34.1%, PF 0.6 → 1.72)
 # ============================================================================
-WALL_REQUIRED      = os.environ.get('WALL_REQUIRED', '1') == '1'        # Fix 1
+WALL_REQUIRED      = os.environ.get('WALL_REQUIRED', '0') == '1'        # 2026-05-11: was 1 (gate). Reverted to 0 (additive). Wall is a confluence boost not a kill-filter.
 SINGLE_TP_R        = float(os.environ.get('SINGLE_TP_R', '3.5'))        # Fix 2: 0=disabled, >0=single target at this R
 REGIME_GATE        = os.environ.get('REGIME_GATE', '1') == '1'           # Fix 3
 SL_ATR_MULT        = float(os.environ.get('SL_ATR_MULT', '0.5'))        # Fix 4: SL buffer = max(ticks, this × ATR_5m)
@@ -473,7 +473,7 @@ def _evaluate_path(coin: str, htf_label: str, htf_days: int,
                 log(f"  DIR-FILTER-BLOCK [{htf_label}] {coin} {ltf['side']} (regime={'bull' if regime_bull else 'bear'})")
                 return None
 
-    # Stage 5: wall confluence (council Fix 1: REQUIRED when WALL_REQUIRED=1)
+    # Stage 5: wall confluence (ADDITIVE — adds confluence/notes; only blocks when WALL_REQUIRED=1)
     state['qualified_setups'] += 1
     side_for_wall = ltf['side']
     wall_passed, wall_usd, wall_notes = wall_confluence_check(
