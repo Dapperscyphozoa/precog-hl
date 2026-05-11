@@ -1351,8 +1351,16 @@ def _scan_once():
         SHADOW_UNIVERSE = [c.strip().upper() for c in _shadow_env.split(',') if c.strip()]
     else:
         try:
-            # Pull universe + asset contexts in one call. Contexts have dayNtlVlm.
-            _meta_ctxs = _precog.info.meta_and_asset_ctxs() if hasattr(_precog, 'info') else None
+            # 2026-05-11: route through meta_cache (shared singleton, 30s TTL).
+            # Was calling info.meta_and_asset_ctxs() directly; with 3 other
+            # consumers doing the same on overlapping schedules, the OI tracker
+            # was getting squeezed out by CloudFront 429s. Single-flight cache
+            # collapses all four callers into one wire request.
+            try:
+                import meta_cache as _mc
+                _meta_ctxs = _mc.get_meta_ctxs(getattr(_precog, 'info', None))
+            except Exception:
+                _meta_ctxs = _precog.info.meta_and_asset_ctxs() if hasattr(_precog, 'info') else None
             if _meta_ctxs and len(_meta_ctxs) >= 2:
                 _meta = _meta_ctxs[0]
                 _ctxs = _meta_ctxs[1]
