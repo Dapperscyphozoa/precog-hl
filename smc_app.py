@@ -194,8 +194,22 @@ def _boot():
         def _dash_loop():
             while True:
                 try:
+                    # Cross-check against HL clearinghouseState — only push
+                    # positions that actually exist on the wallet. smc-v1's
+                    # close-detection hook doesn't fire reliably, so
+                    # state.positions accumulates closed positions as ghosts.
+                    # Filter to coins HL confirms are live; everything else
+                    # is treated as already-closed and excluded.
+                    try:
+                        hl_coins = {p['coin'] for p in (_wallet_positions_for_dash() or [])}
+                    except Exception:
+                        hl_coins = None  # network error → fall back to local state
+
                     positions_for_push = {}
                     for coin, p in (smc_state.state.positions or {}).items():
+                        # Skip if HL fetch succeeded and this coin isn't on the wallet
+                        if hl_coins is not None and coin not in hl_coins:
+                            continue
                         is_long = (p.get('side') == 'BUY' or p.get('side') == 'LONG')
                         positions_for_push[coin] = {
                             'is_long': is_long,
