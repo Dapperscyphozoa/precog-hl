@@ -63,7 +63,7 @@ PARAMS = {
 os.environ.setdefault('SMCV2_MIN_SL_PCT', '0.008')
 
 # Coins with strict-negative outcomes in 52-day backtest (n>=2, 0 wins)
-BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC', 'BLAST'}
+BLACKLIST = {'IP', 'ATOM', 'AIXBT', 'ENS', 'OP', 'SKR', 'STRK', 'WLFI', 'kLUNC', 'BLAST', 'GALA', 'GOAT'}
 
 # Majors — handled by PreCog v8.28, not SMC v2
 EXCLUDED_MAJORS = {'BTC','ETH','BNB','SOL','BCH','LTC','XRP','ADA','DOGE','AVAX','DOT','TRX','TON'}
