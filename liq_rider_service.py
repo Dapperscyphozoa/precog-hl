@@ -283,11 +283,15 @@ def followup_loop():
 
 # ─── dashboard push ────────────────────────────────────────────────────
 def dash_push_loop():
-    """Post engine state to the dashboard every DASH_PUSH_INTERVAL_SEC."""
-    if not DASH_URL or not DASH_PUSH_SECRET:
-        _log("dash push disabled (DASH_URL or DASH_PUSH_SECRET missing)")
+    """Post engine state to the dashboard every DASH_PUSH_INTERVAL_SEC.
+    Reuses the canonical dashboard_push.push_state() so we hit the
+    correct endpoint and auth header."""
+    try:
+        from dashboard_push import push_state
+    except Exception as e:
+        _log(f"dashboard_push import err: {e} — push disabled")
         return
-    _log(f"dash push loop started → {DASH_URL} (interval={DASH_PUSH_INTERVAL_SEC}s)")
+    _log(f"dash push loop started → {DASH_URL or '(no DASH_URL)'} (interval={DASH_PUSH_INTERVAL_SEC}s)")
     while True:
         try:
             with _state_lock:
@@ -297,44 +301,35 @@ def dash_push_loop():
             losses = snap['losses_5min']
             total = wins + losses
             wr = (wins / total * 100) if total else 0.0
-            payload = {
-                'engine_name': ENGINE_NAME,
-                'live': LIVE,
-                'sizing_mode': 'observe',
-                'notional_usd': 0,
-                'max_concurrent': 0,
-                'positions_dict': {},
-                'history_list': [],
-                'scan_count': snap['cascades_detected'],
-                'last_scan_ts': int(snap['last_cascade_ts'] * 1000) if snap['last_cascade_ts'] else 0,
-                'engine_meta': {
-                    'mode': 'observe_only' if not LIVE else 'live',
-                    'cascades_detected': snap['cascades_detected'],
-                    'cascades_complete': snap['cascades_complete'],
-                    'cascades_pending': snap['cascades_pending_followup'],
-                    'wins_5min': wins,
-                    'losses_5min': losses,
-                    'wr_5min_pct': round(wr, 1),
-                    'last_cascade_coin': snap.get('last_cascade_coin'),
-                    'last_cascade_ts_ms': int(snap['last_cascade_ts'] * 1000) if snap['last_cascade_ts'] else 0,
-                    'per_coin': per_coin,
-                },
-            }
-            body = json.dumps(payload).encode()
-            req = urllib.request.Request(
-                f"{DASH_URL}/api/engine_push",
-                data=body,
-                headers={
-                    'Content-Type': 'application/json',
-                    'X-Push-Secret': DASH_PUSH_SECRET,
-                },
-                method='POST',
-            )
+            # Build a synthetic "history" entry per completed cascade so the
+            # dashboard's history_12h column shows recent activity. For Phase 1
+            # we don't have real positions, just observation outcomes.
             try:
-                with urllib.request.urlopen(req, timeout=6) as r:
-                    _ = r.read()
+                push_state(
+                    engine_name=ENGINE_NAME,
+                    live=LIVE,
+                    sizing_mode='observe',
+                    notional_usd=0,
+                    max_concurrent=0,
+                    positions_dict={},
+                    history_list=[],  # no real fills in observe mode
+                    scan_count=snap['cascades_detected'],
+                    last_scan_ts=int(snap['last_cascade_ts'] * 1000) if snap['last_cascade_ts'] else 0,
+                    extra_telemetry={
+                        'mode': 'observe_only' if not LIVE else 'live',
+                        'cascades_detected': snap['cascades_detected'],
+                        'cascades_complete': snap['cascades_complete'],
+                        'cascades_pending': snap['cascades_pending_followup'],
+                        'wins_5min': wins,
+                        'losses_5min': losses,
+                        'wr_5min_pct': round(wr, 1),
+                        'last_cascade_coin': snap.get('last_cascade_coin'),
+                        'last_cascade_ts_ms': int(snap['last_cascade_ts'] * 1000) if snap['last_cascade_ts'] else 0,
+                        'per_coin': per_coin,
+                    },
+                )
             except Exception as e:
-                _log(f"dash push err: {e}")
+                _log(f"push_state err: {e}")
         except Exception as e:
             _log(f"dash_push_loop outer err: {e}")
         time.sleep(DASH_PUSH_INTERVAL_SEC)
