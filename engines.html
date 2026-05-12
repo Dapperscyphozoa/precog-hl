@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PRECOG · ENGINES</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;800&family=Cormorant+Garamond:wght@300;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --void:#07080a; --carbon:#0d0e11; --steel:#1a1c20; --panel:#101216;
+  --chrome:#c8ccd4; --bone:#d9d6cd; --dim:rgba(200,204,212,0.55);
+  --acid:#3b82f6; --acid-soft:rgba(59,130,246,0.12); --acid-bright:#60a5fa;
+  --oxide:#d97706; --oxide-soft:rgba(217,119,6,0.13);
+  --blood:#c1272d; --blood-soft:rgba(193,39,45,0.14);
+  --gain:#10b981; --loss:#ef4444; --cyan:#00e5ff;
+  --line:rgba(200,204,212,0.10); --line-strong:rgba(200,204,212,0.22);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:var(--void);color:var(--bone);font-family:'JetBrains Mono',ui-monospace,monospace;font-size:13px;line-height:1.45;min-height:100vh;-webkit-font-smoothing:antialiased}
+body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellipse at 20% 20%,rgba(59,130,246,0.07),transparent 55%),radial-gradient(ellipse at 80% 80%,rgba(193,39,45,0.04),transparent 50%);pointer-events:none;z-index:0}
+.wrap{position:relative;z-index:1;max-width:1700px;margin:0 auto;padding:20px 22px 60px}
+.header{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:20px;flex-wrap:wrap}
+.brand{display:flex;align-items:baseline;gap:14px}
+.brand .name{font-family:'Cormorant Garamond',serif;font-size:24px;font-weight:600;letter-spacing:0.32em;color:var(--bone)}
+.brand .sub{font-size:9px;letter-spacing:0.4em;color:var(--acid);opacity:0.8}
+.refresh-meta{font-size:10px;letter-spacing:0.18em;color:var(--dim);display:flex;gap:14px;align-items:center}
+.refresh-meta .live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--gain);box-shadow:0 0 8px var(--gain);margin-right:6px}
+.refresh-meta .live-dot.warn{background:var(--oxide);box-shadow:0 0 8px var(--oxide)}
+.refresh-meta .live-dot.err{background:var(--blood);box-shadow:0 0 8px var(--blood)}
+.btn{display:inline-block;padding:5px 12px;font-size:10px;letter-spacing:0.25em;text-transform:uppercase;color:var(--chrome);background:transparent;border:1px solid var(--line-strong);cursor:pointer;font-family:inherit;transition:.15s}
+.btn:hover{border-color:var(--acid);color:var(--acid)}
+
+/* AGGREGATE BAR */
+.agg{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:24px}
+.agg .cell{background:var(--carbon);padding:14px 16px}
+.agg .lbl{font-size:9px;letter-spacing:0.28em;color:var(--dim);text-transform:uppercase;margin-bottom:4px}
+.agg .val{font-size:22px;font-weight:600;color:var(--bone);letter-spacing:0.02em;line-height:1.1}
+.agg .val.acid{color:var(--acid)}
+.agg .val.gain{color:var(--gain)}
+.agg .val.loss{color:var(--loss)}
+.agg .sub{font-size:10px;color:var(--dim);margin-top:2px;letter-spacing:0.08em}
+
+/* ENGINE GRID */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:14px}
+
+.card{background:var(--carbon);border:1px solid var(--line);display:flex;flex-direction:column;position:relative;overflow:hidden}
+.card.live::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--acid)}
+.card.paper::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--oxide)}
+.card.stale::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--dim)}
+.card.dead::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--blood)}
+
+.card-head{display:flex;justify-content:space-between;align-items:flex-start;padding:14px 16px 12px;gap:10px;border-bottom:1px solid var(--line)}
+.card-title{font-size:14px;font-weight:600;letter-spacing:0.13em;color:var(--bone);text-transform:uppercase}
+.card-title .desc{display:block;font-size:9px;color:var(--dim);letter-spacing:0.18em;margin-top:3px;font-weight:400;text-transform:none}
+.tags{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+.tag{font-size:9px;letter-spacing:0.22em;padding:3px 8px;text-transform:uppercase;font-weight:600;border:1px solid currentColor}
+.tag.live{color:var(--acid);background:var(--acid-soft)}
+.tag.paper{color:var(--oxide);background:var(--oxide-soft)}
+.tag.stale{color:var(--dim)}
+.tag.dead{color:var(--blood);background:var(--blood-soft)}
+.tag.dir{color:var(--cyan);border-color:rgba(0,229,255,0.4)}
+.tag.wr-good{color:var(--gain)}
+.tag.wr-mid{color:var(--oxide)}
+.tag.wr-bad{color:var(--blood)}
+
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line)}
+.m{background:var(--carbon);padding:11px 12px}
+.m .lbl{font-size:8.5px;letter-spacing:0.2em;color:var(--dim);text-transform:uppercase;margin-bottom:3px}
+.m .val{font-size:16px;font-weight:600;color:var(--bone);line-height:1.1}
+.m .val.acid{color:var(--acid)}
+.m .val.gain{color:var(--gain)}
+.m .val.loss{color:var(--loss)}
+.m .val.dim{color:var(--dim);font-size:14px}
+.m .sub{font-size:9px;color:var(--dim);margin-top:1px;letter-spacing:0.05em}
+
+.metrics-row2{display:grid;grid-template-columns:repeat(5,1fr);gap:1px;background:var(--line);border-top:1px solid var(--line)}
+.m2{background:var(--carbon);padding:8px 10px}
+.m2 .lbl{font-size:8px;letter-spacing:0.18em;color:var(--dim);text-transform:uppercase}
+.m2 .val{font-size:12px;font-weight:600;color:var(--bone);line-height:1.2;margin-top:2px}
+.m2 .val.gain{color:var(--gain)} .m2 .val.loss{color:var(--loss)} .m2 .val.dim{color:var(--dim)}
+
+.section{padding:10px 16px;border-top:1px solid var(--line)}
+.section-lbl{font-size:9px;letter-spacing:0.28em;color:var(--blood);text-transform:uppercase;margin-bottom:6px;opacity:0.85}
+
+.pos-tbl{font-size:11px;display:grid;gap:1px;background:var(--line)}
+.pos-row{display:grid;grid-template-columns:1.4fr 0.6fr 1.3fr 1fr 1fr;gap:8px;padding:6px 0;background:var(--carbon)}
+.pos-row.head{font-size:8.5px;color:var(--dim);letter-spacing:0.18em;text-transform:uppercase;border-bottom:1px solid var(--line);padding-bottom:5px}
+.pos-row .side-l{color:var(--acid);font-weight:600}
+.pos-row .side-s{color:var(--blood);font-weight:600}
+.pos-empty{padding:8px 0;color:var(--dim);font-size:11px;font-style:italic;text-align:center}
+
+.foot{padding:9px 16px;border-top:1px solid var(--line);font-size:10px;color:var(--dim);letter-spacing:0.06em;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.foot a{color:var(--acid);text-decoration:none;font-size:10px;letter-spacing:0.15em}
+.foot a:hover{color:var(--acid-bright)}
+
+/* mobile */
+@media (max-width:680px){
+  .wrap{padding:14px 12px 40px}
+  .agg{grid-template-columns:repeat(2,1fr)}
+  .agg .val{font-size:18px}
+  .grid{grid-template-columns:1fr;gap:10px}
+  .metrics{grid-template-columns:repeat(2,1fr)}
+  .metrics-row2{grid-template-columns:repeat(3,1fr)}
+  .card-title{font-size:13px}
+  .brand .name{font-size:18px;letter-spacing:0.22em}
+  .header{padding-bottom:14px;margin-bottom:14px}
+  .pos-row{grid-template-columns:1.4fr 0.5fr 1.1fr 0.9fr;font-size:10.5px}
+  .pos-row .col-size{display:none}
+}
+
+/* tablet */
+@media (min-width:681px) and (max-width:1080px){
+  .agg{grid-template-columns:repeat(3,1fr)}
+  .grid{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="header">
+  <div class="brand">
+    <div>
+      <div class="name">PRECOG</div>
+      <div class="sub">ENGINES · LIVE STATE</div>
+    </div>
+  </div>
+  <div class="refresh-meta">
+    <span><span class="live-dot" id="status-dot"></span><span id="status-txt">connecting…</span></span>
+    <span id="last-update">—</span>
+    <button class="btn" onclick="refresh()">REFRESH</button>
+  </div>
+</header>
+
+<section class="agg" id="agg"></section>
+
+<section class="grid" id="grid"></section>
+
+<footer class="foot" style="margin-top:24px;border:1px solid var(--line);padding:10px 14px">
+  <span>commit <span id="commit">—</span> · source <span id="source">—</span></span>
+  <span><a href="https://dashboard-8b7i.onrender.com" target="_blank">DASHBOARD ↗</a></span>
+</footer>
+
+</div>
+
+<script>
+// === DATA SOURCE ============================================================
+// Same-origin when served from precog (production). For preview-mode (no
+// origin to hit), uses inline fallback. The page renders identically either way.
+const SOURCE_URL = '/all_systems';
+
+// FALLBACK / preview data — current live snapshot pulled when this page was authored.
+// Production page overrides with fresh fetch.
+const FALLBACK = {
+  fetched_at: 1778561408,
+  source: 'fallback-snapshot',
+  totals: {
+    equity: 503.11,
+    engines_live: 4, engines_total: 7,
+    open: 10, closes: 41, wins: 22, losses: 14, wr: 53.66, pnl_total: -0.32,
+    commit: '2086bc9'
+  },
+  systems: [
+    // synthesised from current dashboard /api/state (7 engines)
+    {engine_key:'vol-squeeze-fade', name:'VOL-SQUEEZE FADE', desc:'fade bollinger compressions in volatile regimes',
+     mode:'LIVE', live:true, present:true, stale:false, age_sec:48, branch:'main', direction:'L+S', universe:'—',
+     notional_usd:50, sizing_mode:'fixed', max_concurrent:20,
+     closes:20, wins:17, losses:3, breakevens:0, wr:85.0, pnl_total:0.9594, avg_win:0.087, avg_loss:-0.12,
+     open_count:0, open_positions:[],
+     telemetry:{fires_total:20, filled:20, scan_count:0, errors:0, last_scan_ts:1778561372285},
+     url:'https://vol-squeeze-fade.onrender.com'},
+
+    {engine_key:'smc-v2', name:'SMC v2', desc:'R3 backtest-validated SMC, both directions',
+     mode:'LIVE', live:true, present:true, stale:false, age_sec:0, branch:'smc-v2', direction:'L+S', universe:173,
+     notional_usd:50, sizing_mode:'fixed', max_concurrent:20,
+     closes:1, wins:0, losses:1, breakevens:0, wr:0.0, pnl_total:-0.6112, avg_win:0, avg_loss:-0.6112,
+     open_count:0, open_positions:[],
+     telemetry:{fires_total:21, filled:21, scan_count:0, errors:0, last_scan_ts:1778560523482},
+     url:''},
+
+    {engine_key:'multi-gate', name:'MULTI-GATE (PRECOG)', desc:'PIVOT/PULLBACK/WALL/CVD/LIQ + 9 guards',
+     mode:'LIVE', live:true, present:true, stale:false, age_sec:8, branch:'main', direction:'L+S', universe:80,
+     notional_usd:25, sizing_mode:'fixed', max_concurrent:20,
+     closes:0, wins:0, losses:0, breakevens:0, wr:null, pnl_total:0, avg_win:0, avg_loss:0,
+     open_count:1, open_positions:[
+       {coin:'INJ', side:'LONG', entry:4.312, size:11.4, sl:0, tp1:0, tp2:0, unreal_pnl:0}
+     ],
+     telemetry:{fires_total:0, filled:0, scan_count:0, errors:0, last_scan_ts:1778561412466},
+     url:'https://precog-i8c3.onrender.com'},
+
+    {engine_key:'smc-v1', name:'SMC v1', desc:'native SMC engine, long-only',
+     mode:'LIVE', live:true, present:true, stale:false, age_sec:19, branch:'smc-v1', direction:'LONG', universe:'~190',
+     notional_usd:50, sizing_mode:'fixed', max_concurrent:20,
+     closes:0, wins:0, losses:0, breakevens:0, wr:null, pnl_total:0, avg_win:0, avg_loss:0,
+     open_count:0, open_positions:[],
+     telemetry:{fires_total:0, filled:0, scan_count:0, errors:0, last_scan_ts:1778561401059},
+     url:'https://precog-sa.onrender.com'},
+
+    {engine_key:'smc-loose', name:'SMC-LOOSE', desc:'R-1_max loose params, full universe',
+     mode:'LIVE', live:true, present:true, stale:false, age_sec:4, branch:'smc-loose', direction:'L+S', universe:173,
+     notional_usd:50, sizing_mode:'fixed', max_concurrent:20,
+     closes:0, wins:0, losses:0, breakevens:0, wr:null, pnl_total:0, avg_win:0, avg_loss:0,
+     open_count:0, open_positions:[],
+     telemetry:{fires_total:23, filled:23, scan_count:0, errors:0, last_scan_ts:1778561416002},
+     url:''},
+
+    {engine_key:'V10', name:'V10 (POLE-ENGINE)', desc:'pole engine v10 framework — paper validation',
+     mode:'PAPER', live:false, present:true, stale:false, age_sec:27, branch:'v10-framework', direction:'L+S', universe:80,
+     notional_usd:50, sizing_mode:'fixed', max_concurrent:20,
+     closes:14, wins:3, losses:6, breakevens:5, wr:33.3, pnl_total:0, avg_win:0, avg_loss:0,
+     open_count:5, open_positions:[],
+     telemetry:{fires_total:20, filled:20, scan_count:1759, errors:0, last_scan_ts:1778561337667},
+     url:''},
+
+    {engine_key:'pool-engine', name:'POOL-ENGINE', desc:'pool architect — last update 2.8d ago',
+     mode:'STALE', live:true, present:true, stale:true, age_sec:244011, branch:'pole-engine', direction:'L+S', universe:80,
+     notional_usd:25, sizing_mode:'fixed', max_concurrent:20,
+     closes:6, wins:2, losses:4, breakevens:0, wr:33.3, pnl_total:-0.6653, avg_win:0.5751, avg_loss:-0.4539,
+     open_count:4, open_positions:[],
+     telemetry:{fires_total:210, filled:210, scan_count:0, errors:0, last_scan_ts:1778317322833},
+     url:''},
+  ]
+};
+
+// === RENDER =================================================================
+const fmt = {
+  pnl: v => {
+    if (v == null) return '—';
+    const n = +v;
+    const s = (n >= 0 ? '+' : '') + n.toFixed(2);
+    return s;
+  },
+  pct: v => v == null ? '—' : (+v).toFixed(1) + '%',
+  age: s => {
+    if (s == null) return '—';
+    const n = +s;
+    if (n < 60) return n.toFixed(0) + 's';
+    if (n < 3600) return (n/60).toFixed(0) + 'm';
+    if (n < 86400) return (n/3600).toFixed(1) + 'h';
+    return (n/86400).toFixed(1) + 'd';
+  },
+  usd: v => v == null ? '—' : '$' + (+v).toFixed(2),
+  notional: v => v == null ? '—' : '$' + (+v).toFixed(0),
+  count: v => v == null ? '0' : Math.round(+v).toString(),
+  ts: ts => {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  }
+};
+
+function modeOf(s) {
+  // priority: stale > paper > dead > live
+  if (s.stale) return 'STALE';
+  if (!s.present) return 'DEAD';
+  if (!s.live) return 'PAPER';
+  return 'LIVE';
+}
+
+function tradesPerDay(s) {
+  // 12h closes are NOT in this view, so use total fires/closes vs lifetime — approximated.
+  // Best signal: count of fires_total since service start (unknown), so we display
+  // (filled / max(1, ceil(age_h/24))) if telemetry gives us age, else closes-based fallback.
+  const f = s.telemetry?.filled || s.telemetry?.fires_total || s.closes || 0;
+  // Without a service-uptime field we can't compute exact /day. Display 24h closes proxy:
+  // closes is lifetime; for now show fires_total as throughput indicator.
+  return f;
+}
+
+function render(data) {
+  // Aggregate strip
+  const t = data.totals || {};
+  const aggHtml = [
+    {lbl:'EQUITY', val: fmt.usd(t.equity), cls: t.equity > 0 ? '' : 'dim'},
+    {lbl:'ENGINES LIVE', val: (t.engines_live||0) + ' / ' + (t.engines_total||0), cls: 'acid'},
+    {lbl:'OPEN POSITIONS', val: t.open ?? 0},
+    {lbl:'CLOSES (LIFETIME)', val: t.closes ?? 0, sub: (t.wins||0)+'W / '+(t.losses||0)+'L'},
+    {lbl:'WIN RATE', val: fmt.pct(t.wr), cls: t.wr >= 55 ? 'gain' : t.wr >= 45 ? '' : 'loss'},
+    {lbl:'TOTAL PNL', val: fmt.pnl(t.pnl_total), cls: (t.pnl_total||0) >= 0 ? 'gain' : 'loss'},
+  ].map(c => `<div class="cell"><div class="lbl">${c.lbl}</div><div class="val ${c.cls||''}">${c.val}</div>${c.sub?`<div class="sub">${c.sub}</div>`:''}</div>`).join('');
+  document.getElementById('agg').innerHTML = aggHtml;
+
+  // Engine sort: live (by PnL desc) → paper → stale → dead
+  const order = {LIVE:0, PAPER:1, STALE:2, DEAD:3};
+  const sys = [...(data.systems||[])].sort((a,b) => {
+    const ma = modeOf(a), mb = modeOf(b);
+    if (order[ma] !== order[mb]) return order[ma] - order[mb];
+    return (b.pnl_total||0) - (a.pnl_total||0);
+  });
+
+  // Cards
+  const cardsHtml = sys.map(s => {
+    const mode = modeOf(s);
+    const modeCls = mode.toLowerCase();
+    const wrCls = s.wr == null ? '' : (s.wr >= 55 ? 'wr-good' : s.wr >= 45 ? 'wr-mid' : 'wr-bad');
+    const pnl = s.pnl_total || 0;
+    const pnlCls = pnl > 0 ? 'gain' : pnl < 0 ? 'loss' : 'dim';
+
+    const posHtml = (s.open_positions && s.open_positions.length > 0)
+      ? `<div class="pos-tbl">
+           <div class="pos-row head"><span>COIN</span><span>SIDE</span><span>ENTRY</span><span class="col-size">SIZE</span><span>uPnL</span></div>
+           ${s.open_positions.map(p => `
+             <div class="pos-row">
+               <span>${p.coin||'?'}</span>
+               <span class="side-${(p.side||'').toLowerCase().startsWith('l')?'l':'s'}">${(p.side||'').slice(0,1)}</span>
+               <span>${p.entry||'—'}</span>
+               <span class="col-size">${(p.size||'').toString().slice(0,8)}</span>
+               <span class="${(p.unreal_pnl||0)>=0?'gain':'loss'}">${fmt.pnl(p.unreal_pnl)}</span>
+             </div>`).join('')}
+         </div>`
+      : (s.open_count > 0
+          ? `<div class="pos-empty">${s.open_count} open · details upstream</div>`
+          : `<div class="pos-empty">no open positions</div>`);
+
+    const lastScanAge = s.telemetry?.last_scan_ts
+      ? fmt.age((Date.now() - s.telemetry.last_scan_ts) / 1000)
+      : '—';
+
+    return `
+      <div class="card ${modeCls}">
+        <div class="card-head">
+          <div class="card-title">
+            ${s.name || s.engine_key}
+            ${s.desc ? `<span class="desc">${s.desc}</span>` : ''}
+          </div>
+          <div class="tags">
+            <span class="tag ${modeCls}">${mode}</span>
+            ${s.direction && s.direction !== '—' ? `<span class="tag dir">${s.direction}</span>` : ''}
+            ${s.wr != null ? `<span class="tag ${wrCls}">WR ${fmt.pct(s.wr)}</span>` : ''}
+          </div>
+        </div>
+
+        <div class="metrics">
+          <div class="m"><div class="lbl">OPEN</div><div class="val ${s.open_count>0?'acid':'dim'}">${s.open_count||0}</div></div>
+          <div class="m"><div class="lbl">CLOSES</div><div class="val">${s.closes||0}</div><div class="sub">${s.wins||0}W · ${s.losses||0}L${s.breakevens?' · '+s.breakevens+'BE':''}</div></div>
+          <div class="m"><div class="lbl">WIN RATE</div><div class="val ${wrCls}">${fmt.pct(s.wr)}</div></div>
+          <div class="m"><div class="lbl">SUM PNL</div><div class="val ${pnlCls}">${fmt.pnl(s.pnl_total)}</div></div>
+        </div>
+
+        <div class="metrics-row2">
+          <div class="m2"><div class="lbl">AVG WIN</div><div class="val gain">${s.avg_win?fmt.pnl(s.avg_win):'—'}</div></div>
+          <div class="m2"><div class="lbl">AVG LOSS</div><div class="val loss">${s.avg_loss?fmt.pnl(s.avg_loss):'—'}</div></div>
+          <div class="m2"><div class="lbl">FIRES</div><div class="val">${s.telemetry?.fires_total||0}</div></div>
+          <div class="m2"><div class="lbl">NOTIONAL</div><div class="val">${fmt.notional(s.notional_usd)}</div></div>
+          <div class="m2"><div class="lbl">LAST SCAN</div><div class="val ${s.stale?'loss':'dim'}">${lastScanAge}</div></div>
+        </div>
+
+        <div class="section">
+          <div class="section-lbl">OPEN POSITIONS</div>
+          ${posHtml}
+        </div>
+
+        <div class="foot">
+          <span>
+            age ${fmt.age(s.age_sec)} · ${s.sizing_mode||'?'} · max ${s.max_concurrent||'?'} · univ ${s.universe||'—'}
+            ${s.telemetry?.errors ? ` · <span style="color:var(--blood)">err ${s.telemetry.errors}</span>` : ''}
+          </span>
+          ${s.url ? `<a href="${s.url}" target="_blank">SERVICE ↗</a>` : '<span></span>'}
+        </div>
+      </div>`;
+  }).join('');
+
+  document.getElementById('grid').innerHTML = cardsHtml;
+  document.getElementById('commit').textContent = (data.totals?.commit) || data.commit || '—';
+  document.getElementById('source').textContent = data.source || '—';
+  document.getElementById('last-update').textContent = 'updated ' + new Date().toLocaleTimeString();
+}
+
+// === LOOP ===================================================================
+async function refresh() {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-txt');
+  try {
+    const r = await fetch(SOURCE_URL, {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    render(data);
+    dot.className = 'live-dot';
+    txt.textContent = 'live';
+  } catch (e) {
+    // Fallback to preview snapshot. Indicate degraded state.
+    render(FALLBACK);
+    dot.className = 'live-dot warn';
+    txt.textContent = 'preview · fetch unavailable';
+  }
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>

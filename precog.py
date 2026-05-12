@@ -2584,6 +2584,15 @@ if _POSTMORTEM_OK and _postmortem is not None:
 
 
 _LANDING_HTML = None
+def _load_engines_page():
+    """Load engines.html — new dynamic engine state page (all engines, clear metrics)."""
+    try:
+        with open(os.path.join(os.path.dirname(__file__), 'engines.html'), 'r') as f:
+            return f.read()
+    except Exception as e:
+        return f'<html><body><pre>engines.html load err: {e}</pre></body></html>'
+
+
 def _load_landing():
     """Load landing.html from disk."""
     try:
@@ -2602,6 +2611,17 @@ def _load_violations_page():
 
 @app.route('/', methods=['GET'])
 @app.route('/landing', methods=['GET'])
+@app.route('/engines/v2', methods=['GET'])
+@app.route('/engines/all', methods=['GET'])
+def engines_v2():
+    """New dynamic engine state page — all engines from dashboard /api/state,
+    clear PAPER/LIVE/STALE labels, full metrics. Served at /engines/v2 and
+    /engines/all during transition; replaces /engines once validated."""
+    resp = Response(_load_engines_page(), mimetype='text/html')
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
+
+
 @app.route('/engines', methods=['GET'])
 @app.route('/system', methods=['GET'])
 @app.route('/macro', methods=['GET'])
