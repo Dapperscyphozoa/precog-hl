@@ -1152,115 +1152,115 @@ document.querySelectorAll(".precog-nav a[data-page]").forEach(function(a){if(a.g
 </div>
 
 <!-- ═══ SYSTEMS A–F · MOVED UP ═══ -->
-<!-- SYSTEMS A–F — UNIFORM PANELS
-     Default hidden inline (display:none); CSS rule on body[data-view="engines"]
-     re-shows with display:grid !important. Prevents bleed onto dashboard view. -->
-<div data-section="engines" style="display: none; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 32px;" id="systems-grid">
-
-    <!-- SYSTEM A · PRECOG (multi-gate) -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System A · Precog</div>
-            <div class="panel-meta" id="sa-status">—</div>
-        </div>
-        <div class="sys-stats" id="sa-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sa-positions"></div>
-        <div class="sys-section-label">Engine Breakdown</div>
-        <div class="sys-engines" id="sa-engines"></div>
-        <div class="sys-footer" id="sa-footer"></div>
+<!-- ENGINES GRID — dynamic, populated from PM /engines + each engine's /state, /pnl, /closures.
+     Replaces the old 6 hardcoded SYSTEM panels (A/C/D/E/H/I) which missed 16 engines. -->
+<div data-section="engines" style="display: none;" id="engines-dyn">
+    <!-- Group sections injected by JS:
+         LIVE / CANARY · PAPER / VALIDATING · DEMOTED / DEPRECATED -->
+    <div id="engines-summary" class="eng-summary">
+        <div class="eng-summary-stat"><div class="lbl">total</div><div class="val" id="esum-total">—</div></div>
+        <div class="eng-summary-stat"><div class="lbl">live</div><div class="val" id="esum-live" style="color:var(--gain)">—</div></div>
+        <div class="eng-summary-stat"><div class="lbl">paper</div><div class="val" id="esum-paper" style="color:var(--oxide)">—</div></div>
+        <div class="eng-summary-stat"><div class="lbl">dead</div><div class="val" id="esum-dead" style="color:var(--loss)">—</div></div>
     </div>
-
-    <!-- SYSTEM C · SMC v1 -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System C · SMC v1</div>
-            <div class="panel-meta" id="sc-status">—</div>
-        </div>
-        <div class="sys-stats" id="sc-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sc-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="sc-engines"></div>
-        <div class="sys-footer" id="sc-footer"></div>
-    </div>
-
-    <!-- SYSTEM D · SMC v2 -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System D · SMC v2</div>
-            <div class="panel-meta" id="sd-status">—</div>
-        </div>
-        <div class="sys-stats" id="sd-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sd-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="sd-engines"></div>
-        <div class="sys-footer" id="sd-footer"></div>
-    </div>
-
-    <!-- SYSTEM E · SMC-LOOSE -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System E · SMC-Loose</div>
-            <div class="panel-meta" id="se-status">—</div>
-        </div>
-        <div class="sys-stats" id="se-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="se-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="se-engines"></div>
-        <div class="sys-footer" id="se-footer"></div>
-    </div>
-
-    <!-- SYSTEM H · POOL-ARCHITECT REVERSAL -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System H · Pool-Arch (REV)</div>
-            <div class="panel-meta" id="sh-status">—</div>
-        </div>
-        <div class="sys-stats" id="sh-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="sh-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="sh-engines"></div>
-        <div class="sys-footer" id="sh-footer"></div>
-    </div>
-
-    <!-- SYSTEM I · POOL-ARCHITECT CONTINUATION -->
-    <div class="panel">
-        <div class="panel-head">
-            <div class="panel-title">System I · Pool-Arch (CONT)</div>
-            <div class="panel-meta" id="si-status">—</div>
-        </div>
-        <div class="sys-stats" id="si-stats"></div>
-        <div class="sys-section-label">Open Positions</div>
-        <div class="sys-positions" id="si-positions"></div>
-        <div class="sys-section-label">Engine Config</div>
-        <div class="sys-engines" id="si-engines"></div>
-        <div class="sys-footer" id="si-footer"></div>
-    </div>
-
+    <div id="engines-sections"></div>
+    <div id="engines-empty" class="dim" style="display:none;text-align:center;padding:24px;font-style:italic">no engines registered</div>
 </div>
 
 <style>
-.sys-stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 14px; }
-.sys-section-label { font-size: 9px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--blood); opacity: 0.85; margin: 14px 0 6px; padding-bottom: 4px; border-bottom: 1px solid rgba(193, 39, 45, 0.3); }
-.sys-positions { font-size: 11px; max-height: 280px; overflow-y: auto; }
-.sys-engines { font-size: 11px; max-height: 240px; overflow-y: auto; }
-.sys-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10px; opacity: 0.7; letter-spacing: 0.05em; line-height: 1.6; }
-.sys-tbl-head { display: grid; gap: 6px; padding: 5px 0; font-weight: 600; color: var(--blood); border-bottom: 1px solid var(--blood); font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase; }
-.sys-tbl-row { display: grid; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,0,0,0.06); font-size: 11px; }
-.sys-tbl-pos { grid-template-columns: 70px 30px 70px 1fr 50px 50px 55px 55px 40px; }
-.sys-tbl-eng { grid-template-columns: 1fr 35px 60px 50px 70px; }
-.sys-empty { opacity: 0.4; font-style: italic; padding: 10px 0; font-size: 11px; }
-.badge-live { color: var(--acid); font-weight: 600; }
-.badge-dry { color: var(--oxide); font-weight: 600; }
-.badge-disabled { color: var(--blood); font-weight: 600; }
-.badge-stale { color: #888; font-weight: 600; }
-.badge-paused { color: var(--blood); font-size: 9px; padding: 1px 5px; border: 1px solid var(--blood); margin-left: 6px; }
-@media (max-width: 1400px) { #systems-grid { grid-template-columns: 1fr 1fr; } }
-@media (max-width: 900px)  { #systems-grid { grid-template-columns: 1fr; } }
+/* ── Summary header ── */
+.eng-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+               padding: 12px 14px; border: 1px solid var(--line); margin-bottom: 16px;
+               background: var(--carbon); }
+.eng-summary-stat .lbl { font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+                          color: var(--chrome); opacity: 0.6; margin-bottom: 4px; }
+.eng-summary-stat .val { font-family: 'Cormorant Garamond', serif; font-size: 24px; font-weight: 300; color: var(--bone); }
+
+/* ── Group section header ── */
+.eng-section { margin-bottom: 22px; }
+.eng-section-head { display: flex; align-items: baseline; justify-content: space-between;
+                    padding: 6px 10px; margin-bottom: 8px; border-left: 2px solid var(--acid); }
+.eng-section-head .title { font-size: 11px; letter-spacing: 0.25em; text-transform: uppercase;
+                            font-weight: 600; color: var(--acid); }
+.eng-section-head .count { font-size: 10px; color: var(--chrome); opacity: 0.5; margin-left: 8px; }
+.eng-section-head .desc  { font-size: 10px; color: var(--chrome); opacity: 0.4; }
+.eng-section-head.live   { border-left-color: var(--gain); } .eng-section-head.live .title { color: var(--gain); }
+.eng-section-head.paper  { border-left-color: var(--oxide); } .eng-section-head.paper .title { color: var(--oxide); }
+.eng-section-head.dead   { border-left-color: var(--loss); } .eng-section-head.dead .title { color: var(--loss); }
+
+/* ── Engine card ── */
+.eng-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
+.eng-card { background: var(--carbon); border: 1px solid var(--line); padding: 0; overflow: hidden;
+            display: flex; flex-direction: column; transition: border-color 0.15s; }
+.eng-card:hover { border-color: rgba(59,130,246,0.4); }
+.eng-card.dead { opacity: 0.6; border-color: rgba(239,68,68,0.25); }
+
+/* card header */
+.eng-card-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+                 border-bottom: 1px solid var(--line); background: rgba(13,14,17,0.5); }
+.eng-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.eng-dot.up    { background: var(--gain); box-shadow: 0 0 8px var(--gain); }
+.eng-dot.warn  { background: var(--oxide); animation: pulse 1.5s infinite; }
+.eng-dot.down  { background: var(--loss); }
+.eng-dot.muted { background: #4a4a4a; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.eng-name { font-size: 12px; font-weight: 600; color: var(--bone); flex: 1; min-width: 0;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eng-mode { font-size: 9px; font-weight: 700; padding: 2px 6px; letter-spacing: 0.1em;
+            border: 1px solid; flex-shrink: 0; }
+.eng-mode.live  { color: var(--gain); border-color: var(--gain); background: rgba(16,185,129,0.1); }
+.eng-mode.paper { color: var(--oxide); border-color: var(--oxide); background: rgba(217,119,6,0.1); }
+.eng-mode.off   { color: var(--chrome); border-color: var(--line); opacity: 0.6; }
+
+/* strategy line */
+.eng-strategy { font-size: 10px; padding: 6px 12px; color: var(--chrome); opacity: 0.7;
+                border-bottom: 1px solid var(--line); line-height: 1.45;
+                display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                overflow: hidden; max-height: 30px; }
+.eng-strategy .tf { color: var(--acid); font-weight: 600; }
+
+/* metric blocks */
+.eng-metric-block { padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.eng-metric-block:last-child { border-bottom: none; }
+.eng-metric-title { font-size: 8.5px; letter-spacing: 0.22em; text-transform: uppercase;
+                    color: var(--chrome); opacity: 0.55; margin-bottom: 6px; }
+.eng-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 14px; font-size: 11px; }
+.eng-metric-grid.cols4 { grid-template-columns: repeat(4, 1fr); gap: 4px 8px; }
+.eng-kv { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; }
+.eng-kv .k { color: var(--chrome); opacity: 0.55; font-size: 9.5px; }
+.eng-kv .v { color: var(--bone); font-variant-numeric: tabular-nums; font-weight: 500; }
+.eng-kv .v.pos { color: var(--gain); }
+.eng-kv .v.neg { color: var(--loss); }
+.eng-kv .v.warn { color: var(--oxide); }
+.eng-empty-msg { font-size: 10px; color: var(--chrome); opacity: 0.45; font-style: italic; padding: 2px 0; }
+
+/* audit badge */
+.eng-audit-row { display: flex; justify-content: space-between; align-items: center;
+                 padding: 6px 12px; border-bottom: 1px solid var(--line); }
+.eng-audit-row .lbl { font-size: 8.5px; letter-spacing: 0.2em; text-transform: uppercase;
+                       color: var(--chrome); opacity: 0.5; }
+.eng-audit-badge { font-size: 9px; padding: 2px 6px; border: 1px solid; letter-spacing: 0.1em; }
+.eng-audit-badge.pass { color: var(--gain); border-color: var(--gain); background: rgba(16,185,129,0.1); }
+.eng-audit-badge.fail { color: var(--loss); border-color: var(--loss); background: rgba(239,68,68,0.1); }
+.eng-audit-badge.warn { color: var(--oxide); border-color: var(--oxide); background: rgba(217,119,6,0.1); }
+
+/* footer */
+.eng-card-foot { display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+                 background: rgba(13,14,17,0.4); margin-top: auto; flex-wrap: wrap; }
+.eng-tag { font-size: 9px; padding: 2px 6px; letter-spacing: 0.08em; text-transform: uppercase;
+           border: 1px solid var(--line); color: var(--chrome); }
+.eng-tag.stage-live   { color: var(--gain); border-color: rgba(16,185,129,0.4); }
+.eng-tag.stage-canary { color: var(--oxide); border-color: rgba(217,119,6,0.4); }
+.eng-tag.stage-paper  { color: var(--acid); border-color: rgba(59,130,246,0.4); }
+.eng-tag.stage-dead   { color: var(--loss); border-color: rgba(239,68,68,0.4); }
+.eng-warning { padding: 6px 12px; background: rgba(239,68,68,0.06); color: var(--loss);
+               font-size: 10px; border-top: 1px solid rgba(239,68,68,0.2); }
+
+/* responsive */
+@media (max-width: 600px) {
+    .eng-grid { grid-template-columns: 1fr; }
+    .eng-summary { grid-template-columns: repeat(2, 1fr); }
+}
 </style>
 
 <!-- SECONDARY GRID -->
@@ -2397,8 +2397,347 @@ async function loadPMRail() {
   }
 }
 
+
+// ─── ENGINES GRID — dynamic from PM /engines ────────────────────────────────
+// 22 engines (and growing). PM is source of truth for metadata (stage, audit,
+// thesis, capital). Each engine's /state /pnl /closures filled per-card.
+// Replaces the static 6-panel grid that missed 16 engines.
+
+const _ENG_CACHE = { engines: null, data: {}, lastErr: null };
+
+function _eng_classifyHealth(state, pnl) {
+    if (state && state.mode_effective) return 'up';
+    if (pnl && pnl.n_closed != null) return 'up';
+    return 'down';
+}
+
+function _eng_fmtUSD(v) {
+    if (v == null || isNaN(v)) return '—';
+    const sign = v > 0 ? '+' : (v < 0 ? '' : '');
+    return `${sign}$${Math.abs(v) < 10 ? v.toFixed(3) : v.toFixed(2)}`;
+}
+
+function _eng_fmtRelTime(ts) {
+    if (!ts) return '—';
+    const s = (Date.now() - (typeof ts === 'number' ? ts : new Date(ts).getTime())) / 1000;
+    if (s < 60) return `${Math.floor(s)}s`;
+    if (s < 3600) return `${Math.floor(s/60)}m`;
+    if (s < 86400) return `${Math.floor(s/3600)}h`;
+    return `${Math.floor(s/86400)}d`;
+}
+
+// Engines that expose /pnl /state /closures (template-fork + others). Engines NOT
+// here render with PM-only metadata (precog, smc-v2, smc-loose, V9, V10).
+const _ENG_FULL_API = new Set([
+    'vol-squeeze-fade','vol-squeeze-breakout-v1','pairs-engine-v1','dirmom-v1',
+    'vol-mom-inverted-v1','fib-continuation-v1','cvd-inverted-v1',
+    'atr-spike-fader-v1','alt-rotation-v1','avwap-mesh-v1','wyckoff-v1',
+    'venue-lag-v1','funding-div-v1','liq-heatmap-v1','tod-momentum-v1',
+    'tod-reversion-v1','funding-harvester-v1','cross-venue-funding-v1',
+    'vpin-v1','whale-tracker-v1',
+]);
+
+const _ENG_PM_URL = 'https://portfolio-manager-7df2.onrender.com';
+
+function _eng_baseUrl(haltUrl) {
+    if (!haltUrl) return null;
+    try { const u = new URL(haltUrl); return `${u.protocol}//${u.host}`; }
+    catch { return null; }
+}
+
+async function _eng_fetchEngineData(name, base) {
+    // Fetch /pnl, /state, /closures, /signals concurrently. Return what came back.
+    const fetch_ = (path) => fetch(`${base}${path}`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null).catch(() => null);
+    const [pnl, state, closures, signals] = await Promise.all([
+        fetch_('/pnl'),
+        fetch_('/state'),
+        fetch_('/closures?limit=200'),
+        fetch_('/signals?limit=1'),
+    ]);
+    // Synthetic pnl shim for pairs/dirmom which lack /pnl
+    let pnlData = pnl;
+    if (!pnl && state) {
+        const equity = state.equity_usd ?? state.equity ?? null;
+        const dailyPnl = state.daily_pnl_usd ?? state.realizedCum ?? null;
+        const nClosed = state.closed_trades_count ?? null;
+        if (equity != null || dailyPnl != null || nClosed != null) {
+            pnlData = {
+                total_net_pnl: dailyPnl ?? 0,
+                n_closed: nClosed ?? 0,
+                __synthetic: true,
+                equity,
+            };
+        }
+    }
+    return { pnl: pnlData, state, closures, signals };
+}
+
+function _eng_compute24h(closures) {
+    if (!closures || !Array.isArray(closures.closures)) {
+        return { trades24h: 0, w24h: 0, l24h: 0, pnl24h: 0, tradesLifetime: 0, tradesPerDay: null };
+    }
+    const now = Date.now();
+    const cutoff = now - 24 * 3600 * 1000;
+    let t = 0, w = 0, l = 0, p = 0, earliest = now;
+    for (const c of closures.closures) {
+        const ts = c.ts_close ?? 0;
+        const pnl_ = c.net_pnl ?? 0;
+        if (ts < earliest) earliest = ts;
+        if (ts >= cutoff) {
+            t++;
+            if (pnl_ > 0) w++; else if (pnl_ < 0) l++;
+            p += pnl_;
+        }
+    }
+    const total = closures.closures.length;
+    const days = Math.max((now - earliest) / (24 * 3600 * 1000), 0.5);
+    return {
+        trades24h: t, w24h: w, l24h: l, pnl24h: p,
+        tradesLifetime: total,
+        tradesPerDay: total > 0 ? total / days : null,
+    };
+}
+
+function _eng_renderCard(name, pm, data) {
+    const inFullApi = _ENG_FULL_API.has(name);
+    const base = _eng_baseUrl(pm.halt_url);
+    const apiAvailable = inFullApi && !!base;
+
+    const { pnl, state, closures, signals } = data || {};
+    const stats24h = _eng_compute24h(closures);
+
+    // Mode badge — /state.mode_effective is the truth; fallback to PM live
+    let modeText, modeCls;
+    if (state?.mode_effective === 'live') { modeText = 'LIVE'; modeCls = 'live'; }
+    else if (state?.mode_effective === 'paper' || state?.mode_effective === 'dry_run') { modeText = 'PAPER'; modeCls = 'paper'; }
+    else if (!apiAvailable && pm.live === true) { modeText = 'LIVE'; modeCls = 'live'; }
+    else if (!apiAvailable && pm.live === false) { modeText = 'PAPER'; modeCls = 'paper'; }
+    else { modeText = '—'; modeCls = 'off'; }
+
+    // Status dot
+    let dotCls = 'muted';
+    if (state?.halt?.active) dotCls = 'down';
+    else if (apiAvailable && (pnl || state)) dotCls = 'up';
+    else if (apiAvailable) dotCls = 'down';
+    else if (pm.live === true) dotCls = 'up';
+
+    // Strategy line
+    const thesis = pm.spec?.thesis || pm.notes || pm.class?.replace(/_/g, ' ') || '';
+    const timeframe = pm.spec?.timeframe || '';
+
+    // Audit
+    const audit = pm.audit_metrics || {};
+    const auditStatus = pm.audit_status;
+    const expectedWR = audit.wr != null ? audit.wr * 100 : null;
+    const expectedPF = audit.pf ?? audit.oos_pf ?? null;
+    const expectedTPD = audit.max_trades_per_day;
+    const expectedN = audit.n;
+
+    // Stage label / color
+    const stage = pm.lifecycle_stage || 'unknown';
+    const STAGE_LABEL = {
+        full: 'LIVE', canary: 'CANARY', canary_ready: 'CANARY-READY', small: 'SMALL',
+        validated: 'PAPER-PASS', paper: 'PAPER', research: 'RESEARCH',
+        demoted: 'DEMOTED', deprecated: 'DEPRECATED', unknown: 'UNKNOWN',
+    };
+    let stageCls = 'muted';
+    if (['full','canary','small','canary_ready'].includes(stage)) stageCls = stage === 'full' ? 'stage-live' : 'stage-canary';
+    else if (['paper','validated','research'].includes(stage)) stageCls = 'stage-paper';
+    else if (['demoted','deprecated'].includes(stage)) stageCls = 'stage-dead';
+
+    const isDead = ['demoted','deprecated'].includes(stage);
+    const lastSig = signals?.signals?.[0];
+
+    // Build sections
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const pnlClass = (v) => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+
+    // Lifetime block
+    let lifetimeBlock;
+    if (pnl) {
+        const rows = [
+            `<div class="eng-kv"><span class="k">PnL</span><span class="v ${pnlClass(pnl.total_net_pnl)}">${_eng_fmtUSD(pnl.total_net_pnl)}</span></div>`,
+            pnl.wr_pct != null ? `<div class="eng-kv"><span class="k">Win rate</span><span class="v">${pnl.n_closed > 0 ? pnl.wr_pct.toFixed(0) + '%' : '—'}</span></div>` : '',
+            `<div class="eng-kv"><span class="k">Trades</span><span class="v">${pnl.n_closed ?? 0}</span></div>`,
+            pnl.equity != null ? `<div class="eng-kv"><span class="k">Equity</span><span class="v">$${Number(pnl.equity).toFixed(2)}</span></div>` : '',
+            stats24h.tradesPerDay != null && stats24h.tradesPerDay > 0 ? `<div class="eng-kv"><span class="k">T/day</span><span class="v">${stats24h.tradesPerDay.toFixed(1)}</span></div>` : '',
+        ].filter(Boolean).join('');
+        lifetimeBlock = `<div class="eng-metric-grid">${rows}</div>`;
+    } else if (apiAvailable) {
+        lifetimeBlock = '<div class="eng-empty-msg">no trades yet</div>';
+    } else {
+        // PM-only — show what we know
+        lifetimeBlock = `<div class="eng-metric-grid">
+            <div class="eng-kv"><span class="k">Capital</span><span class="v">${pm.capital_fraction ? (pm.capital_fraction*100).toFixed(0) + '%' : '0%'}</span></div>
+            <div class="eng-kv"><span class="k">Class</span><span class="v" style="font-size:9.5px">${esc((pm.class || '').replace(/_/g,' '))}</span></div>
+            ${pm.affinity ? `<div class="eng-kv" style="grid-column:1/-1"><span class="k">Regime</span><span class="v" style="font-size:9.5px">${esc(pm.affinity.slice(0,3).join(', '))}</span></div>` : ''}
+        </div>`;
+    }
+
+    // Expected block
+    let expectedBlock;
+    if (audit.n != null) {
+        const rows = [
+            expectedWR != null ? `<div class="eng-kv"><span class="k">Win rate</span><span class="v">${expectedWR.toFixed(0)}%</span></div>` : '',
+            expectedPF != null ? `<div class="eng-kv"><span class="k">PF</span><span class="v ${expectedPF >= 1.3 ? 'pos' : expectedPF >= 1.1 ? 'warn' : 'neg'}">${expectedPF.toFixed(2)}</span></div>` : '',
+            expectedTPD != null ? `<div class="eng-kv"><span class="k">Max/day</span><span class="v">${expectedTPD}</span></div>` : '',
+            expectedN != null ? `<div class="eng-kv"><span class="k">Backtest n</span><span class="v">${expectedN}</span></div>` : '',
+        ].filter(Boolean).join('');
+        expectedBlock = `<div class="eng-metric-grid">${rows}</div>`;
+    } else {
+        expectedBlock = '<div class="eng-empty-msg">not audited yet</div>';
+    }
+
+    // 24h block
+    let activityBlock;
+    if (apiAvailable && closures) {
+        const wr24 = (stats24h.w24h + stats24h.l24h > 0) ? (100 * stats24h.w24h / (stats24h.w24h + stats24h.l24h)) : null;
+        const paceClass = expectedTPD != null && stats24h.trades24h >= 1 ? 'pos' :
+                          (stats24h.trades24h === 0 ? '' : 'warn');
+        const paceText = expectedTPD != null ? `${stats24h.trades24h}/${expectedTPD}` : `${stats24h.trades24h}`;
+        const rows = [
+            `<div class="eng-kv"><span class="k">PnL</span><span class="v ${pnlClass(stats24h.pnl24h)}">${_eng_fmtUSD(stats24h.pnl24h)}</span></div>`,
+            `<div class="eng-kv"><span class="k">W/L</span><span class="v">${stats24h.w24h}/${stats24h.l24h}</span></div>`,
+            `<div class="eng-kv"><span class="k">Trades</span><span class="v">${stats24h.trades24h}</span></div>`,
+            `<div class="eng-kv"><span class="k">Pace</span><span class="v ${paceClass}">${paceText}</span></div>`,
+            wr24 != null ? `<div class="eng-kv"><span class="k">WR</span><span class="v">${wr24.toFixed(0)}%</span></div>` : '',
+            lastSig ? `<div class="eng-kv"><span class="k">Last</span><span class="v">${_eng_fmtRelTime(lastSig.fire_ts || lastSig.ts)}</span></div>` : '',
+        ].filter(Boolean).join('');
+        activityBlock = `<div class="eng-metric-grid">${rows}</div>`;
+    } else {
+        activityBlock = '<div class="eng-empty-msg">awaiting signal</div>';
+    }
+
+    // Audit verdict row
+    let auditRow = '';
+    if (auditStatus) {
+        const cls = (auditStatus === 'SURVIVOR' || auditStatus === 'PASS') ? 'pass' :
+                    (auditStatus.startsWith('FAIL') || auditStatus === 'NOISE') ? 'fail' : 'warn';
+        auditRow = `<div class="eng-audit-row">
+            <span class="lbl">audit</span>
+            <span class="eng-audit-badge ${cls}">${esc(auditStatus.replace(/_/g, ' '))}</span>
+        </div>`;
+    }
+
+    // Footer
+    const footChips = [
+        `<span class="eng-tag ${stageCls}">${STAGE_LABEL[stage] || stage.toUpperCase()}</span>`,
+        pm.cloid_prefix ? `<span class="eng-tag">${esc(pm.cloid_prefix)}</span>` : '',
+        pm.deprecated ? `<span class="eng-tag stage-dead">DEPRECATED</span>` : '',
+        pm.needs_rewrite ? `<span class="eng-tag stage-canary">REWRITE</span>` : '',
+        (state?.open_trades?.length > 0) ? `<span class="eng-tag" style="color:var(--acid)">${state.open_trades.length} open</span>` : '',
+    ].filter(Boolean).join('');
+
+    const warning = pm.warning || pm.demotion_reason || pm.deprecation_reason;
+    const warningBlock = warning ? `<div class="eng-warning">⚠ ${esc(warning)}</div>` : '';
+
+    return `<div class="eng-card${isDead ? ' dead' : ''}">
+        <div class="eng-card-head">
+            <span class="eng-dot ${dotCls}"></span>
+            <span class="eng-name" title="${esc(name)}">${esc(name)}</span>
+            <span class="eng-mode ${modeCls}">${modeText}</span>
+        </div>
+        ${(thesis || timeframe) ? `<div class="eng-strategy">${timeframe ? `<span class="tf">[${esc(timeframe)}]</span> ` : ''}${esc(thesis)}</div>` : ''}
+        <div class="eng-metric-block">
+            <div class="eng-metric-title">lifetime · actual</div>
+            ${lifetimeBlock}
+        </div>
+        <div class="eng-metric-block">
+            <div class="eng-metric-title">expected · audit</div>
+            ${expectedBlock}
+        </div>
+        <div class="eng-metric-block">
+            <div class="eng-metric-title">last 24h</div>
+            ${activityBlock}
+        </div>
+        ${auditRow}
+        <div class="eng-card-foot">${footChips}</div>
+        ${warningBlock}
+    </div>`;
+}
+
+function _eng_renderSection(title, desc, cls, engineList, allData) {
+    if (!engineList.length) return '';
+    return `<section class="eng-section">
+        <header class="eng-section-head ${cls}">
+            <div>
+                <span class="title">${title}</span>
+                <span class="count">· ${engineList.length}</span>
+            </div>
+            <span class="desc">${desc}</span>
+        </header>
+        <div class="eng-grid">
+            ${engineList.map(([name, pm]) => _eng_renderCard(name, pm, allData[name])).join('')}
+        </div>
+    </section>`;
+}
+
+async function loadEnginesGrid() {
+    try {
+        // Fetch PM engines list
+        const r = await fetch(`${_ENG_PM_URL}/engines`, { cache: 'no-store' });
+        if (!r.ok) throw new Error(`PM /engines HTTP ${r.status}`);
+        const d = await r.json();
+        const engines = d.engines || {};
+
+        // Fetch each engine's data in parallel (only those with halt_url + in full API set)
+        const tasks = [];
+        for (const [name, pm] of Object.entries(engines)) {
+            const base = _eng_baseUrl(pm.halt_url);
+            if (_ENG_FULL_API.has(name) && base) {
+                tasks.push(_eng_fetchEngineData(name, base).then(data => [name, data]));
+            }
+        }
+        const results = await Promise.all(tasks);
+        const allData = Object.fromEntries(results);
+
+        // Group by stage
+        const live = [], paper = [], dead = [], other = [];
+        for (const entry of Object.entries(engines)) {
+            const stage = entry[1].lifecycle_stage;
+            if (['full','canary','small','canary_ready'].includes(stage)) live.push(entry);
+            else if (['paper','validated','research'].includes(stage)) paper.push(entry);
+            else if (['demoted','deprecated'].includes(stage)) dead.push(entry);
+            else other.push(entry);
+        }
+        // Sort alphabetically within each group
+        const byName = (a, b) => a[0].localeCompare(b[0]);
+        live.sort(byName); paper.sort(byName); dead.sort(byName); other.sort(byName);
+
+        // Summary header
+        document.getElementById('esum-total').textContent = Object.keys(engines).length;
+        document.getElementById('esum-live').textContent = live.length;
+        document.getElementById('esum-paper').textContent = paper.length;
+        document.getElementById('esum-dead').textContent = dead.length;
+
+        // Render sections
+        const sectionsHtml = [
+            _eng_renderSection('live trading', 'real money on the wallet', 'live', live, allData),
+            _eng_renderSection('paper / validating', 'signal generation, no real orders', 'paper', paper, allData),
+            _eng_renderSection('demoted / deprecated', 'failed audit, not trading', 'dead', dead, allData),
+            other.length ? _eng_renderSection('other', 'unclassified', '', other, allData) : '',
+        ].filter(Boolean).join('');
+
+        document.getElementById('engines-sections').innerHTML = sectionsHtml;
+        document.getElementById('engines-empty').style.display = Object.keys(engines).length ? 'none' : 'block';
+        _ENG_CACHE.engines = engines;
+        _ENG_CACHE.data = allData;
+        _ENG_CACHE.lastErr = null;
+    } catch (e) {
+        console.error('loadEnginesGrid err', e);
+        _ENG_CACHE.lastErr = e.message;
+        const empty = document.getElementById('engines-empty');
+        if (empty) {
+            empty.style.display = 'block';
+            empty.textContent = `// engines load failed: ${e.message}`;
+        }
+    }
+}
+
+
 // Initial paint — immediate but no setInterval bursts at t=0
-loadDash(); loadMacroStrip(); loadEngines(); loadPMRail();
+loadDash(); loadMacroStrip(); loadEngines(); loadPMRail(); loadEnginesGrid();
 
 // Staggered offsets keep concurrent fetches small
 poll('clock',     updateClock,     1000,   0);
@@ -2412,6 +2751,7 @@ poll('macro',     loadMacroStrip,  6000,   1900);
 poll('engines',   loadEngines,     8000,   2200);
 poll('systems',   loadSystems,     12000,  2500);
 poll('pmrail',    loadPMRail,      8000,   2800);
+poll('engines_grid', loadEnginesGrid, 15000, 3100);
 
 // ═══ Live Positions + 24h Equity Pulse ═══════════════════════════════════
 // Live positions table mirrors /dash.positions in a compact mono format.
