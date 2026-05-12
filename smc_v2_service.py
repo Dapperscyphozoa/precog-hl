@@ -2194,6 +2194,139 @@ def reconcile_positions(state):
 
 
 
+def reap_unfilled_entries(state):
+    """Hybrid maker→taker fallback for entries that didn't fill.
+
+    Problem: smc-loose places maker-only entry orders at the SMC entry level.
+    If price doesn't return to that level, the order sits resting forever and
+    the engine produces zero trades despite firing 1-3 signals/day.
+
+    Behaviour: scan state['positions'] for phase='pending_fill' positions
+    where (now - fired_t) > ENTRY_MAKER_TIMEOUT_SEC. For each:
+      1. Cancel the resting maker entry (and protective TP/SL legs if rested)
+      2. Place an IOC entry at current mid ± SLIPPAGE_BPS in the trade direction
+      3. If filled, re-place native SL+TP triggers via the existing helpers
+      4. If still unfilled (rare with IOC at mid), abandon the signal:
+         mark phase='done' with close_reason='maker_timeout_no_fill'
+
+    Tunables (env):
+      SMCV2_ENTRY_MAKER_TIMEOUT_SEC  default 120
+      SMCV2_TAKER_SLIPPAGE_BPS       default 5  (0.05% past mid for IOC)
+      SMCV2_TAKER_FALLBACK_ENABLE    default 1  (set to 0 to disable)
+
+    Returns count of entries converted to taker.
+    """
+    if not state.get('positions'):
+        return 0
+    enabled = os.environ.get('SMCV2_TAKER_FALLBACK_ENABLE', '1') == '1'
+    if not enabled:
+        return 0
+    timeout_sec = int(os.environ.get('SMCV2_ENTRY_MAKER_TIMEOUT_SEC', '120'))
+    slip_bps = float(os.environ.get('SMCV2_TAKER_SLIPPAGE_BPS', '5'))
+    now_ms = int(time.time() * 1000)
+    converted = 0
+
+    # Pull current mids once
+    try:
+        mids = info.all_mids() or {}
+    except Exception as e:
+        log(f'reap_unfilled: all_mids err: {e}')
+        return 0
+
+    for coin, pos in list(state['positions'].items()):
+        if pos.get('phase') != 'pending_fill':
+            continue
+        # Skip if entry has at least partially filled — let regular flow continue
+        if float(pos.get('entry_filled_sz', 0) or 0) > 0:
+            continue
+        fired_t = pos.get('fired_t', 0) or pos.get('opened_t', 0) or 0
+        if fired_t <= 0:
+            continue
+        age_sec = (now_ms - fired_t) / 1000.0
+        if age_sec < timeout_sec:
+            continue
+
+        # Eligible for taker conversion
+        is_long = bool(pos.get('is_long'))
+        sz_total = float(pos.get('sz_total', 0) or 0)
+        if sz_total <= 0:
+            continue
+        mid_str = mids.get(coin)
+        if not mid_str:
+            log(f'  reap {coin}: no mid available, skipping')
+            continue
+        try:
+            mid = float(mid_str)
+        except (TypeError, ValueError):
+            continue
+
+        # Cancel the resting maker entry first (best-effort)
+        cloid_entry = pos.get('cloid_entry')
+        if cloid_entry:
+            try:
+                cancel_order(coin, cloid_entry)
+            except Exception as e:
+                log(f'  reap {coin}: entry cancel err (continuing): {e}')
+
+        # Place IOC at mid ± slippage in trade direction
+        if is_long:
+            taker_px = mid * (1 + slip_bps / 10000.0)
+        else:
+            taker_px = mid * (1 - slip_bps / 10000.0)
+
+        log(f'  reap {coin}: age={age_sec:.0f}s > {timeout_sec}s → IOC at {taker_px:.6g} (mid={mid:.6g})')
+        try:
+            if not LIVE_TRADING:
+                log(f'    [DRY] would IOC {("BUY" if is_long else "SELL")} sz={sz_total} @ {taker_px}')
+                continue
+            res = exchange.order(coin, is_long, sz_total, taker_px,
+                                 {'limit': {'tif': 'Ioc'}})
+        except Exception as e:
+            log(f'  reap {coin}: IOC place err: {e}')
+            # Mark done so it doesn't keep retrying
+            pos['phase'] = 'done'
+            pos['close_reason'] = 'maker_timeout_ioc_err'
+            pos['close_t'] = now_ms
+            continue
+
+        # Parse fill result
+        filled_sz = 0.0
+        fill_px = None
+        try:
+            statuses = (res or {}).get('response', {}).get('data', {}).get('statuses', [])
+            for st in statuses:
+                if isinstance(st, dict):
+                    if 'filled' in st:
+                        fp = st['filled']
+                        filled_sz += float(fp.get('totalSz', 0) or fp.get('sz', 0) or 0)
+                        if fill_px is None:
+                            try: fill_px = float(fp.get('avgPx') or 0)
+                            except (TypeError, ValueError): pass
+                    elif 'error' in st:
+                        log(f'  reap {coin}: status err: {st["error"]}')
+        except Exception as e:
+            log(f'  reap {coin}: parse err: {e}')
+
+        if filled_sz >= sz_total * 0.95 and fill_px:
+            pos['phase'] = 'live'
+            pos['actual_entry_px'] = fill_px
+            pos['entry_filled_sz'] = filled_sz
+            pos['entry_method'] = 'taker_fallback'
+            pos['taker_converted_t'] = now_ms
+            log(f'  reap {coin}: TAKER FILL @ {fill_px} sz={filled_sz} → phase=live')
+            converted += 1
+        else:
+            # IOC didn't fill — order book too thin or price moved away
+            pos['phase'] = 'done'
+            pos['close_reason'] = 'maker_timeout_no_fill'
+            pos['close_t'] = now_ms
+            log(f'  reap {coin}: IOC unfilled (got {filled_sz}/{sz_total}) → abandoned')
+
+    if converted:
+        save_state(state)
+    return converted
+
+
 def reconcile_phantoms(state):
     """Detect & purge phantom positions: state thinks we have a trade open
     but HL has no matching position OR pending order.
@@ -2770,6 +2903,8 @@ def main():
     PHANTOM_CHECK_SEC = 5 * 60   # check for phantoms every 5 minutes
     # First cycle runs ~30s after boot (not waiting for full 5min interval).
     last_phantom_check = time.time() - (PHANTOM_CHECK_SEC - 30)
+    REAP_CHECK_SEC = 30          # entry-timeout reaper every 30s
+    last_reap_check = time.time()
 
     while True:
         try:
@@ -2778,6 +2913,16 @@ def main():
             if now - last_reconcile >= POSITION_CHECK_SEC:
                 reconcile_positions(state)
                 last_reconcile = now
+
+            # Entry-timeout reaper: convert unfilled maker entries → IOC
+            if now - last_reap_check >= REAP_CHECK_SEC:
+                try:
+                    n = reap_unfilled_entries(state)
+                    if n > 0:
+                        log(f'reap: converted {n} pending_fill → taker fallback')
+                except Exception as _re:
+                    log(f"reap_unfilled_entries err: {_re}")
+                last_reap_check = now
 
             # Phantom cleanup every PHANTOM_CHECK_SEC (less frequent — HL roundtrip)
             if now - last_phantom_check >= PHANTOM_CHECK_SEC:
