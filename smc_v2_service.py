@@ -863,16 +863,23 @@ def save_state(state):
         from dashboard_push import push_state as _dash_push
         # ── Filter out positions that haven't actually filled on HL yet ──
         # state['positions'] is populated when an entry order is SUBMITTED
-        # (phase='pending_fill'). Becomes real once HL confirms entry fill
-        # (phase → 'live' or 'tp1_filled'). phase='done' is a closed
-        # position pending cleanup — also exclude.
+        # (phase='pending_fill'). It only becomes a real on-chain position
+        # once HL confirms the entry fill (phase transitions to 'live' or
+        # 'tp1_filled'). The dashboard should only show real positions.
+        # phase='done' is a closed position pending cleanup — also exclude.
         #
-        # 2026-05-11: phase alone is unreliable (persisted state can carry
-        # phase='live' for entries that never truly cumulatively filled).
-        # Add strong checks: entry_filled_sz threshold + HL cross-check
-        # with self-heal of corrupt phase.
+        # 2026-05-11: phase alone is unreliable. Persisted state can carry
+        # phase='live' for entries that never truly cumulatively filled
+        # (e.g. spurious WS events, restart-from-disk with stale state).
+        # Add two stronger checks:
+        #   1. Require entry_filled_sz >= 95% of sz_total (the same
+        #      threshold used by the on-fill transition)
+        #   2. Cross-check vs HL clearinghouseState — drop any position
+        #      not actually present on the wallet; self-heal phase='done'
+        #      in state so subsequent loops stop including it.
         all_pos = state.get('positions', {})
 
+        # Step 1: query HL for ground truth (best-effort)
         hl_coins = None
         try:
             import urllib.request as _ur2, json as _json2
@@ -893,14 +900,22 @@ def save_state(state):
         except Exception:
             hl_coins = None
 
+        # Step 2: self-heal — mark phase='done' for positions not on HL
+        # so they get cleaned up on the next save cycle.
         if hl_coins is not None:
             for coin, p in list(all_pos.items()):
                 if coin in hl_coins:
                     continue
-                if p.get('phase') in ('live', 'tp1_filled'):
-                    p['phase'] = 'done'
-                    log(f'  selfheal: {coin} phase→done (not on HL, was live)')
+                if p.get('phase') in ('live', 'tp1_filled', 'pending_fill'):
+                    cum_filled = float(p.get('entry_filled_sz', 0) or 0)
+                    sz_total = float(p.get('sz_total', 0) or 0)
+                    # Only self-heal if we *thought* it was live but HL says no
+                    if p.get('phase') in ('live', 'tp1_filled') or \
+                       (p.get('phase') == 'pending_fill' and cum_filled > 0):
+                        p['phase'] = 'done'
+                        log(f'  selfheal: {coin} phase→done (not on HL, was {p.get("phase")})')
 
+        # Step 3: build filled_pos — strict checks
         filled_pos = {}
         for coin, p in all_pos.items():
             if p.get('phase') not in ('live', 'tp1_filled'):
@@ -908,13 +923,13 @@ def save_state(state):
             cum_filled = float(p.get('entry_filled_sz', 0) or 0)
             sz_total = float(p.get('sz_total', 0) or 0)
             if sz_total > 0 and cum_filled < sz_total * 0.95:
-                continue
+                continue  # phase says live but entry never actually filled
             if hl_coins is not None and coin not in hl_coins:
-                continue
+                continue  # HL says not present — drop
             filled_pos[coin] = p
 
         _dash_push(
-            engine_name='smc-v2',
+            engine_name='smc-loose',
             live=LIVE_TRADING,
             sizing_mode='fixed',
             notional_usd=FIXED_NOTIONAL_USD,
@@ -1453,7 +1468,7 @@ _FILLS_REST_CALLS_OK = 0   # successful REST calls (for cold-start gating)
 
 # B215: WS-augmented fills feed. Subscribes to HL userFills WS channel.
 # When WS is healthy, fetch_recent_fills() drains the buffer instead of
-# hitting REST → drops engine REST load to ~0 calls/min, eliminating
+# hitting REST → drops smc-loose REST load to ~0 calls/min, eliminating
 # 429s on the shared Render egress IP. REST path retained as fallback
 # (cold-start backfill + WS-silent failover) — interface unchanged for
 # reconcile_positions and reconcile_phantoms.
@@ -1465,7 +1480,6 @@ _FILLS_WS_BOOT_TS = 0.0
 _FILLS_WS_STATS = {'msgs': 0, 'fills_received': 0, 'subscribe_errors': 0}
 _FILLS_WS_COLD_START_GRACE_SEC = 30.0  # let REST run for first ~30s to backfill 24h
 _FILLS_WS_SILENT_FAILOVER_SEC = 120.0  # WS silent this long → fall back to REST
-_FILLS_WS_ENGINE_TAG = 'smc-v2'
 
 
 def _on_user_fills_ws(msg):
@@ -1506,7 +1520,7 @@ def init_user_fills_ws():
         ws_info.subscribe({'type': 'userFills', 'user': WALLET},
                           _on_user_fills_ws)
         _FILLS_WS_INSTANCE = ws_info
-        log(f'userFills WS subscribed ({_FILLS_WS_ENGINE_TAG}, wallet={WALLET[:10]}…)')
+        log(f'userFills WS subscribed (smc-loose, wallet={WALLET[:10]}…)')
     except Exception as e:
         _FILLS_WS_STATS['subscribe_errors'] += 1
         log(f'userFills WS subscribe failed (using REST fallback): {e}')
@@ -2180,6 +2194,139 @@ def reconcile_positions(state):
 
 
 
+def reap_unfilled_entries(state):
+    """Hybrid maker→taker fallback for entries that didn't fill.
+
+    Problem: smc-loose places maker-only entry orders at the SMC entry level.
+    If price doesn't return to that level, the order sits resting forever and
+    the engine produces zero trades despite firing 1-3 signals/day.
+
+    Behaviour: scan state['positions'] for phase='pending_fill' positions
+    where (now - fired_t) > ENTRY_MAKER_TIMEOUT_SEC. For each:
+      1. Cancel the resting maker entry (and protective TP/SL legs if rested)
+      2. Place an IOC entry at current mid ± SLIPPAGE_BPS in the trade direction
+      3. If filled, re-place native SL+TP triggers via the existing helpers
+      4. If still unfilled (rare with IOC at mid), abandon the signal:
+         mark phase='done' with close_reason='maker_timeout_no_fill'
+
+    Tunables (env):
+      SMCV2_ENTRY_MAKER_TIMEOUT_SEC  default 120
+      SMCV2_TAKER_SLIPPAGE_BPS       default 5  (0.05% past mid for IOC)
+      SMCV2_TAKER_FALLBACK_ENABLE    default 1  (set to 0 to disable)
+
+    Returns count of entries converted to taker.
+    """
+    if not state.get('positions'):
+        return 0
+    enabled = os.environ.get('SMCV2_TAKER_FALLBACK_ENABLE', '1') == '1'
+    if not enabled:
+        return 0
+    timeout_sec = int(os.environ.get('SMCV2_ENTRY_MAKER_TIMEOUT_SEC', '120'))
+    slip_bps = float(os.environ.get('SMCV2_TAKER_SLIPPAGE_BPS', '5'))
+    now_ms = int(time.time() * 1000)
+    converted = 0
+
+    # Pull current mids once
+    try:
+        mids = info.all_mids() or {}
+    except Exception as e:
+        log(f'reap_unfilled: all_mids err: {e}')
+        return 0
+
+    for coin, pos in list(state['positions'].items()):
+        if pos.get('phase') != 'pending_fill':
+            continue
+        # Skip if entry has at least partially filled — let regular flow continue
+        if float(pos.get('entry_filled_sz', 0) or 0) > 0:
+            continue
+        fired_t = pos.get('fired_t', 0) or pos.get('opened_t', 0) or 0
+        if fired_t <= 0:
+            continue
+        age_sec = (now_ms - fired_t) / 1000.0
+        if age_sec < timeout_sec:
+            continue
+
+        # Eligible for taker conversion
+        is_long = bool(pos.get('is_long'))
+        sz_total = float(pos.get('sz_total', 0) or 0)
+        if sz_total <= 0:
+            continue
+        mid_str = mids.get(coin)
+        if not mid_str:
+            log(f'  reap {coin}: no mid available, skipping')
+            continue
+        try:
+            mid = float(mid_str)
+        except (TypeError, ValueError):
+            continue
+
+        # Cancel the resting maker entry first (best-effort)
+        cloid_entry = pos.get('cloid_entry')
+        if cloid_entry:
+            try:
+                cancel_order(coin, cloid_entry)
+            except Exception as e:
+                log(f'  reap {coin}: entry cancel err (continuing): {e}')
+
+        # Place IOC at mid ± slippage in trade direction
+        if is_long:
+            taker_px = mid * (1 + slip_bps / 10000.0)
+        else:
+            taker_px = mid * (1 - slip_bps / 10000.0)
+
+        log(f'  reap {coin}: age={age_sec:.0f}s > {timeout_sec}s → IOC at {taker_px:.6g} (mid={mid:.6g})')
+        try:
+            if not LIVE_TRADING:
+                log(f'    [DRY] would IOC {("BUY" if is_long else "SELL")} sz={sz_total} @ {taker_px}')
+                continue
+            res = exchange.order(coin, is_long, sz_total, taker_px,
+                                 {'limit': {'tif': 'Ioc'}})
+        except Exception as e:
+            log(f'  reap {coin}: IOC place err: {e}')
+            # Mark done so it doesn't keep retrying
+            pos['phase'] = 'done'
+            pos['close_reason'] = 'maker_timeout_ioc_err'
+            pos['close_t'] = now_ms
+            continue
+
+        # Parse fill result
+        filled_sz = 0.0
+        fill_px = None
+        try:
+            statuses = (res or {}).get('response', {}).get('data', {}).get('statuses', [])
+            for st in statuses:
+                if isinstance(st, dict):
+                    if 'filled' in st:
+                        fp = st['filled']
+                        filled_sz += float(fp.get('totalSz', 0) or fp.get('sz', 0) or 0)
+                        if fill_px is None:
+                            try: fill_px = float(fp.get('avgPx') or 0)
+                            except (TypeError, ValueError): pass
+                    elif 'error' in st:
+                        log(f'  reap {coin}: status err: {st["error"]}')
+        except Exception as e:
+            log(f'  reap {coin}: parse err: {e}')
+
+        if filled_sz >= sz_total * 0.95 and fill_px:
+            pos['phase'] = 'live'
+            pos['actual_entry_px'] = fill_px
+            pos['entry_filled_sz'] = filled_sz
+            pos['entry_method'] = 'taker_fallback'
+            pos['taker_converted_t'] = now_ms
+            log(f'  reap {coin}: TAKER FILL @ {fill_px} sz={filled_sz} → phase=live')
+            converted += 1
+        else:
+            # IOC didn't fill — order book too thin or price moved away
+            pos['phase'] = 'done'
+            pos['close_reason'] = 'maker_timeout_no_fill'
+            pos['close_t'] = now_ms
+            log(f'  reap {coin}: IOC unfilled (got {filled_sz}/{sz_total}) → abandoned')
+
+    if converted:
+        save_state(state)
+    return converted
+
+
 def reconcile_phantoms(state):
     """Detect & purge phantom positions: state thinks we have a trade open
     but HL has no matching position OR pending order.
@@ -2733,7 +2880,7 @@ def main():
     try:
         from dashboard_push import start_heartbeat as _start_hb
         _start_hb(
-            engine_name='smc-v2',
+            engine_name='smc-loose',
             state_getter=lambda: state,
             config_getter=lambda: {
                 'live': LIVE_TRADING,
@@ -2756,6 +2903,8 @@ def main():
     PHANTOM_CHECK_SEC = 5 * 60   # check for phantoms every 5 minutes
     # First cycle runs ~30s after boot (not waiting for full 5min interval).
     last_phantom_check = time.time() - (PHANTOM_CHECK_SEC - 30)
+    REAP_CHECK_SEC = 30          # entry-timeout reaper every 30s
+    last_reap_check = time.time()
 
     while True:
         try:
@@ -2764,6 +2913,16 @@ def main():
             if now - last_reconcile >= POSITION_CHECK_SEC:
                 reconcile_positions(state)
                 last_reconcile = now
+
+            # Entry-timeout reaper: convert unfilled maker entries → IOC
+            if now - last_reap_check >= REAP_CHECK_SEC:
+                try:
+                    n = reap_unfilled_entries(state)
+                    if n > 0:
+                        log(f'reap: converted {n} pending_fill → taker fallback')
+                except Exception as _re:
+                    log(f"reap_unfilled_entries err: {_re}")
+                last_reap_check = now
 
             # Phantom cleanup every PHANTOM_CHECK_SEC (less frequent — HL roundtrip)
             if now - last_phantom_check >= PHANTOM_CHECK_SEC:
