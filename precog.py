@@ -6856,15 +6856,24 @@ _last_order_ts = [0.0]  # mutable holder for last order time
 _orig_exchange_order = exchange.order
 def _rate_limited_order(*args, **kwargs):
     """Rate-limit wrapper around exchange.order.
-    Enforces: (1) min-interval between consecutive orders, (2) absolute
-    burst cap in a rolling window, (3) per-coin spacing via flight_guard
-    to prevent same-coin write collisions (cancel→taker 429 pattern).
-    Waits just enough to stay legal."""
-    # Per-coin spacing first — cheap, prevents same-coin burst BEFORE
-    # we hit the global burst cap.
+    2026-05-13: also auto-injects 'whlmir_' cloid when caller does not
+    supply one, so PM can attribute the resulting fill to this engine."""
     coin = args[0] if args else kwargs.get('coin')
     if coin:
         flight_guard.acquire(coin)
+
+    # ── Attribution: auto-inject cloid if caller didn't supply one ──
+    if 'cloid' not in kwargs or kwargs.get('cloid') is None:
+        try:
+            from hyperliquid.utils.types import Cloid
+            is_buy = args[1] if len(args) >= 2 else kwargs.get('is_buy', False)
+            side_letter = 'B' if is_buy else 'S'
+            _ts_ms = int(time.time() * 1000)
+            cloid_str = f"whlmir_{coin}_{side_letter}_{_ts_ms}"
+            hex_str = cloid_str.encode().hex()[:32].ljust(32, '0')
+            kwargs['cloid'] = Cloid.from_str('0x' + hex_str)
+        except Exception:
+            pass
     with _order_lock:
         now = time.time()
         # Min-interval check
