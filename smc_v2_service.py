@@ -947,11 +947,22 @@ def save_state(state):
 # EXECUTION — entry + native SL + native TP1 + native TP2
 # ═══════════════════════════════════════════════════════
 def make_cloid(coin, suffix):
-    """16-byte hex cloid via SHA-256. Uniquely encodes coin+timestamp+suffix
-    regardless of coin name length (was truncating suffix for coins >=5 chars).
+    """16-byte hex cloid with ASCII attribution head.
+    
+    Layout: bytes 0-6 = "pa_smc_" (7 chars ASCII, visible at HL fill time)
+            bytes 7-15 = SHA-256(raw)[:18 hex chars] (9 bytes uniqueness hash)
+    
+    Total 32 hex chars (16 bytes) — fits HL Cloid spec.
+    
+    2026-05-13: Patched from full-SHA-256-only to embed ASCII prefix so PM
+    /portfolio/attribution can identify smc-loose fills (previously they
+    landed in UNATTRIBUTED bucket, hiding real PnL).
     """
+    head_ascii = 'pa_smc_'  # 7 chars × 2 hex = 14 hex chars
+    head_hex = head_ascii.encode('utf-8').hex()  # = '70615f736d635f'
     raw = f'pa_smc_{coin}_{int(time.time()*1000)}_{suffix}'.encode('utf-8')
-    return '0x' + hashlib.sha256(raw).hexdigest()[:32]
+    tail_hex = hashlib.sha256(raw).hexdigest()[:18]  # 9 bytes uniqueness
+    return '0x' + head_hex + tail_hex  # 32 hex chars total
 
 
 def calc_size(coin, entry_px):
