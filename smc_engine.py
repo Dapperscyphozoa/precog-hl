@@ -199,10 +199,20 @@ def handle_smc_alert(payload: dict):
         (1,  'webhook_secret', lambda: payload.get('secret') == WEBHOOK_SECRET),
         (2,  'schema',         lambda: all(f in payload for f in REQUIRED_PAYLOAD_FIELDS)),
         (3,  'dedupe',         lambda: not dedupe_check(payload['alert_id'])),
-        (4,  'short_signal',   lambda: payload.get('side') != 'SELL'),
+        # 2026-05-13: BIDIRECTIONAL. Was long-only; engine sat idle whenever
+        # BTC 4h was in downtrend (i.e. most of the time). SELL signals now
+        # allowed, and gate 9 below validates trend direction matches side.
+        (4,  'side_valid',     lambda: payload.get('side') in ('BUY', 'SELL')),
         (6,  'major_excluded', lambda: payload['coin'] not in SMC_CONFIG['excluded_majors']),
         (8,  'rr_min',         lambda: float(payload.get('rr_to_tp2', 0)) >= SMC_CONFIG['min_rr_to_take']),
-        (9,  'btc_trend',      lambda: bool(state.btc_trend_up)),
+        # 2026-05-13: Directional. Long signals need BTC 4h trend up;
+        # short signals need BTC 4h trend down. Was long-only check.
+        (9,  'btc_trend',      lambda: (
+            state.btc_trend_up is not None and (
+                (payload.get('side') == 'BUY' and bool(state.btc_trend_up)) or
+                (payload.get('side') == 'SELL' and not bool(state.btc_trend_up))
+            )
+        )),
         (10, 'funding_max',    lambda: ctx['funding_rate'] < SMC_CONFIG['funding_max_adverse_per_hour']),
         (11, 'position_cap',   lambda: _smc_position_count() < SMC_CONFIG['max_concurrent_positions']),
         (12, 'coin_open',      lambda: payload['coin'] not in state.positions),
