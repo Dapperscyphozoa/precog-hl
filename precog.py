@@ -11325,7 +11325,7 @@ def process(coin, state, equity, live_positions, risk_mult=1.0):
             _ok, _detail, _partial_mult = _mtf.aligned(coin, sig)
             if not _ok:
                 _conf_for_mtf = locals().get('conf_score', 0)
-                if _conf_for_mtf >= 15:
+                if _conf_for_mtf >= 1:  # validation: any non-zero conf bypasses MTF block
                     risk_mult = risk_mult * 0.3
                     log(f"{coin} {sig} MTF-PENALTY ×0.3 (conviction bypass conf={_conf_for_mtf}): {_detail}")
                     # NO RETURN — let conviction-gated signal proceed at reduced size
