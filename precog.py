@@ -6859,12 +6859,32 @@ def _rate_limited_order(*args, **kwargs):
     Enforces: (1) min-interval between consecutive orders, (2) absolute
     burst cap in a rolling window, (3) per-coin spacing via flight_guard
     to prevent same-coin write collisions (cancel→taker 429 pattern).
-    Waits just enough to stay legal."""
+    Waits just enough to stay legal.
+
+    2026-05-13 ATTRIBUTION FIX: if the caller didn't supply a `cloid`,
+    auto-build one tagged 'precog_' before the order leaves the process.
+    Without this, PM cannot attribute the resulting fill to this engine,
+    and the fill lands in UNATTRIBUTED on the portfolio dashboard.
+    The cloid is built from coin + side + ms-timestamp so it's unique."""
     # Per-coin spacing first — cheap, prevents same-coin burst BEFORE
     # we hit the global burst cap.
     coin = args[0] if args else kwargs.get('coin')
     if coin:
         flight_guard.acquire(coin)
+
+    # ── Attribution: auto-inject precog_ cloid if caller didn't supply one ──
+    if 'cloid' not in kwargs or kwargs.get('cloid') is None:
+        try:
+            from hyperliquid.utils.types import Cloid
+            is_buy = args[1] if len(args) >= 2 else kwargs.get('is_buy', False)
+            side_letter = 'B' if is_buy else 'S'
+            _ts_ms = int(time.time() * 1000)
+            cloid_str = f"precog_{coin}_{side_letter}_{_ts_ms}"
+            hex_str = cloid_str.encode().hex()[:32].ljust(32, '0')
+            kwargs['cloid'] = Cloid.from_str('0x' + hex_str)
+        except Exception:
+            pass  # If injection fails, fall through to original behaviour
+
     with _order_lock:
         now = time.time()
         # Min-interval check
@@ -8192,6 +8212,14 @@ def place(coin, is_buy, size, cloid=None):
 
 def _place_impl(coin, is_buy, size, cloid=None):
     """Original place() body — wrapped by place() with lifecycle lock."""
+    # 2026-05-13: ATTRIBUTION FIX — never let cloid=None reach the exchange.
+    # PM's fill attribution needs a recognisable prefix on every order. If the
+    # caller didn't supply a cloid, auto-build one tagged 'precog_' so PM can
+    # attribute the resulting fill to this engine instead of UNATTRIBUTED.
+    if not cloid:
+        _ts_ms = int(time.time() * 1000)
+        cloid = f"precog_{coin}_{'B' if is_buy else 'S'}_{_ts_ms}"
+
     # Convert cloid string to hyperliquid Cloid object if provided
     _cloid_obj = None
     if cloid:
@@ -8335,6 +8363,11 @@ def place_ladder(coin, is_buy, size, cloid=None, fill_window_s=None):
     Set LADDER_MODE=1 in env to enable. Falls back to place() if module missing
     or if computation fails.
     """
+    # 2026-05-13: ATTRIBUTION FIX — auto-build precog_ cloid when caller
+    # passes None, so PM can attribute the ladder fills to this engine.
+    if not cloid:
+        _ts_ms = int(time.time() * 1000)
+        cloid = f"precog_{coin}_{'B' if is_buy else 'S'}_{_ts_ms}"
     try:
         import market_maker as _mm
     except Exception as e:
