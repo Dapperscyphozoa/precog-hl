@@ -2885,6 +2885,25 @@ def main():
     state = load_state()
     log(f'loaded state: {len(state["positions"])} open positions, {len(state["history"])} closed')
 
+    # 2026-05-13: ATTRIBUTION BACKFILL DUMP on boot — emit historical cloids
+    # to stdout so PM can scrape from Render logs. One-shot, gated by env.
+    if os.environ.get('DUMP_ATTRIBUTION_ON_BOOT') == '1':
+        try:
+            log('=== ATTRIBUTION_DUMP_START ===')
+            count = 0
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE) as f:
+                    for line in f:
+                        try:
+                            p = json.loads(line)
+                            log(f'ATTRIB | coin={p.get("coin")} | entry={p.get("cloid_entry")} | sl={p.get("cloid_sl")} | tp1={p.get("cloid_tp1")} | tp2={p.get("cloid_tp2")} | close={p.get("cloid_close")} | outcome={p.get("outcome") or p.get("close_reason")} | pnl={p.get("realized_pnl",0)}')
+                            count += 1
+                        except Exception:
+                            pass
+            log(f'=== ATTRIBUTION_DUMP_END (n={count}) ===')
+        except Exception as _e:
+            log(f'attribution dump err: {_e}')
+
     # Dashboard heartbeat — pushes state snapshot every 60s regardless of scan
     # activity, so the dashboard's 5-min staleness threshold isn't tripped on
     # slow scans. Wraps state read in a lambda so each tick gets fresh data.
