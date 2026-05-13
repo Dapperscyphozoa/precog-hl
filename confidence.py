@@ -161,7 +161,9 @@ def size_multiplier(score_val, regime=None):
     lowering standards — aligning threshold with measured score distribution.
     """
     TRENDING = ('bull-calm', 'bull-storm', 'bear-calm', 'bear-storm')
-    floor = 30 if regime in TRENDING else 6
+    # 2026-05-13: Temporarily lowered trending floor 30→15 to validate pipeline
+    # with a real fill at $10 notional. Revert to 30 after successful test.
+    floor = 15 if regime in TRENDING else 6
     if score_val < floor: return 0.0
     if score_val < 50: return 1.0
     if score_val < 65: return 2.0
