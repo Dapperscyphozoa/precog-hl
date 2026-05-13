@@ -2638,6 +2638,69 @@ def stats_reset():
     save_state(state)
     return jsonify({'status':'stats reset'})
 
+@app.route('/admin/wipe_history', methods=['POST', 'GET'])
+def admin_wipe_history():
+    """FULL data wipe: trade ledger CSV + state stats. Requires ?secret=
+    
+    Wipes:
+      /var/data/trades.csv  → truncated (header only)
+      /var/data/trades.csv.migrated → kept (don't re-trigger migration)
+      state.stats → zeroed
+    
+    Open positions are NOT touched. Lifetime totals reset to zero.
+    Use case: clear bug-data from before fixes shipped.
+    """
+    if flask_request.args.get('secret') != WEBHOOK_SECRET:
+        return jsonify({'err': 'unauthorized'}), 401
+    
+    import os as _os
+    results = {}
+    
+    # 1. Wipe trades CSV — keep just the header row
+    try:
+        if _os.path.exists(TRADE_LOG):
+            # Read header first
+            with open(TRADE_LOG) as f:
+                header = f.readline()
+            size_before = _os.path.getsize(TRADE_LOG)
+            with open(TRADE_LOG, 'w') as f:
+                f.write(header)
+            size_after = _os.path.getsize(TRADE_LOG)
+            results['trades_csv'] = {'bytes_before': size_before, 'bytes_after': size_after,
+                                       'deleted_bytes': size_before - size_after}
+        else:
+            results['trades_csv'] = {'note': 'file not present'}
+    except Exception as e:
+        results['trades_csv'] = {'error': str(e)}
+    
+    # 2. Reset state stats
+    try:
+        state = load_state()
+        state['stats'] = {'by_engine': {}, 'by_hour': {}, 'by_side': {}, 'by_coin': {},
+                          'by_conf': {}, 'total_wins': 0, 'total_losses': 0, 'total_pnl': 0.0}
+        state['consec_losses'] = 0
+        state['cb_pause_until'] = 0
+        save_state(state)
+        results['state_stats'] = 'reset'
+    except Exception as e:
+        results['state_stats'] = {'error': str(e)}
+    
+    # 3. Try to reset trade_ledger in-memory index
+    try:
+        import trade_ledger as _tl
+        if hasattr(_tl, '_INDEX'):
+            _tl._INDEX = {
+                'by_trade_id': {},
+                'open_trades': set(),
+                'closed_trades': [],
+            }
+            results['trade_ledger_index'] = 'cleared'
+    except Exception as e:
+        results['trade_ledger_index'] = {'error': str(e)}
+    
+    log(f"ADMIN WIPE: {results}")
+    return jsonify({'ok': True, 'results': results})
+
 @app.route('/stats', methods=['GET'])
 def stats_endpoint():
     """Live stats: per-engine, per-hour, per-side, per-coin, per-conf."""
