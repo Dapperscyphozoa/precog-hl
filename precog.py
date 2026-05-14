@@ -7746,6 +7746,15 @@ def calc_size(equity, px, risk_pct, risk_mult=1.0, coin=None, side='BUY'):
     _live_force = _force_notional_usd_live()
     if _live_force > 0:
         raw = _live_force / px
+    # 2026-05-14: FORCE_NOTIONAL_PCT — size as % of live equity (overrides USD).
+    # Recomputed every call so it scales with account as it compounds.
+    # e.g. FORCE_NOTIONAL_PCT=0.03 → notional = 3% of equity per fire.
+    try:
+        _force_pct = float(os.environ.get('FORCE_NOTIONAL_PCT', '0').strip() or '0')
+    except (TypeError, ValueError):
+        _force_pct = 0.0
+    if _force_pct > 0 and equity and equity > 0:
+        raw = (equity * _force_pct) / px
     if raw>=100: return round(raw,0)
     if raw>=10:  return round(raw,1)
     if raw>=1:   return round(raw,2)
@@ -8382,19 +8391,48 @@ def _place_impl(coin, is_buy, size, cloid=None):
             _stop_pct = 0.002
         # BUY: stop ABOVE px (confirm upward momentum). SELL: stop BELOW px.
         _stop_px = round_price(coin, px * (1 + _stop_pct) if is_buy else px * (1 - _stop_pct))
+        # Re-round size against the STOP price (not signal px) — tick/lot rules
+        # can differ enough at the offset price to produce an invalid size.
+        _ts_size = round_size(coin, size)
+        if _ts_size is None or _ts_size <= 0 or _ts_size * _stop_px < 10.0:
+            log(f"TAKER_STOP {coin} size invalid ({_ts_size} @ {_stop_px}) — taker IoC fallback")
+            _px2 = get_mid(coin) or px
+            _slip = round_price(coin, _px2 * (1.005 if is_buy else 0.995))
+            try:
+                r = exchange.order(coin, is_buy, round_size(coin, size), _slip,
+                                   {'limit': {'tif': 'Ioc'}}, reduce_only=False, cloid=_cloid_obj)
+                st = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+                if 'error' in st:
+                    log(f"TAKER_STOP->IoC {coin} rejected: {st['error']}"); return None
+                log(f"TAKER_STOP->IoC {coin} {'BUY' if is_buy else 'SELL'}: {st}")
+                return _px2
+            except Exception as _e:
+                log(f"TAKER_STOP->IoC err {coin}: {_e}"); return None
         # HL trigger geometry: is_buy + tpsl='sl' triggers on price RISE;
         # is_buy=False + tpsl='sl' triggers on price FALL. reduce_only=False
         # makes it a stop-ENTRY (opens position) rather than a stop-loss.
         try:
-            r = exchange.order(coin, is_buy, size, _stop_px,
+            r = exchange.order(coin, is_buy, _ts_size, _stop_px,
                                {'trigger': {'triggerPx': _stop_px, 'isMarket': True, 'tpsl': 'sl'}},
                                reduce_only=False, cloid=_cloid_obj)
             status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
             if 'error' in status:
-                log(f"TAKER_STOP {coin} rejected: {status['error']} @ {_stop_px}")
-                return None
+                # Stop rejected — fall through to taker IoC rather than dropping the signal.
+                log(f"TAKER_STOP {coin} rejected: {status['error']} @ {_stop_px} — taker IoC fallback")
+                _px2 = get_mid(coin) or px
+                _slip = round_price(coin, _px2 * (1.005 if is_buy else 0.995))
+                try:
+                    r2 = exchange.order(coin, is_buy, _ts_size, _slip,
+                                        {'limit': {'tif': 'Ioc'}}, reduce_only=False, cloid=_cloid_obj)
+                    st2 = r2.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r2 else {}
+                    if 'error' in st2:
+                        log(f"TAKER_STOP->IoC {coin} rejected: {st2['error']}"); return None
+                    log(f"TAKER_STOP->IoC {coin} {'BUY' if is_buy else 'SELL'}: {st2}")
+                    return _px2
+                except Exception as _e2:
+                    log(f"TAKER_STOP->IoC err {coin}: {_e2}"); return None
             oid = status.get('resting',{}).get('oid') or status.get('filled',{}).get('oid')
-            log(f"TAKER_STOP {coin} {'BUY' if is_buy else 'SELL'} {size}@{_stop_px} "
+            log(f"TAKER_STOP {coin} {'BUY' if is_buy else 'SELL'} {_ts_size}@{_stop_px} "
                 f"(confirm {_stop_pct*100:.1f}%): {status}")
             if 'filled' in status:
                 return _stop_px
