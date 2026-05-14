@@ -8367,6 +8367,61 @@ def _place_impl(coin, is_buy, size, cloid=None):
         maker_px = round_price(coin, edge)
     else:
         maker_px = round_price(coin, px * (1 - MAKER_OFFSET) if is_buy else px * (1 + MAKER_OFFSET))
+    # ─── 2026-05-14: TAKER STOP-ENTRY MODE ──────────────────────────────────
+    # ENTRY_MODE=taker_stop: skip maker entirely. Place a taker stop-trigger
+    # 0.2% in the signal direction (TAKER_STOP_PCT, default 0.002). Only fills
+    # if price CONFIRMS the signal by moving 0.2% our way — momentum filter.
+    # Backtest 2026-05-14: <1min holds had 12% WR (entered at signal px, wicked
+    # instantly). Direction calls were ~43% either way = coin-flip. A 0.2%
+    # confirmation buffer filters fakeouts without killing trade rate.
+    # Fills as taker on trigger (reliable, no maker-no-fill problem).
+    if os.environ.get('ENTRY_MODE', '').lower() == 'taker_stop':
+        try:
+            _stop_pct = float(os.environ.get('TAKER_STOP_PCT', '0.002'))
+        except (TypeError, ValueError):
+            _stop_pct = 0.002
+        # BUY: stop ABOVE px (confirm upward momentum). SELL: stop BELOW px.
+        _stop_px = round_price(coin, px * (1 + _stop_pct) if is_buy else px * (1 - _stop_pct))
+        # HL trigger geometry: is_buy + tpsl='sl' triggers on price RISE;
+        # is_buy=False + tpsl='sl' triggers on price FALL. reduce_only=False
+        # makes it a stop-ENTRY (opens position) rather than a stop-loss.
+        try:
+            r = exchange.order(coin, is_buy, size, _stop_px,
+                               {'trigger': {'triggerPx': _stop_px, 'isMarket': True, 'tpsl': 'sl'}},
+                               reduce_only=False, cloid=_cloid_obj)
+            status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
+            if 'error' in status:
+                log(f"TAKER_STOP {coin} rejected: {status['error']} @ {_stop_px}")
+                return None
+            oid = status.get('resting',{}).get('oid') or status.get('filled',{}).get('oid')
+            log(f"TAKER_STOP {coin} {'BUY' if is_buy else 'SELL'} {size}@{_stop_px} "
+                f"(confirm {_stop_pct*100:.1f}%): {status}")
+            if 'filled' in status:
+                return _stop_px
+            # Poll for trigger+fill. Window = MAKER_FALLBACK_SEC (reuse the knob).
+            for wait_s in range(MAKER_FALLBACK_SEC):
+                time.sleep(1)
+                try:
+                    state_now = info.user_state(WALLET)
+                    has_pos = any(p['position'].get('coin')==coin and float(p['position'].get('szi',0))!=0
+                                  for p in state_now.get('assetPositions',[]))
+                    if has_pos:
+                        log(f"TAKER_STOP fill {coin} after {wait_s+1}s")
+                        return _stop_px
+                except Exception:
+                    pass
+            # Not triggered within window — cancel the resting stop.
+            try:
+                exchange.cancel(coin, oid)
+                log(f"TAKER_STOP {coin} not triggered in {MAKER_FALLBACK_SEC}s, canceled oid={oid}")
+            except Exception as ce:
+                log(f"TAKER_STOP cancel err {coin}: {ce}")
+            return None
+        except Exception as e:
+            log(f"TAKER_STOP place err {coin}: {e}")
+            return None
+    # ─── end taker stop-entry mode ──────────────────────────────────────────
+
     try:
         r = exchange.order(coin, is_buy, size, maker_px, {'limit':{'tif':'Alo'}}, reduce_only=False, cloid=_cloid_obj)
         status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
