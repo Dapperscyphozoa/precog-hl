@@ -6844,7 +6844,7 @@ FUNDING_CUT_RATIO = 0.50
 TRAIL_PCT = 0.015          # OOS winner: +250% vs +40% at 0.3%
 TRAIL_TIGHTEN_AFTER_SEC = 7200  # 2h: tighten trail to 0.9% (OOS +77% PnL vs static)
 TRAIL_TIGHTEN_PCT = 0.009          # OOS winner: +250% vs +40% at 0.3%
-MAKER_FALLBACK_SEC = 10
+MAKER_FALLBACK_SEC = int(os.environ.get('MAKER_FALLBACK_SEC', '10'))  # env-tunable: taker_stop confirm window
 MAKER_OFFSET = 0.0015  # OOS winner: +21.22%/day  # 0.1% entry split — OOS +127% PnL (better avg entry)
 
 def _init_hl_with_retry(max_attempts=8):
