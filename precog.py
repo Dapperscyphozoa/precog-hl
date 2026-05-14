@@ -8089,6 +8089,25 @@ def _dispatch_entry(coin, is_buy, size, cloid=None, trade_id=None, engine=None):
         log(f"{coin} blocked: in COIN_BLOCKLIST={sorted(COIN_BLOCKLIST)}")
         return out
 
+    # 2026-05-14: hour-of-day filter (backtest-driven).
+    # 1159-trip dataset analysis showed deadhour clusters at UTC
+    # [01,02,08,16,21,22,23] bled cumulative -$25 with sub-40% WR.
+    # Env-tunable via SKIP_HOURS_UTC=01,02,08,16,21,22,23 (default empty
+    # for backwards compat; set explicitly to enable).
+    try:
+        _skip_hrs_env = os.environ.get('SKIP_HOURS_UTC', '').strip()
+        if _skip_hrs_env:
+            _skip_hrs = {int(h.strip()) for h in _skip_hrs_env.split(',') if h.strip().isdigit()}
+            import datetime as _dt_skip
+            _cur_hr = _dt_skip.datetime.now(_dt_skip.timezone.utc).hour
+            if _cur_hr in _skip_hrs:
+                out['reason'] = 'hour_skip'
+                log(f"{coin} blocked: hour={_cur_hr} in SKIP_HOURS_UTC={sorted(_skip_hrs)}")
+                return out
+    except Exception:
+        pass
+
+
     # 2026-04-27: per-coin recent-loss circuit breaker. If a coin has 2+
     # consecutive losses in the last 4h, lock it out for 4h from the most
     # recent close. Bleeders (W, UMA, STX) were eating winners' gains —
