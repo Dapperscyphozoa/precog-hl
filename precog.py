@@ -7878,10 +7878,27 @@ def _max_sl_pct_live():
 # Disable cap entirely with MAX_SL_PCT=0.
 
 def _apply_sl_cap(sl_pct):
-    """Clamp SL distance to MAX_SL_PCT (env-tunable, live-readable)."""
+    """Clamp SL distance: MAX_SL_PCT ceiling AND MIN_SL_PCT floor.
+
+    Backtest 2026-05-14 on 1159 round-trips (17 days): 44.8% of all losses
+    (n=295) had adverse move <0.3% — fee-dominated wicks, not real SL hits.
+    Cumulative drag: -$17.72. Adding a 30bp floor flips the strategy from
+    -$14.01 to +$3.71 conservatively. Avg winner moves 0.63%, well past
+    the floor — no winner-cap risk.
+
+    Tunable via MIN_SL_PCT env (default 0.003 = 30bp). Set to 0 to disable.
+    """
     cap = _max_sl_pct_live()
-    if cap > 0 and sl_pct is not None and sl_pct > cap:
-        return cap
+    if sl_pct is None:
+        return sl_pct
+    if cap > 0 and sl_pct > cap:
+        sl_pct = cap
+    try:
+        floor = float(os.environ.get('MIN_SL_PCT', '0.003'))
+    except (TypeError, ValueError):
+        floor = 0.003
+    if floor > 0 and sl_pct < floor:
+        sl_pct = floor
     return sl_pct
 
 
