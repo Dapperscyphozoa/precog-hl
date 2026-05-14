@@ -8412,9 +8412,22 @@ def _place_impl(coin, is_buy, size, cloid=None):
         # is_buy=False + tpsl='sl' triggers on price FALL. reduce_only=False
         # makes it a stop-ENTRY (opens position) rather than a stop-loss.
         try:
-            r = exchange.order(coin, is_buy, _ts_size, _stop_px,
-                               {'trigger': {'triggerPx': _stop_px, 'isMarket': True, 'tpsl': 'sl'}},
-                               reduce_only=False, cloid=_cloid_obj)
+            # 2026-05-14: retry-with-backoff on HL 429. Previously a 429 on the
+            # stop placement dropped the signal entirely (saw it kill ADA, LTC).
+            r = None
+            for _attempt in range(4):
+                try:
+                    r = exchange.order(coin, is_buy, _ts_size, _stop_px,
+                                       {'trigger': {'triggerPx': _stop_px, 'isMarket': True, 'tpsl': 'sl'}},
+                                       reduce_only=False, cloid=_cloid_obj)
+                    break
+                except Exception as _re:
+                    if '429' in str(_re) and _attempt < 3:
+                        _bo = 0.5 * (2 ** _attempt)
+                        log(f"TAKER_STOP {coin} 429 — backoff {_bo}s (attempt {_attempt+1}/4)")
+                        time.sleep(_bo)
+                        continue
+                    raise
             status = r.get('response',{}).get('data',{}).get('statuses',[{}])[0] if r else {}
             if 'error' in status:
                 # Stop rejected — fall through to taker IoC rather than dropping the signal.
